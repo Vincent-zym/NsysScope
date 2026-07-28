@@ -1,5 +1,6 @@
 node_modules/
 .next/
+dist/
 .open-next/
 *.log
 .DS_Store
