@@ -55,3 +55,5 @@ class JobView(BaseModel):
     output_dir: str
     analysis_url: str | None = None
     error: str | None = None
+    last_activity_at: datetime | None = None
+    idle_seconds: int | None = None

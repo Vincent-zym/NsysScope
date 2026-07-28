@@ -109,6 +109,9 @@ function JobDialog({ open, onClose, onLoaded }) {
   });
   const [job, setJob] = useState(null);
   const [logs, setLogs] = useState([]);
+  const logCursor = useRef(0);
+  const analysisLoaded = useRef(false);
+  const [logHasMore, setLogHasMore] = useState(true);
   const [error, setError] = useState("");
   const terminal = ["succeeded", "failed", "cancelled"];
 
@@ -119,32 +122,36 @@ function JobDialog({ open, onClose, onLoaded }) {
   }, [open]);
 
   useEffect(() => {
-    if (!job || terminal.includes(job.status)) return;
+    if (!job || (terminal.includes(job.status) && !logHasMore)) return;
     const timer = setTimeout(async () => {
       try {
         const headers = { "X-NsysScope-Token": token };
         const [jobResponse, logResponse] = await Promise.all([
           fetch(`${api}/api/jobs/${job.id}`, { headers }),
-          fetch(`${api}/api/jobs/${job.id}/logs?after=${logs.length}`, { headers }),
+          fetch(`${api}/api/jobs/${job.id}/logs?after=${logCursor.current}&limit=200`, { headers }),
         ]);
         if (!jobResponse.ok) throw new Error(`任务状态请求失败 (${jobResponse.status})`);
         const next = await jobResponse.json();
         setJob(next);
         if (logResponse.ok) {
           const payload = await logResponse.json();
-          setLogs((current) => [...current, ...payload.lines]);
+          logCursor.current = payload.next;
+          setLogHasMore(payload.has_more);
+          setLogs((current) => [...current, ...payload.lines].slice(-500));
         }
-        if (next.status === "succeeded") {
+        if (next.status === "succeeded" && !analysisLoaded.current) {
           const result = await fetch(`${api}/api/jobs/${next.id}/analysis`, { headers });
           if (!result.ok) throw new Error("分析产物读取失败");
-          onLoaded(await result.json());
+          const payload = await result.json();
+          analysisLoaded.current = true;
+          onLoaded(payload);
         }
       } catch (cause) {
         setError(cause.message);
       }
     }, 1600);
     return () => clearTimeout(timer);
-  }, [api, job, logs.length, onLoaded, token]);
+  }, [api, job, logHasMore, onLoaded, token]);
 
   if (!open) return null;
 
@@ -153,6 +160,9 @@ function JobDialog({ open, onClose, onLoaded }) {
     event.preventDefault();
     setError("");
     setLogs([]);
+    logCursor.current = 0;
+    analysisLoaded.current = false;
+    setLogHasMore(true);
     localStorage.setItem("nsysscope.api", api.replace(/\/$/, ""));
     sessionStorage.setItem("nsysscope.token", token);
     try {
@@ -171,6 +181,38 @@ function JobDialog({ open, onClose, onLoaded }) {
       setJob(body);
     } catch (cause) {
       setError(`${cause.message}。生产页面连接本地 HTTP 服务时，建议使用 HTTPS 反向代理或在本地运行前端。`);
+    }
+  }
+
+  async function retryConversion() {
+    setError("");
+    try {
+      const response = await fetch(`${api}/api/jobs/${job.id}/retry-conversion`, {
+        method: "POST",
+        headers: { "X-NsysScope-Token": token },
+      });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.detail || `重试失败 (${response.status})`);
+      analysisLoaded.current = false;
+      setLogHasMore(true);
+      setJob(body);
+    } catch (cause) {
+      setError(cause.message);
+    }
+  }
+
+  async function cancelJob() {
+    setError("");
+    try {
+      const response = await fetch(`${api}/api/jobs/${job.id}/cancel`, {
+        method: "POST",
+        headers: { "X-NsysScope-Token": token },
+      });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.detail || `取消失败 (${response.status})`);
+      setJob(body);
+    } catch (cause) {
+      setError(cause.message);
     }
   }
 
@@ -206,10 +248,13 @@ function JobDialog({ open, onClose, onLoaded }) {
       </form> : <div className="job-progress">
         <div className="job-status"><span>{job.status.toUpperCase()}</span><b>{job.message}</b><em>{job.progress}%</em></div>
         <div className="progress-track"><i style={{ width: `${job.progress}%` }} /></div>
+        {job.idle_seconds > 180 && <div className="activity-warning">执行器超过 {Math.floor(job.idle_seconds / 60)} 分钟没有新输出，请检查日志；任务仍在运行，可随时取消。</div>}
         <div className="job-log">{logs.length ? logs.map((line, index) => <code key={`${index}-${line}`}>{line}</code>) : <code>等待执行器输出…</code>}</div>
         {(error || job.error) && <div className="error">{error || job.error}</div>}
         <div className="dialog-actions">
-          <button onClick={() => { setJob(null); setLogs([]); setError(""); }}>新建任务</button>
+          <button onClick={() => { setJob(null); setLogs([]); logCursor.current = 0; analysisLoaded.current = false; setLogHasMore(true); setError(""); }}>新建任务</button>
+          {!terminal.includes(job.status) && <button onClick={cancelJob}>取消任务</button>}
+          {job.status === "failed" && <button onClick={retryConversion}>仅重试转换</button>}
           <button className="primary" onClick={onClose}>{job.status === "succeeded" ? "查看结果" : "后台运行"}</button>
         </div>
       </div>}

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hmac
 import json
 import secrets
+from datetime import UTC, datetime
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
@@ -34,6 +35,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=401, detail="invalid API token")
 
     def view(job: dict) -> JobView:
+        updated = job["updated_at"]
+        if isinstance(updated, str):
+            updated = datetime.fromisoformat(updated)
+        activity = updated
+        log_path = Path(job["output_dir"]) / "job.log"
+        if log_path.exists():
+            log_activity = datetime.fromtimestamp(log_path.stat().st_mtime, UTC)
+            activity = max(activity, log_activity)
+        job["last_activity_at"] = activity
+        job["idle_seconds"] = (
+            max(0, int((datetime.now(UTC) - activity).total_seconds()))
+            if job["status"] not in {"succeeded", "failed", "cancelled"} else None
+        )
         return JobView.model_validate(job)
 
     @app.get("/api/health")
@@ -79,14 +93,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="job not found") from exc
 
     @app.get("/api/jobs/{job_id}/logs", dependencies=[Depends(authorize)])
-    def get_logs(job_id: str, after: int = Query(default=0, ge=0)) -> dict:
+    def get_logs(
+        job_id: str,
+        after: int = Query(default=0, ge=0),
+        limit: int = Query(default=200, ge=1, le=1000),
+    ) -> dict:
         try:
             job = store.get(job_id)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="job not found") from exc
         path = Path(job["output_dir"]) / "job.log"
         lines = path.read_text(errors="replace").splitlines() if path.exists() else []
-        return {"after": after, "next": len(lines), "lines": lines[after:]}
+        end = min(len(lines), after + limit)
+        return {
+            "after": after,
+            "next": end,
+            "total": len(lines),
+            "has_more": end < len(lines),
+            "lines": lines[after:end],
+        }
 
     @app.get("/api/jobs/{job_id}/analysis", dependencies=[Depends(authorize)])
     def get_analysis(job_id: str) -> FileResponse:
@@ -113,6 +138,34 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return view(store.update(
             job_id, status="cancelled", progress=100, message="任务已取消",
         ))
+
+    @app.post(
+        "/api/jobs/{job_id}/retry-conversion",
+        response_model=JobView,
+        dependencies=[Depends(authorize)],
+    )
+    def retry_conversion(job_id: str) -> JobView:
+        try:
+            job = store.get(job_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="job not found") from exc
+        if job["status"] != "failed":
+            raise HTTPException(status_code=409, detail="only failed jobs can retry conversion")
+        job_dir = Path(job["output_dir"])
+        prefix = JobCreate.model_validate(job["request"]).prefix
+        try:
+            runner.find_package(job_dir, prefix)
+        except RuntimeError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail="the failed job has no complete six-table package",
+            ) from exc
+        queued = store.update(
+            job_id, status="converting", progress=85,
+            message="转换重试已进入队列", error="",
+        )
+        runner.submit_conversion_retry(job_id)
+        return view(queued)
 
     app.state.settings = settings
     app.state.store = store

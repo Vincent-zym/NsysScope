@@ -39,6 +39,9 @@ class JobRunner:
     def submit(self, job_id: str) -> None:
         self.pool.submit(self.run, job_id)
 
+    def submit_conversion_retry(self, job_id: str) -> None:
+        self.pool.submit(self.retry_conversion, job_id)
+
     def log(self, job_dir: Path, message: str) -> None:
         with (job_dir / "job.log").open("a", encoding="utf-8") as handle:
             handle.write(message.rstrip() + "\n")
@@ -77,9 +80,7 @@ class JobRunner:
                 self.convert(package, job_dir / "analysis.json", request.prefix)
 
             self.state(job_id, job_dir, "validating", 95, "正在校验前端数据契约")
-            payload = json.loads((job_dir / "analysis.json").read_text())
-            if payload.get("schemaVersion") != "1.0" or not payload.get("operators"):
-                raise RuntimeError("analysis.json schema or operators are invalid")
+            self.validate_analysis(job_dir / "analysis.json")
             self.state(job_id, job_dir, "succeeded", 100, "分析完成")
         except Exception as exc:
             self.log(job_dir, traceback.format_exc())
@@ -88,6 +89,25 @@ class JobRunner:
                     job_id, status="failed", progress=100,
                     message="分析失败", error=str(exc),
                 )
+
+    def retry_conversion(self, job_id: str) -> None:
+        job = self.store.get(job_id)
+        request = JobCreate.model_validate(job["request"])
+        job_dir = Path(job["output_dir"])
+        try:
+            self.state(job_id, job_dir, "converting", 88, "正在重试构建前端 analysis.json")
+            package = self.find_package(job_dir, request.prefix)
+            prefix = self.detect_prefix(package, request.prefix)
+            self.convert(package, job_dir / "analysis.json", prefix)
+            self.state(job_id, job_dir, "validating", 95, "正在校验前端数据契约")
+            self.validate_analysis(job_dir / "analysis.json")
+            self.state(job_id, job_dir, "succeeded", 100, "分析完成")
+        except Exception as exc:
+            self.log(job_dir, traceback.format_exc())
+            self.store.update(
+                job_id, status="failed", progress=100,
+                message="转换重试失败", error=str(exc),
+            )
 
     def resolve_inputs(self, request: JobCreate) -> dict[str, Path | None]:
         values = {
@@ -213,6 +233,12 @@ Requirements:
         completed = subprocess.run(command, text=True, capture_output=True)
         if completed.returncode:
             raise RuntimeError(completed.stderr.strip() or "analysis conversion failed")
+
+    @staticmethod
+    def validate_analysis(path: Path) -> None:
+        payload = json.loads(path.read_text())
+        if payload.get("schemaVersion") != "1.0" or not payload.get("operators"):
+            raise RuntimeError("analysis.json schema or operators are invalid")
 
     @staticmethod
     def find_package(job_dir: Path, prefix: str) -> Path:

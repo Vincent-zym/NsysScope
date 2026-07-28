@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 import time
 from pathlib import Path
 
@@ -7,6 +8,7 @@ from fastapi.testclient import TestClient
 
 from backend.app import create_app
 from backend.config import Settings
+from scripts.build_analysis_json import included_devices, stable_sample_count
 
 
 PROJECT = Path(__file__).resolve().parents[1]
@@ -42,6 +44,7 @@ def test_existing_package_job(tmp_path: Path) -> None:
         "stage": "prefill",
         "hardware": "Nvidia B200",
         "existing_package_path": str(PACKAGE),
+        "prefix": "glm52",
     })
     assert response.status_code == 200, response.text
     job = response.json()
@@ -72,3 +75,68 @@ def test_auth_and_path_boundary(tmp_path: Path) -> None:
         "existing_package_path": "/etc",
     })
     assert rejected.status_code == 422
+
+
+def test_converter_accepts_current_stats_schema() -> None:
+    stats = {
+        "accepted_full_template_sample_count": 1188,
+        "per_device_sample_counts": {"0": 147, "1": 156},
+    }
+    assert stable_sample_count(stats, {}) == 1188
+    assert included_devices(stats, {}) == [0, 1]
+
+
+def test_log_pagination_and_conversion_retry(tmp_path: Path) -> None:
+    if not PACKAGE.exists():
+        return
+    application = create_app(settings(tmp_path))
+    client = TestClient(application)
+    headers = {"X-NsysScope-Token": "test-token"}
+    response = client.post("/api/jobs", headers=headers, json={
+        "mode": "existing_package",
+        "model_name": "GLM5.2",
+        "stage": "prefill",
+        "hardware": "Nvidia B200",
+        "existing_package_path": str(PACKAGE),
+        "prefix": "glm52",
+    })
+    job = response.json()
+    for _ in range(100):
+        job = client.get(f"/api/jobs/{job['id']}", headers=headers).json()
+        if job["status"] in {"succeeded", "failed"}:
+            break
+        time.sleep(0.05)
+    assert job["status"] == "succeeded", job
+
+    log_path = Path(job["output_dir"]) / "job.log"
+    with log_path.open("a") as handle:
+        handle.writelines(f"line-{index}\n" for index in range(7))
+    page = client.get(
+        f"/api/jobs/{job['id']}/logs?after=0&limit=2", headers=headers,
+    ).json()
+    assert page["next"] == 2
+    assert page["has_more"] is True
+    assert len(page["lines"]) == 2
+
+    Path(job["output_dir"], "analysis.json").unlink()
+    for source in [
+        *PACKAGE.glob("glm52_*"),
+        PACKAGE / "position_operator_stats.json",
+        PACKAGE / "validation_report.json",
+    ]:
+        if source.is_file():
+            shutil.copy2(source, Path(job["output_dir"]) / source.name)
+    application.state.store.update(
+        job["id"], status="failed", progress=100, message="simulated converter failure",
+    )
+    retried = client.post(
+        f"/api/jobs/{job['id']}/retry-conversion", headers=headers,
+    )
+    assert retried.status_code == 200, retried.text
+    for _ in range(100):
+        job = client.get(f"/api/jobs/{job['id']}", headers=headers).json()
+        if job["status"] in {"succeeded", "failed"}:
+            break
+        time.sleep(0.05)
+    assert job["status"] == "succeeded", job
+    assert Path(job["output_dir"], "analysis.json").exists()

@@ -33,7 +33,15 @@ NsysScope separates report analysis from visualization.
 - persists jobs in SQLite and runs them with bounded concurrency;
 - exports `.nsys-rep` with `nsys`;
 - invokes the installed analysis skill through non-interactive `codex exec`;
-- streams logs and exposes the resulting `analysis.json`.
+- exposes cursor-paginated logs, activity timestamps and the resulting
+  `analysis.json`;
+- can retry only the deterministic conversion/validation stage when a completed
+  six-table package survives an agent-side failure.
+
+The package converter accepts both the legacy `accepted_unit_count` sidecar and
+the current `accepted_full_template_sample_count` schema. It prefers package-local
+manifest, semantic-map, statistics and validation files so copied packages do
+not depend on stale absolute paths.
 
 Codex execution is disabled by default. Enable it only on a controlled runner
 with `NSYSSCOPE_CODEX_ENABLED=true`. The dashboard can also submit
