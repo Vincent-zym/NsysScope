@@ -10,6 +10,7 @@ ALLOWED_ROOTS="${NSYSSCOPE_ALLOWED_ROOTS:-$(dirname "$PROJECT_DIR")}"
 ANALYZER_PID=""
 CODEX_READY=false
 COMATE_BIN="${NSYSSCOPE_COMATE_BIN:-}"
+COMATE_PLATFORM="${NSYSSCOPE_COMATE_PLATFORM:-internal}"
 
 say() {
   printf '[NsysScope] %s\n' "$*"
@@ -57,6 +58,15 @@ discover_zulu() {
     -type f -perm -111 2>/dev/null | sort | tail -1
 }
 
+run_comate_cli() {
+  if [[ "$COMATE_PLATFORM" == "internal" ]]; then
+    env -u HTTPS_PROXY -u HTTP_PROXY -u https_proxy -u http_proxy \
+      -u ALL_PROXY -u all_proxy "$COMATE_BIN" "$@"
+  else
+    "$COMATE_BIN" "$@"
+  fi
+}
+
 doctor() {
   local failed=0 provider_ready=0 comate_status comate_status_code
   say "检查运行环境"
@@ -80,7 +90,7 @@ doctor() {
   COMATE_BIN="$(discover_zulu)"
   if [[ -n "$COMATE_BIN" ]]; then
     set +e
-    comate_status="$("$COMATE_BIN" status 2>&1)"
+    comate_status="$(run_comate_cli status 2>&1)"
     comate_status_code=$?
     set -e
     if [[ "$comate_status_code" -eq 0 ]] \
@@ -172,6 +182,7 @@ start() {
     NSYSSCOPE_CODEX_ENABLED="$CODEX_READY" \
     NSYSSCOPE_COMATE_ENABLED="$([[ -n "$COMATE_BIN" ]] && printf true || printf false)" \
     NSYSSCOPE_COMATE_BIN="$COMATE_BIN" \
+    NSYSSCOPE_COMATE_PLATFORM="$COMATE_PLATFORM" \
     NSYSSCOPE_CORS_ORIGINS="http://127.0.0.1:$ui_port,http://localhost:$ui_port" \
     NSYSSCOPE_MAX_WORKERS="${NSYSSCOPE_MAX_WORKERS:-1}" \
     NSYSSCOPE_SKILL_DIR="$SKILL_DIR" \
@@ -225,10 +236,18 @@ login_provider() {
     comate)
       COMATE_BIN="$(discover_zulu)"
       [[ -n "$COMATE_BIN" ]] || fail "找不到 Comate Zulu CLI"
-      exec "$COMATE_BIN" login --browser
+      COMATE_PLATFORM="${3:-$COMATE_PLATFORM}"
+      [[ "$COMATE_PLATFORM" == "internal" || "$COMATE_PLATFORM" == "saas" ]] \
+        || fail "Comate 平台只能是 internal 或 saas"
+      if [[ "$COMATE_PLATFORM" == "internal" ]]; then
+        exec env -u HTTPS_PROXY -u HTTP_PROXY -u https_proxy -u http_proxy \
+          -u ALL_PROXY -u all_proxy "$COMATE_BIN" login \
+          --platform internal --no-browser --verbose
+      fi
+      exec "$COMATE_BIN" login --platform saas --no-browser --verbose
       ;;
     *)
-      fail "请指定 Provider：./nsysscope login [codex|comate]"
+      fail "请指定 Provider：./nsysscope login [codex|comate]；Comate 可追加 [internal|saas]"
       ;;
   esac
 }
@@ -244,7 +263,7 @@ case "$COMMAND" in
     login_provider "$@"
     ;;
   *)
-    printf 'Usage: %s [start|doctor|login codex|login comate]\n' "$0" >&2
+    printf 'Usage: %s [start|doctor|login codex|login comate [internal|saas]]\n' "$0" >&2
     exit 2
     ;;
 esac

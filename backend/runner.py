@@ -201,6 +201,7 @@ class JobRunner:
             command.extend(["--model", self.settings.comate_model])
         self.run_process(
             job_id, job_dir, command, redacted_values={prompt},
+            environment=self.comate_environment(),
         )
 
     def stage_comate_skill(self, job_dir: Path) -> Path:
@@ -258,6 +259,7 @@ Requirements:
     def run_process(
         self, job_id: str, job_dir: Path, command: list[str], stdin: str | None = None,
         redacted_values: set[str] | None = None,
+        environment: dict[str, str] | None = None,
     ) -> None:
         hidden = redacted_values or set()
         displayed = ["<prompt>" if item in hidden else item for item in command]
@@ -266,7 +268,7 @@ Requirements:
             command, stdin=subprocess.PIPE if stdin is not None else None,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, bufsize=1, cwd=job_dir,
-            env={**os.environ, "NO_COLOR": "1"},
+            env=environment or {**os.environ, "NO_COLOR": "1"},
         )
         with self.lock:
             self.processes[job_id] = process
@@ -290,6 +292,13 @@ Requirements:
             "codex": self._codex_status(),
             "comate": self._comate_status(),
         }
+
+    def comate_environment(self) -> dict[str, str]:
+        environment = {**os.environ, "NO_COLOR": "1"}
+        if self.settings.comate_platform == "internal":
+            for key in ("HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy", "ALL_PROXY", "all_proxy"):
+                environment.pop(key, None)
+        return environment
 
     def _codex_status(self) -> dict[str, object]:
         if not self.settings.codex_enabled:
@@ -327,6 +336,7 @@ Requirements:
         try:
             completed = subprocess.run(
                 command, text=True, capture_output=True, timeout=5,
+                env=self.comate_environment(),
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             return {"enabled": True, "ready": False, "message": f"Comate 状态检查失败：{exc}"}

@@ -34,6 +34,7 @@ class Settings:
     comate_bin: str
     comate_username: str
     comate_model: str
+    comate_platform: str
     comate_timeout_seconds: int
     nsys_bin: str
     skill_dir: Path
@@ -64,6 +65,7 @@ class Settings:
             comate_bin=comate_bin,
             comate_username=os.getenv("NSYSSCOPE_COMATE_USERNAME", ""),
             comate_model=os.getenv("NSYSSCOPE_COMATE_MODEL", ""),
+            comate_platform=os.getenv("NSYSSCOPE_COMATE_PLATFORM", "internal").lower(),
             comate_timeout_seconds=max(
                 60, int(os.getenv("NSYSSCOPE_COMATE_TIMEOUT_SECONDS", "7200")),
             ),
@@ -79,6 +81,8 @@ class Settings:
         )
 
     def prepare(self) -> None:
+        if self.comate_platform not in {"internal", "saas"}:
+            raise ValueError("NSYSSCOPE_COMATE_PLATFORM must be internal or saas")
         self.data_dir.mkdir(parents=True, exist_ok=True)
         (self.data_dir / "jobs").mkdir(exist_ok=True)
 

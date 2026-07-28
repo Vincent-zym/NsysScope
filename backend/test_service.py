@@ -33,6 +33,7 @@ def settings(tmp_path: Path) -> Settings:
         comate_bin="",
         comate_username="",
         comate_model="",
+        comate_platform="internal",
         comate_timeout_seconds=120,
         nsys_bin="nsys",
         skill_dir=Path("/root/.codex/skills/sglang-nsys-static-analysis"),
@@ -155,6 +156,7 @@ def test_comate_provider_end_to_end_with_fake_zulu(tmp_path: Path) -> None:
     fake_zulu = tmp_path / "zulu"
     fake_zulu.write_text(textwrap.dedent(f"""\
         #!/usr/bin/env python3
+        import os
         import shutil
         import sys
         from pathlib import Path
@@ -164,6 +166,11 @@ def test_comate_provider_end_to_end_with_fake_zulu(tmp_path: Path) -> None:
             raise SystemExit(0)
         if sys.argv[1] != "run":
             raise SystemExit(2)
+        if any(key in os.environ for key in (
+            "HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy",
+            "ALL_PROXY", "all_proxy",
+        )):
+            raise SystemExit(3)
         cwd = Path(sys.argv[sys.argv.index("--cwd") + 1])
         package = Path({str(PACKAGE)!r})
         sources = list(package.glob("glm52_*")) + [

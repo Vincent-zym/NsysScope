@@ -53,14 +53,18 @@ Provider readiness is shown in the **新建分析** dialog. Log in when needed:
 
 ```bash
 ./nsysscope login codex
-./nsysscope login comate
+./nsysscope login comate internal
 ```
 
 Restart `./nsysscope start` after login, then select **Codex CLI** or
 **Comate Zulu** in the task form. The launcher discovers the Zulu executable
 shipped with the installed Comate extension; `NSYSSCOPE_COMATE_BIN` can override
-that path. `NSYSSCOPE_COMATE_MODEL` and `NSYSSCOPE_COMATE_TIMEOUT_SECONDS`
-control the optional model and timeout.
+that path. The default Comate platform is `internal`; use
+`./nsysscope login comate saas` for public SaaS. Internal Comate commands bypass
+the shell HTTP proxy because the internal endpoint is directly reachable.
+`NSYSSCOPE_COMATE_PLATFORM`, `NSYSSCOPE_COMATE_MODEL` and
+`NSYSSCOPE_COMATE_TIMEOUT_SECONDS` control the platform, optional model and
+timeout.
 
 ## Create an analysis
 
