@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 const COLORS = [
   "#5b8cff", "#7b61ff", "#15b8a6", "#f59e0b", "#ff6b6b",
@@ -99,6 +99,124 @@ function Insight({ index, title, children, tone = "blue" }) {
   );
 }
 
+function JobDialog({ open, onClose, onLoaded }) {
+  const [api, setApi] = useState("");
+  const [token, setToken] = useState("");
+  const [form, setForm] = useState({
+    mode: "codex_skill", model_name: "", stage: "prefill", hardware: "Nvidia B200",
+    report_path: "", config_path: "", launch_path: "", source_path: "",
+    design_path: "", existing_package_path: "", prefix: "analysis", notes: "",
+  });
+  const [job, setJob] = useState(null);
+  const [logs, setLogs] = useState([]);
+  const [error, setError] = useState("");
+  const terminal = ["succeeded", "failed", "cancelled"];
+
+  useEffect(() => {
+    if (!open) return;
+    setApi(localStorage.getItem("nsysscope.api") || "http://127.0.0.1:8787");
+    setToken(sessionStorage.getItem("nsysscope.token") || "");
+  }, [open]);
+
+  useEffect(() => {
+    if (!job || terminal.includes(job.status)) return;
+    const timer = setTimeout(async () => {
+      try {
+        const headers = { "X-NsysScope-Token": token };
+        const [jobResponse, logResponse] = await Promise.all([
+          fetch(`${api}/api/jobs/${job.id}`, { headers }),
+          fetch(`${api}/api/jobs/${job.id}/logs?after=${logs.length}`, { headers }),
+        ]);
+        if (!jobResponse.ok) throw new Error(`任务状态请求失败 (${jobResponse.status})`);
+        const next = await jobResponse.json();
+        setJob(next);
+        if (logResponse.ok) {
+          const payload = await logResponse.json();
+          setLogs((current) => [...current, ...payload.lines]);
+        }
+        if (next.status === "succeeded") {
+          const result = await fetch(`${api}/api/jobs/${next.id}/analysis`, { headers });
+          if (!result.ok) throw new Error("分析产物读取失败");
+          onLoaded(await result.json());
+        }
+      } catch (cause) {
+        setError(cause.message);
+      }
+    }, 1600);
+    return () => clearTimeout(timer);
+  }, [api, job, logs.length, onLoaded, token]);
+
+  if (!open) return null;
+
+  const set = (key) => (event) => setForm({ ...form, [key]: event.target.value });
+  async function submit(event) {
+    event.preventDefault();
+    setError("");
+    setLogs([]);
+    localStorage.setItem("nsysscope.api", api.replace(/\/$/, ""));
+    sessionStorage.setItem("nsysscope.token", token);
+    try {
+      const payload = { ...form };
+      for (const key of Object.keys(payload)) {
+        if (payload[key] === "") delete payload[key];
+      }
+      const response = await fetch(`${api.replace(/\/$/, "")}/api/jobs`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-NsysScope-Token": token },
+        body: JSON.stringify(payload),
+      });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.detail || `提交失败 (${response.status})`);
+      setApi(api.replace(/\/$/, ""));
+      setJob(body);
+    } catch (cause) {
+      setError(`${cause.message}。生产页面连接本地 HTTP 服务时，建议使用 HTTPS 反向代理或在本地运行前端。`);
+    }
+  }
+
+  return <div className="dialog-backdrop" onMouseDown={onClose}>
+    <section className="job-dialog" onMouseDown={(event) => event.stopPropagation()}>
+      <button className="close" onClick={onClose}>×</button>
+      <span className="drawer-kicker">ANALYZER SERVICE</span>
+      <h2>创建性能分析任务</h2>
+      <p className="dialog-note">路径由运行 Analyzer Service 的机器解析。大型 nsys 无需经过浏览器上传。</p>
+
+      {!job ? <form onSubmit={submit}>
+        <div className="form-grid">
+          <label className="span-2">Analyzer API<input required value={api} onChange={(e) => setApi(e.target.value)} placeholder="http://127.0.0.1:8787" /></label>
+          <label className="span-2">API Token<input type="password" value={token} onChange={(e) => setToken(e.target.value)} autoComplete="off" /></label>
+          <label>执行模式<select value={form.mode} onChange={set("mode")}><option value="codex_skill">Codex Skill Agent</option><option value="existing_package">已有六表分析包</option></select></label>
+          <label>阶段<select value={form.stage} onChange={set("stage")}><option value="prefill">Prefill</option><option value="decode">Decode</option></select></label>
+          <label>模型名称<input required value={form.model_name} onChange={set("model_name")} placeholder="GLM5.2" /></label>
+          <label>硬件<input required value={form.hardware} onChange={set("hardware")} /></label>
+          {form.mode === "existing_package" ? <>
+            <label className="span-2">六表目录<input required value={form.existing_package_path} onChange={set("existing_package_path")} placeholder="/path/to/analysis-package" /></label>
+          </> : <>
+            <label className="span-2">Nsight 报告<input required value={form.report_path} onChange={set("report_path")} placeholder="/path/to/report.nsys-rep" /></label>
+            <label>Model config<input required value={form.config_path} onChange={set("config_path")} placeholder="/path/to/config.json" /></label>
+            <label>部署 YAML / 脚本<input required value={form.launch_path} onChange={set("launch_path")} placeholder="/path/to/launch.yaml" /></label>
+            <label className="span-2">模型源码根目录<input required value={form.source_path} onChange={set("source_path")} placeholder="/path/to/sglang/source" /></label>
+            <label className="span-2">设计说明（可选）<input value={form.design_path} onChange={set("design_path")} placeholder="/path/to/design.md" /></label>
+          </>}
+          <label>输出前缀<input required value={form.prefix} onChange={set("prefix")} pattern="[a-zA-Z0-9_-]+" /></label>
+          <label>补充要求<input value={form.notes} onChange={set("notes")} placeholder="目标层、batch、特殊分支…" /></label>
+        </div>
+        {error && <div className="error">{error}</div>}
+        <div className="dialog-actions"><button type="button" onClick={onClose}>取消</button><button className="primary" type="submit">提交分析</button></div>
+      </form> : <div className="job-progress">
+        <div className="job-status"><span>{job.status.toUpperCase()}</span><b>{job.message}</b><em>{job.progress}%</em></div>
+        <div className="progress-track"><i style={{ width: `${job.progress}%` }} /></div>
+        <div className="job-log">{logs.length ? logs.map((line, index) => <code key={`${index}-${line}`}>{line}</code>) : <code>等待执行器输出…</code>}</div>
+        {(error || job.error) && <div className="error">{error || job.error}</div>}
+        <div className="dialog-actions">
+          <button onClick={() => { setJob(null); setLogs([]); setError(""); }}>新建任务</button>
+          <button className="primary" onClick={onClose}>{job.status === "succeeded" ? "查看结果" : "后台运行"}</button>
+        </div>
+      </div>}
+    </section>
+  </div>;
+}
+
 export default function Dashboard() {
   const [data, setData] = useState(null);
   const [selectedStage, setSelectedStage] = useState(null);
@@ -106,6 +224,7 @@ export default function Dashboard() {
   const [query, setQuery] = useState("");
   const [category, setCategory] = useState("all");
   const [error, setError] = useState("");
+  const [jobOpen, setJobOpen] = useState(false);
   const fileRef = useRef(null);
 
   useEffect(() => {
@@ -145,6 +264,13 @@ export default function Dashboard() {
     }
   }
 
+  const loadAnalysis = useCallback((payload) => {
+    setData(payload);
+    setSelectedStage(null);
+    setSelectedOp(null);
+    setError("");
+  }, []);
+
   if (!data) return <main className="loading"><div className="pulse" />正在载入分析数据…</main>;
 
   const topStage = data.stages[0];
@@ -158,9 +284,10 @@ export default function Dashboard() {
       <header className="topbar">
         <div className="brand"><i>NS</i><div><b>NsysScope</b><span>GPU INFERENCE PROFILER</span></div></div>
         <div className="report-chip"><span className="status-dot" />{data.metadata.model}</div>
-        <button className="import" onClick={() => fileRef.current?.click()}>
-          导入 analysis.json
-        </button>
+        <div className="top-actions">
+          <button className="ghost-action" onClick={() => fileRef.current?.click()}>导入 JSON</button>
+          <button className="import" onClick={() => setJobOpen(true)}>新建分析</button>
+        </div>
         <input ref={fileRef} hidden type="file" accept=".json,application/json" onChange={loadFile} />
       </header>
 
@@ -271,6 +398,7 @@ export default function Dashboard() {
           <h3>完整 CUDA 符号</h3><code>{selectedOp.fullName}</code>
         </aside>
       </div>}
+      <JobDialog open={jobOpen} onClose={() => setJobOpen(false)} onLoaded={loadAnalysis} />
     </main>
   );
 }

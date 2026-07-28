@@ -1,0 +1,95 @@
+from __future__ import annotations
+
+import json
+import sqlite3
+import threading
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+from .models import JobCreate
+
+
+class JobStore:
+    def __init__(self, path: Path):
+        self.path = path
+        self.lock = threading.Lock()
+        self._init()
+
+    def connect(self) -> sqlite3.Connection:
+        connection = sqlite3.connect(self.path)
+        connection.row_factory = sqlite3.Row
+        return connection
+
+    def _init(self) -> None:
+        with self.connect() as db:
+            db.execute("""
+                CREATE TABLE IF NOT EXISTS jobs (
+                    id TEXT PRIMARY KEY,
+                    status TEXT NOT NULL,
+                    progress INTEGER NOT NULL,
+                    message TEXT NOT NULL,
+                    request_json TEXT NOT NULL,
+                    output_dir TEXT NOT NULL,
+                    error TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+            """)
+
+    def create(self, job_id: str, request: JobCreate, output_dir: Path) -> dict[str, Any]:
+        now = datetime.now(UTC).isoformat()
+        with self.lock, self.connect() as db:
+            db.execute(
+                "INSERT INTO jobs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    job_id, "queued", 0, "任务已进入队列",
+                    request.model_dump_json(), str(output_dir), None, now, now,
+                ),
+            )
+        return self.get(job_id)
+
+    def update(
+        self, job_id: str, *, status: str | None = None, progress: int | None = None,
+        message: str | None = None, error: str | None = None,
+    ) -> dict[str, Any]:
+        fields: dict[str, Any] = {"updated_at": datetime.now(UTC).isoformat()}
+        if status is not None:
+            fields["status"] = status
+        if progress is not None:
+            fields["progress"] = progress
+        if message is not None:
+            fields["message"] = message
+        if error is not None:
+            fields["error"] = error
+        clause = ", ".join(f"{key} = ?" for key in fields)
+        with self.lock, self.connect() as db:
+            db.execute(
+                f"UPDATE jobs SET {clause} WHERE id = ?",
+                (*fields.values(), job_id),
+            )
+        return self.get(job_id)
+
+    def get(self, job_id: str) -> dict[str, Any]:
+        with self.connect() as db:
+            row = db.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+        if row is None:
+            raise KeyError(job_id)
+        return self._decode(row)
+
+    def list(self, limit: int = 50) -> list[dict[str, Any]]:
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT * FROM jobs ORDER BY created_at DESC LIMIT ?", (limit,),
+            ).fetchall()
+        return [self._decode(row) for row in rows]
+
+    @staticmethod
+    def _decode(row: sqlite3.Row) -> dict[str, Any]:
+        result = dict(row)
+        result["request"] = json.loads(result.pop("request_json"))
+        result["analysis_url"] = (
+            f"/api/jobs/{result['id']}/analysis"
+            if result["status"] == "succeeded" else None
+        )
+        return result

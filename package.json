@@ -8,7 +8,9 @@
     "build": "vinext build && node scripts/prepare_sites_dist.mjs",
     "build:next": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint",
+    "analyzer": "bash backend/run.sh",
+    "test:backend": "pytest -q backend/test_service.py"
   },
   "dependencies": {
     "next": "16.2.12",
