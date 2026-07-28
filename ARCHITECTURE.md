@@ -54,21 +54,21 @@ receives normalized analysis data.
 
 ## Local run
 
+The supported local entry point is:
+
 ```bash
 cd /path/to/NsysScope
-python3 -m pip install -r backend/requirements.txt
-
-export NSYSSCOPE_DATA_DIR=/path/to/nsysscope-data
-export NSYSSCOPE_ALLOWED_ROOTS=/path/to/reports:/path/to/model-source
-export NSYSSCOPE_API_TOKEN="$(openssl rand -hex 24)"
-export NSYSSCOPE_CODEX_ENABLED=true
-export NSYSSCOPE_CORS_ORIGINS=http://localhost:3000
-
-npm run analyzer
+./nsysscope start
 ```
 
-In another terminal, run `npm run dev` and open `http://localhost:3000`.
-For the privately deployed dashboard, expose the Analyzer API through an
-authenticated HTTPS reverse proxy and add that dashboard origin to
-`NSYSSCOPE_CORS_ORIGINS`. Do not expose the analyzer directly to the public
+The launcher checks prerequisites, prepares dependencies, generates an
+ephemeral internal token, starts the Analyzer on loopback, builds and starts the
+dashboard, and shuts both down together. The browser uses the same-origin
+`/analyzer-api/*` route; the server-side proxy injects the token, so normal local
+use requires one port and no connection form.
+
+The lower-level `npm run analyzer` command remains available for development or
+an externally managed deployment. For a privately deployed dashboard, expose
+the Analyzer API through an authenticated HTTPS reverse proxy and configure the
+advanced connection settings. Do not expose the analyzer directly to the public
 internet.

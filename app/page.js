@@ -112,14 +112,45 @@ function JobDialog({ open, onClose, onLoaded }) {
   const logCursor = useRef(0);
   const analysisLoaded = useRef(false);
   const [logHasMore, setLogHasMore] = useState(true);
+  const [health, setHealth] = useState({ state: "checking", message: "正在连接本地 Analyzer…" });
   const [error, setError] = useState("");
   const terminal = ["succeeded", "failed", "cancelled"];
 
   useEffect(() => {
     if (!open) return;
-    setApi(localStorage.getItem("nsysscope.api") || "http://127.0.0.1:8787");
+    setApi(localStorage.getItem("nsysscope.api.v2") || "/analyzer-api");
     setToken(sessionStorage.getItem("nsysscope.token") || "");
   }, [open]);
+
+  useEffect(() => {
+    if (!open || !api) return;
+    const controller = new AbortController();
+    const timer = setTimeout(async () => {
+      setHealth({ state: "checking", message: "正在连接本地 Analyzer…" });
+      try {
+        const response = await fetch(`${api.replace(/\/$/, "")}/api/health`, {
+          headers: { "X-NsysScope-Token": token },
+          signal: controller.signal,
+        });
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload.detail || `HTTP ${response.status}`);
+        setHealth({
+          state: "ready",
+          message: payload.codex_enabled
+            ? "Analyzer 已连接，Codex Skill Agent 可用"
+            : "Analyzer 已连接，但 Codex 分析未启用",
+        });
+      } catch (cause) {
+        if (cause.name !== "AbortError") {
+          setHealth({ state: "offline", message: cause.message });
+        }
+      }
+    }, 250);
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+    };
+  }, [api, open, token]);
 
   useEffect(() => {
     if (!job || (terminal.includes(job.status) && !logHasMore)) return;
@@ -163,7 +194,7 @@ function JobDialog({ open, onClose, onLoaded }) {
     logCursor.current = 0;
     analysisLoaded.current = false;
     setLogHasMore(true);
-    localStorage.setItem("nsysscope.api", api.replace(/\/$/, ""));
+    localStorage.setItem("nsysscope.api.v2", api.replace(/\/$/, ""));
     sessionStorage.setItem("nsysscope.token", token);
     try {
       const payload = { ...form };
@@ -180,7 +211,7 @@ function JobDialog({ open, onClose, onLoaded }) {
       setApi(api.replace(/\/$/, ""));
       setJob(body);
     } catch (cause) {
-      setError(`${cause.message}。生产页面连接本地 HTTP 服务时，建议使用 HTTPS 反向代理或在本地运行前端。`);
+      setError(`${cause.message}。请确认本地工具由 ./nsysscope start 启动。`);
     }
   }
 
@@ -224,9 +255,18 @@ function JobDialog({ open, onClose, onLoaded }) {
       <p className="dialog-note">路径由运行 Analyzer Service 的机器解析。大型 nsys 无需经过浏览器上传。</p>
 
       {!job ? <form onSubmit={submit}>
+        <div className={`analyzer-connection ${health.state}`}>
+          <i />
+          <div><b>{health.state === "ready" ? "本地执行器就绪" : "本地执行器未就绪"}</b><span>{health.message}</span></div>
+        </div>
+        <details className="advanced-connection">
+          <summary>高级连接设置</summary>
+          <div className="form-grid">
+            <label className="span-2">Analyzer API<input required value={api} onChange={(e) => setApi(e.target.value)} placeholder="/analyzer-api" /></label>
+            <label className="span-2">API Token（直接连接远端时填写）<input type="password" value={token} onChange={(e) => setToken(e.target.value)} autoComplete="off" /></label>
+          </div>
+        </details>
         <div className="form-grid">
-          <label className="span-2">Analyzer API<input required value={api} onChange={(e) => setApi(e.target.value)} placeholder="http://127.0.0.1:8787" /></label>
-          <label className="span-2">API Token<input type="password" value={token} onChange={(e) => setToken(e.target.value)} autoComplete="off" /></label>
           <label>执行模式<select value={form.mode} onChange={set("mode")}><option value="codex_skill">Codex Skill Agent</option><option value="existing_package">已有六表分析包</option></select></label>
           <label>阶段<select value={form.stage} onChange={set("stage")}><option value="prefill">Prefill</option><option value="decode">Decode</option></select></label>
           <label>模型名称<input required value={form.model_name} onChange={set("model_name")} placeholder="GLM5.2" /></label>

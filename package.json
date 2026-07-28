@@ -9,6 +9,7 @@
     "build:next": "next build",
     "start": "next start",
     "lint": "next lint",
+    "tool": "bash ./nsysscope start",
     "analyzer": "bash backend/run.sh",
     "test:backend": "pytest -q backend/test_service.py"
   },

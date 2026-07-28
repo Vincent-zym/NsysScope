@@ -1,0 +1,189 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PROJECT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+COMMAND="${1:-start}"
+VENV_DIR="${NSYSSCOPE_VENV_DIR:-$PROJECT_DIR/.venv}"
+DATA_DIR="${NSYSSCOPE_DATA_DIR:-$PROJECT_DIR/.data}"
+SKILL_DIR="${NSYSSCOPE_SKILL_DIR:-/root/.codex/skills/sglang-nsys-static-analysis}"
+ALLOWED_ROOTS="${NSYSSCOPE_ALLOWED_ROOTS:-$(dirname "$PROJECT_DIR")}"
+ANALYZER_PID=""
+
+say() {
+  printf '[NsysScope] %s\n' "$*"
+}
+
+fail() {
+  printf '[NsysScope] ERROR: %s\n' "$*" >&2
+  exit 1
+}
+
+cleanup() {
+  if [[ -n "${ANALYZER_PID:-}" ]]; then
+    say "正在关闭 Analyzer"
+    kill "$ANALYZER_PID" >/dev/null 2>&1 || true
+    wait "$ANALYZER_PID" 2>/dev/null || true
+    ANALYZER_PID=""
+  fi
+}
+
+find_port() {
+  python3 - "$1" <<'PY'
+import socket
+import sys
+
+start = int(sys.argv[1])
+for port in range(start, start + 100):
+    with socket.socket() as sock:
+        try:
+            sock.bind(("127.0.0.1", port))
+        except OSError:
+            continue
+    print(port)
+    raise SystemExit(0)
+raise SystemExit(f"no free port in {start}..{start + 99}")
+PY
+}
+
+doctor() {
+  local failed=0
+  say "检查运行环境"
+  for command_name in python3 node npm nsys codex openssl curl flock; do
+    if command -v "$command_name" >/dev/null 2>&1; then
+      printf '  ✓ %-9s %s\n' "$command_name" "$(command -v "$command_name")"
+    else
+      printf '  ✗ %s\n' "$command_name"
+      failed=1
+    fi
+  done
+  if codex login status >/dev/null 2>&1; then
+    printf '  ✓ Codex 已登录\n'
+  else
+    printf '  ✗ Codex 尚未登录，请先运行 codex login\n'
+    failed=1
+  fi
+  if [[ -f "$SKILL_DIR/SKILL.md" ]]; then
+    printf '  ✓ Skill     %s\n' "$SKILL_DIR"
+  else
+    printf '  ✗ Skill     未找到 %s/SKILL.md\n' "$SKILL_DIR"
+    failed=1
+  fi
+  if [[ "$failed" -ne 0 ]]; then
+    fail "环境检查未通过"
+  fi
+  say "环境检查通过"
+}
+
+prepare_python() {
+  if [[ ! -x "$VENV_DIR/bin/python3" ]]; then
+    say "首次运行：创建 Python 虚拟环境"
+    python3 -m venv "$VENV_DIR"
+  fi
+  local requirements_hash
+  requirements_hash="$(sha256sum "$PROJECT_DIR/backend/requirements.txt" | awk '{print $1}')"
+  local stamp="$VENV_DIR/.nsysscope-requirements.sha256"
+  if [[ -x "$VENV_DIR/bin/uvicorn" ]] && [[ ! -f "$stamp" ]]; then
+    printf '%s\n' "$requirements_hash" > "$stamp"
+  elif [[ ! -x "$VENV_DIR/bin/uvicorn" ]] || [[ "$(<"$stamp")" != "$requirements_hash" ]]; then
+    say "安装 Analyzer Python 依赖"
+    "$VENV_DIR/bin/python3" -m pip install -r "$PROJECT_DIR/backend/requirements.txt"
+    printf '%s\n' "$requirements_hash" > "$stamp"
+  fi
+}
+
+prepare_frontend() {
+  mkdir -p "$DATA_DIR"
+  local lock_hash
+  lock_hash="$(sha256sum "$PROJECT_DIR/package-lock.json" | awk '{print $1}')"
+  local stamp="$DATA_DIR/package-lock.sha256"
+  if [[ -x "$PROJECT_DIR/node_modules/.bin/vinext" ]] && [[ ! -f "$stamp" ]]; then
+    printf '%s\n' "$lock_hash" > "$stamp"
+  elif [[ ! -x "$PROJECT_DIR/node_modules/.bin/vinext" ]] || [[ "$(<"$stamp")" != "$lock_hash" ]]; then
+    say "安装前端依赖"
+    npm install
+    printf '%s\n' "$lock_hash" > "$stamp"
+  fi
+  say "构建本地前端"
+  npm run build
+}
+
+start() {
+  cd "$PROJECT_DIR"
+  doctor
+  mkdir -p "$DATA_DIR"
+  exec 9>"$DATA_DIR/nsysscope.lock"
+  flock -n 9 || fail "已有一个 NsysScope 实例正在使用 $DATA_DIR"
+  prepare_python
+  prepare_frontend
+
+  local analyzer_port ui_port internal_token
+  analyzer_port="$(find_port "${NSYSSCOPE_PORT:-8787}")"
+  ui_port="$(find_port "${NSYSSCOPE_UI_PORT:-3000}")"
+  if [[ "$ui_port" == "$analyzer_port" ]]; then
+    ui_port="$(find_port "$((ui_port + 1))")"
+  fi
+  internal_token="$(openssl rand -hex 24)"
+  mkdir -p "$DATA_DIR"
+
+  say "启动 Analyzer（内部端口 $analyzer_port）"
+  env \
+    NSYSSCOPE_DATA_DIR="$DATA_DIR" \
+    NSYSSCOPE_ALLOWED_ROOTS="$ALLOWED_ROOTS" \
+    NSYSSCOPE_API_TOKEN="$internal_token" \
+    NSYSSCOPE_CODEX_ENABLED=true \
+    NSYSSCOPE_CORS_ORIGINS="http://127.0.0.1:$ui_port,http://localhost:$ui_port" \
+    NSYSSCOPE_MAX_WORKERS="${NSYSSCOPE_MAX_WORKERS:-1}" \
+    NSYSSCOPE_SKILL_DIR="$SKILL_DIR" \
+    "$VENV_DIR/bin/uvicorn" backend.app:app \
+      --host 127.0.0.1 --port "$analyzer_port" \
+      >>"$DATA_DIR/analyzer.log" 2>&1 &
+  ANALYZER_PID=$!
+  trap cleanup EXIT
+  trap 'exit 130' INT TERM
+
+  local ready=0
+  for _ in {1..80}; do
+    if curl --noproxy '*' --silent --fail \
+      "http://127.0.0.1:$analyzer_port/api/health" >/dev/null 2>&1; then
+      ready=1
+      break
+    fi
+    if ! kill -0 "$ANALYZER_PID" >/dev/null 2>&1; then
+      tail -40 "$DATA_DIR/analyzer.log" >&2 || true
+      fail "Analyzer 启动失败"
+    fi
+    sleep 0.1
+  done
+  [[ "$ready" -eq 1 ]] || fail "Analyzer 健康检查超时，请查看 $DATA_DIR/analyzer.log"
+
+  printf '\n'
+  say "启动完成"
+  printf '  页面地址:  http://127.0.0.1:%s\n' "$ui_port"
+  printf '  物料范围:  %s\n' "$ALLOWED_ROOTS"
+  printf '  数据目录:  %s\n' "$DATA_DIR"
+  printf '  后端日志:  %s/analyzer.log\n' "$DATA_DIR"
+  printf '\n'
+  printf '  如果通过 SSH 使用，请在本地电脑执行：\n'
+  printf '  ssh -N -L %s:127.0.0.1:%s <用户名>@<服务器地址>\n' "$ui_port" "$ui_port"
+  printf '\n'
+  say "按 Ctrl-C 停止全部服务"
+
+  env \
+    NSYSSCOPE_ANALYZER_INTERNAL_URL="http://127.0.0.1:$analyzer_port" \
+    NSYSSCOPE_INTERNAL_TOKEN="$internal_token" \
+    NO_PROXY="127.0.0.1,localhost,${NO_PROXY:-}" \
+    npx vinext start --hostname 127.0.0.1 --port "$ui_port"
+}
+
+case "$COMMAND" in
+  start)
+    start
+    ;;
+  doctor)
+    doctor
+    ;;
+  *)
+    printf 'Usage: %s [start|doctor]\n' "$0" >&2
+    exit 2
+    ;;
+esac
