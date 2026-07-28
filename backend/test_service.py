@@ -39,6 +39,9 @@ def settings(tmp_path: Path) -> Settings:
         comate_model="",
         comate_platform="internal",
         comate_timeout_seconds=120,
+        agent_heartbeat_seconds=30,
+        job_log_max_bytes=1024 * 1024,
+        job_log_line_max_bytes=16 * 1024,
         nsys_bin="nsys",
         skill_dir=Path("/root/.codex/skills/sglang-nsys-static-analysis"),
         converter=PROJECT / "scripts/build_analysis_json.py",
@@ -126,9 +129,15 @@ def test_log_pagination_and_conversion_retry(tmp_path: Path) -> None:
     page = client.get(
         f"/api/jobs/{job['id']}/logs?after=0&limit=2", headers=headers,
     ).json()
-    assert page["next"] == 2
+    assert page["next"] > 0
     assert page["has_more"] is True
     assert len(page["lines"]) == 2
+    next_page = client.get(
+        f"/api/jobs/{job['id']}/logs?after={page['next']}&limit=2",
+        headers=headers,
+    ).json()
+    assert next_page["after"] == page["next"]
+    assert next_page["lines"]
 
     Path(job["output_dir"], "analysis.json").unlink()
     for source in [
@@ -193,7 +202,7 @@ def test_comate_provider_end_to_end_with_fake_zulu(tmp_path: Path) -> None:
         for source in sources:
             if source.is_file():
                 shutil.copy2(source, cwd / source.name)
-        print('{{"type":"assistant","message":"fake Comate completed"}}')
+        print(json.dumps({{"type": "task-json", "message": "x" * 300000}}))
     """))
     fake_zulu.chmod(0o755)
 
@@ -251,6 +260,10 @@ def test_comate_provider_end_to_end_with_fake_zulu(tmp_path: Path) -> None:
     assert "<prompt>" in (output / "job.log").read_text()
     zulu_args = json.loads((output / "zulu-args.json").read_text())
     assert zulu_args[zulu_args.index("--model") + 1] == "quality-model-id"
+    assert zulu_args[zulu_args.index("--display") + 1] == "task-json"
+    job_log = (output / "job.log").read_text()
+    assert "详细会话未写入日志" in job_log
+    assert len(job_log.encode()) < 50_000
     analysis = client.get(job["analysis_url"], headers=headers).json()
     assert analysis["schemaVersion"] == "1.0"
     assert len(analysis["operators"]) == 61
@@ -344,3 +357,37 @@ def test_codex_selected_model_is_forwarded(tmp_path: Path) -> None:
     )
     command = captured["command"]
     assert command[command.index("--model") + 1] == "quality-codex"
+
+
+def test_job_log_is_bounded_and_clips_large_lines(tmp_path: Path) -> None:
+    configured = replace(
+        settings(tmp_path),
+        job_log_max_bytes=1024,
+        job_log_line_max_bytes=128,
+    )
+    configured.prepare()
+    runner = JobRunner(configured, JobStore(configured.data_dir / "jobs.sqlite"))
+    job_dir = tmp_path / "bounded-log"
+    job_dir.mkdir()
+    for index in range(30):
+        runner.log(job_dir, f"message-{index} " + "x" * 500)
+    log_path = job_dir / "job.log"
+    assert log_path.stat().st_size <= 1024
+    content = log_path.read_text(errors="replace")
+    assert "日志单条内容已截断" in content
+    assert "日志已达到大小上限" in content
+
+
+def test_run_process_emits_heartbeat(tmp_path: Path) -> None:
+    configured = settings(tmp_path)
+    configured.prepare()
+    runner = JobRunner(configured, JobStore(configured.data_dir / "jobs.sqlite"))
+    job_dir = tmp_path / "heartbeat"
+    job_dir.mkdir()
+    runner.run_process(
+        "heartbeat-job", job_dir,
+        ["/bin/sh", "-c", "sleep 1.2"],
+        heartbeat_seconds=1,
+        heartbeat_message="测试进程仍在运行",
+    )
+    assert "[heartbeat] 测试进程仍在运行" in (job_dir / "job.log").read_text()

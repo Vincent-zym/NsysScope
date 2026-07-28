@@ -21,7 +21,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     settings.prepare()
     store = JobStore(settings.data_dir / "jobs.sqlite")
     runner = JobRunner(settings, store)
-    app = FastAPI(title="NsysScope Analyzer API", version="0.3.0")
+    app = FastAPI(title="NsysScope Analyzer API", version="0.4.0")
     app.add_middleware(
         CORSMiddleware,
         allow_origins=list(settings.cors_origins),
@@ -120,14 +120,36 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="job not found") from exc
         path = Path(job["output_dir"]) / "job.log"
-        lines = path.read_text(errors="replace").splitlines() if path.exists() else []
-        end = min(len(lines), after + limit)
+        lines: list[str] = []
+        reset = False
+        total = path.stat().st_size if path.exists() else 0
+        if after > total:
+            after = 0
+            reset = True
+        next_offset = after
+        if path.exists():
+            with path.open("rb") as handle:
+                handle.seek(after)
+                for _ in range(limit):
+                    chunk = handle.readline(settings.job_log_line_max_bytes + 1)
+                    if not chunk:
+                        break
+                    truncated = (
+                        len(chunk) > settings.job_log_line_max_bytes
+                        and not chunk.endswith(b"\n")
+                    )
+                    lines.append(
+                        chunk.decode("utf-8", errors="replace").rstrip()
+                        + (" …[分段]" if truncated else "")
+                    )
+                next_offset = handle.tell()
         return {
             "after": after,
-            "next": end,
-            "total": len(lines),
-            "has_more": end < len(lines),
-            "lines": lines[after:end],
+            "next": next_offset,
+            "total": total,
+            "has_more": next_offset < total,
+            "reset": reset,
+            "lines": lines,
         }
 
     @app.get("/api/jobs/{job_id}/analysis", dependencies=[Depends(authorize)])

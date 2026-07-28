@@ -36,6 +36,9 @@ class Settings:
     comate_model: str
     comate_platform: str
     comate_timeout_seconds: int
+    agent_heartbeat_seconds: int
+    job_log_max_bytes: int
+    job_log_line_max_bytes: int
     nsys_bin: str
     skill_dir: Path
     converter: Path
@@ -68,6 +71,15 @@ class Settings:
             comate_platform=os.getenv("NSYSSCOPE_COMATE_PLATFORM", "internal").lower(),
             comate_timeout_seconds=max(
                 60, int(os.getenv("NSYSSCOPE_COMATE_TIMEOUT_SECONDS", "7200")),
+            ),
+            agent_heartbeat_seconds=max(
+                5, int(os.getenv("NSYSSCOPE_AGENT_HEARTBEAT_SECONDS", "30")),
+            ),
+            job_log_max_bytes=max(
+                1_048_576, int(os.getenv("NSYSSCOPE_JOB_LOG_MAX_BYTES", str(8 * 1024 * 1024))),
+            ),
+            job_log_line_max_bytes=max(
+                1024, int(os.getenv("NSYSSCOPE_JOB_LOG_LINE_MAX_BYTES", str(16 * 1024))),
             ),
             nsys_bin=os.getenv("NSYSSCOPE_NSYS_BIN", "nsys"),
             skill_dir=Path(os.getenv(

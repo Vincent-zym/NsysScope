@@ -11,6 +11,7 @@ import tomllib
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import Callable
 
 from .config import Settings
 from .models import JobCreate
@@ -36,6 +37,7 @@ class JobRunner:
         )
         self.processes: dict[str, subprocess.Popen[str]] = {}
         self.lock = threading.Lock()
+        self.log_lock = threading.Lock()
 
     def submit(self, job_id: str) -> None:
         self.pool.submit(self.run, job_id)
@@ -44,8 +46,26 @@ class JobRunner:
         self.pool.submit(self.retry_conversion, job_id)
 
     def log(self, job_dir: Path, message: str) -> None:
-        with (job_dir / "job.log").open("a", encoding="utf-8") as handle:
-            handle.write(message.rstrip() + "\n")
+        log_path = job_dir / "job.log"
+        text = message.rstrip() + "\n"
+        payload = text.encode("utf-8", errors="replace")
+        line_limit = self.settings.job_log_line_max_bytes
+        if len(payload) > line_limit:
+            marker = f"\n[日志单条内容已截断，原始大小 {len(payload)} bytes]\n".encode()
+            prefix_size = max(0, line_limit - len(marker))
+            payload = payload[:prefix_size] + marker
+        with self.log_lock:
+            current_size = log_path.stat().st_size if log_path.exists() else 0
+            remaining = self.settings.job_log_max_bytes - current_size
+            if remaining <= 0:
+                log_path.touch()
+                return
+            if len(payload) >= remaining:
+                marker = "\n[日志已达到大小上限，后续仅更新时间戳]\n".encode("utf-8")
+                prefix_size = max(0, remaining - len(marker))
+                payload = payload[:prefix_size] + marker[:remaining - prefix_size]
+            with log_path.open("ab") as handle:
+                handle.write(payload)
 
     def state(self, job_id: str, job_dir: Path, status: str, progress: int, message: str) -> None:
         self.store.update(job_id, status=status, progress=progress, message=message)
@@ -179,7 +199,11 @@ class JobRunner:
         }):
             command.extend(["--add-dir", directory])
         command.extend(["--output-last-message", str(output_message), "-"])
-        self.run_process(job_id, job_dir, command, stdin=prompt)
+        self.run_process(
+            job_id, job_dir, command, stdin=prompt,
+            heartbeat_seconds=self.settings.agent_heartbeat_seconds,
+            heartbeat_message="Codex Agent 仍在运行",
+        )
 
     def run_comate(
         self, job_id: str, job_dir: Path, request: JobCreate,
@@ -198,7 +222,7 @@ class JobRunner:
             "--cwd", str(job_dir),
             "--mode", "Agent",
             "--activate-skill", "sglang-nsys-static-analysis",
-            "--display", "event-stream",
+            "--display", "task-json",
             "--background-timeout", str(self.settings.comate_timeout_seconds),
             "--disable-hooks",
         ]
@@ -210,6 +234,9 @@ class JobRunner:
         self.run_process(
             job_id, job_dir, command, redacted_values={prompt},
             environment=self.comate_environment(),
+            output_formatter=self.format_comate_output,
+            heartbeat_seconds=self.settings.agent_heartbeat_seconds,
+            heartbeat_message="Comate Agent 仍在运行",
         )
 
     def stage_comate_skill(self, job_dir: Path) -> Path:
@@ -268,6 +295,9 @@ Requirements:
         self, job_id: str, job_dir: Path, command: list[str], stdin: str | None = None,
         redacted_values: set[str] | None = None,
         environment: dict[str, str] | None = None,
+        output_formatter: Callable[[str], str | None] | None = None,
+        heartbeat_seconds: int = 0,
+        heartbeat_message: str = "Agent 仍在运行",
     ) -> None:
         hidden = redacted_values or set()
         displayed = ["<prompt>" if item in hidden else item for item in command]
@@ -280,6 +310,21 @@ Requirements:
         )
         with self.lock:
             self.processes[job_id] = process
+        heartbeat_stop = threading.Event()
+        heartbeat_thread: threading.Thread | None = None
+        if heartbeat_seconds > 0:
+            def emit_heartbeat() -> None:
+                while not heartbeat_stop.wait(heartbeat_seconds):
+                    if process.poll() is not None:
+                        return
+                    self.log(job_dir, f"[heartbeat] {heartbeat_message}")
+
+            heartbeat_thread = threading.Thread(
+                target=emit_heartbeat,
+                name=f"nsysscope-heartbeat-{job_id}",
+                daemon=True,
+            )
+            heartbeat_thread.start()
         try:
             assert process.stdout is not None
             if stdin is not None and process.stdin is not None:
@@ -287,13 +332,38 @@ Requirements:
                 process.stdin.close()
             for line in process.stdout:
                 if line.strip():
-                    self.log(job_dir, line)
+                    rendered = output_formatter(line) if output_formatter else line
+                    if rendered:
+                        self.log(job_dir, rendered)
             code = process.wait()
             if code:
                 raise RuntimeError(f"process exited with code {code}: {command[0]}")
         finally:
+            heartbeat_stop.set()
+            if heartbeat_thread is not None:
+                heartbeat_thread.join(timeout=1)
             with self.lock:
                 self.processes.pop(job_id, None)
+
+    @staticmethod
+    def format_comate_output(line: str) -> str:
+        raw_size = len(line.encode("utf-8", errors="replace"))
+        if raw_size > 256 * 1024:
+            return f"[Comate] 收到任务结果（{raw_size} bytes，详细会话未写入日志）"
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            compact = " ".join(line.split())
+            return f"[Comate] {compact[:1000]}"
+        event_type = str(payload.get("type") or "task-json")
+        error = payload.get("error") or payload.get("failure_message")
+        if error:
+            return f"[Comate:{event_type}] 错误：{str(error)[:1000]}"
+        status = payload.get("status")
+        if isinstance(payload.get("task"), dict):
+            status = status or payload["task"].get("status")
+        suffix = f"，状态：{status}" if status else ""
+        return f"[Comate] 收到 {event_type} 结果（{raw_size} bytes{suffix}）"
 
     def provider_status(self) -> dict[str, dict[str, object]]:
         return {

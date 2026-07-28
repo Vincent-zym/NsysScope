@@ -228,7 +228,9 @@ function JobDialog({ open, onClose, onLoaded }) {
           const payload = await logResponse.json();
           logCursor.current = payload.next;
           setLogHasMore(payload.has_more);
-          setLogs((current) => [...current, ...payload.lines].slice(-500));
+          setLogs((current) => (
+            payload.reset ? payload.lines : [...current, ...payload.lines]
+          ).slice(-500));
         }
         if (next.status === "succeeded" && !analysisLoaded.current) {
           const result = await fetch(`${api}/api/jobs/${next.id}/analysis`, { headers });

@@ -94,3 +94,16 @@ task form. Codex models are read from its local account cache and Comate models
 are queried from Zulu under the same platform, identity and proxy environment
 used for analysis. A non-empty job `agent_model` is forwarded to the selected
 Provider; an empty value preserves that Provider's configured default.
+
+## Bounded Agent logs
+
+The runner never stores Comate's cumulative `event-stream`. Zulu runs with
+`task-json`, and its final output is reduced to a compact status record. Both
+Providers emit periodic heartbeat lines while their subprocess remains alive.
+The runner enforces per-record and per-job byte limits before writing, touching
+the capped log on later activity so liveness remains observable without
+unbounded growth.
+
+`GET /api/jobs/{id}/logs` uses a byte-offset cursor and bounded reads. It does
+not load the entire log into memory. The response can request a client reset if
+the underlying log was externally truncated.

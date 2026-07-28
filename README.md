@@ -102,6 +102,20 @@ NSYSSCOPE_ALLOWED_ROOTS=/reports:/model-source ./nsysscope start
 Generated jobs and logs are stored under `.data/` by default. Override this with
 `NSYSSCOPE_DATA_DIR`.
 
+Agent logs are bounded by default:
+
+- Comate uses Zulu `task-json`, so only the final task result is consumed instead
+  of cumulative conversation snapshots;
+- a lightweight heartbeat is recorded every 30 seconds while an Agent is
+  silent;
+- individual log records are capped at 16 KiB and each job log is capped at
+  8 MiB;
+- the dashboard reads logs incrementally by byte offset rather than loading the
+  whole file.
+
+The limits can be adjusted with `NSYSSCOPE_AGENT_HEARTBEAT_SECONDS`,
+`NSYSSCOPE_JOB_LOG_LINE_MAX_BYTES`, and `NSYSSCOPE_JOB_LOG_MAX_BYTES`.
+
 ## Existing results
 
 Use **已有六表分析包** to convert a completed normalized package without
