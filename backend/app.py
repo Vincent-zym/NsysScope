@@ -21,7 +21,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     settings.prepare()
     store = JobStore(settings.data_dir / "jobs.sqlite")
     runner = JobRunner(settings, store)
-    app = FastAPI(title="NsysScope Analyzer API", version="0.2.0")
+    app = FastAPI(title="NsysScope Analyzer API", version="0.3.0")
     app.add_middleware(
         CORSMiddleware,
         allow_origins=list(settings.cors_origins),
@@ -59,6 +59,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "auth_required": bool(settings.api_token),
             "max_workers": settings.max_workers,
         }
+
+    @app.get("/api/providers/{provider}/models", dependencies=[Depends(authorize)])
+    def provider_models(provider: str) -> dict:
+        if provider not in {"codex", "comate"}:
+            raise HTTPException(status_code=404, detail="unknown Agent Provider")
+        status = runner.provider_status()[provider]
+        if not status["ready"]:
+            raise HTTPException(status_code=422, detail=status["message"])
+        try:
+            return runner.provider_models(provider)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     @app.post("/api/jobs", response_model=JobView, dependencies=[Depends(authorize)])
     def create_job(request: JobCreate) -> JobView:

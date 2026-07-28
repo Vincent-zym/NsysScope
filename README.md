@@ -68,6 +68,18 @@ launcher also supplies Zulu's required `PLATFORM` selector so that `status` and
 `NSYSSCOPE_COMATE_TIMEOUT_SECONDS` control the platform, optional model and
 timeout.
 
+The task form also has an **Agent 基座模型** selector:
+
+- Codex choices come from the current CLI model cache, while the automatic
+  option preserves the model configured in `~/.codex/config.toml`;
+- Comate choices are fetched from the logged-in account with
+  `zulu model list --ids`;
+- the selected value is stored with the job and forwarded only to that run as
+  `codex --model ... exec` or `zulu run --model ...`.
+
+This task-level selection does not rewrite either Provider's global model
+configuration.
+
 ## Create an analysis
 
 Click **新建分析**, then provide:

@@ -15,6 +15,7 @@ JobStatus = Literal[
 class JobCreate(BaseModel):
     mode: Literal["codex_skill", "existing_package"] = "codex_skill"
     agent_provider: Literal["codex", "comate"] = "codex"
+    agent_model: str = Field(default="", max_length=200)
     model_name: str = Field(min_length=1, max_length=160)
     stage: Literal["prefill", "decode"]
     hardware: str = Field(min_length=1, max_length=120)

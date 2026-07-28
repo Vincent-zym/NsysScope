@@ -103,7 +103,7 @@ function JobDialog({ open, onClose, onLoaded }) {
   const [api, setApi] = useState("");
   const [token, setToken] = useState("");
   const [form, setForm] = useState({
-    mode: "codex_skill", agent_provider: "codex", model_name: "",
+    mode: "codex_skill", agent_provider: "codex", agent_model: "", model_name: "",
     stage: "prefill", hardware: "Nvidia B200",
     report_path: "", config_path: "", launch_path: "", source_path: "",
     design_path: "", existing_package_path: "", prefix: "analysis", notes: "",
@@ -115,6 +115,9 @@ function JobDialog({ open, onClose, onLoaded }) {
   const [logHasMore, setLogHasMore] = useState(true);
   const [health, setHealth] = useState({
     state: "checking", message: "正在连接本地 Analyzer…", providers: null,
+  });
+  const [modelCatalog, setModelCatalog] = useState({
+    state: "idle", default_model: "", models: [], message: "",
   });
   const [error, setError] = useState("");
   const terminal = ["succeeded", "failed", "cancelled"];
@@ -154,7 +157,7 @@ function JobDialog({ open, onClose, onLoaded }) {
         if (firstReadyProvider) {
           setForm((current) => providers[current.agent_provider]?.ready
             ? current
-            : { ...current, agent_provider: firstReadyProvider });
+            : { ...current, agent_provider: firstReadyProvider, agent_model: "" });
         }
         setHealth({
           state: ready.length ? "ready" : "warning",
@@ -174,6 +177,40 @@ function JobDialog({ open, onClose, onLoaded }) {
       controller.abort();
     };
   }, [api, open, token]);
+
+  useEffect(() => {
+    const ready = health.providers?.[form.agent_provider]?.ready;
+    if (!open || !api || form.mode !== "codex_skill" || !ready) {
+      setModelCatalog({
+        state: "idle", default_model: "", models: [], message: "",
+      });
+      return;
+    }
+    const controller = new AbortController();
+    setModelCatalog({
+      state: "loading", default_model: "", models: [], message: "正在读取可用模型…",
+    });
+    fetch(`${api.replace(/\/$/, "")}/api/providers/${form.agent_provider}/models`, {
+      headers: { "X-NsysScope-Token": token },
+      signal: controller.signal,
+    }).then(async (response) => {
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.detail || `HTTP ${response.status}`);
+      setModelCatalog({
+        state: "ready",
+        default_model: payload.default_model || "",
+        models: payload.models || [],
+        message: "",
+      });
+    }).catch((cause) => {
+      if (cause.name !== "AbortError") {
+        setModelCatalog({
+          state: "error", default_model: "", models: [], message: cause.message,
+        });
+      }
+    });
+    return () => controller.abort();
+  }, [api, form.agent_provider, form.mode, health.providers, open, token]);
 
   useEffect(() => {
     if (!job || (terminal.includes(job.status) && !logHasMore)) return;
@@ -210,6 +247,9 @@ function JobDialog({ open, onClose, onLoaded }) {
   if (!open) return null;
 
   const set = (key) => (event) => setForm({ ...form, [key]: event.target.value });
+  const setProvider = (event) => setForm({
+    ...form, agent_provider: event.target.value, agent_model: "",
+  });
   const provider = health.providers?.[form.agent_provider];
   async function submit(event) {
     event.preventDefault();
@@ -294,11 +334,20 @@ function JobDialog({ open, onClose, onLoaded }) {
           <label>执行模式<select value={form.mode} onChange={set("mode")}><option value="codex_skill">Agent 静态分析</option><option value="existing_package">已有六表分析包</option></select></label>
           <label>阶段<select value={form.stage} onChange={set("stage")}><option value="prefill">Prefill</option><option value="decode">Decode</option></select></label>
           {form.mode === "codex_skill" && <>
-            <label className="span-2">Agent Provider<select value={form.agent_provider} onChange={set("agent_provider")}>
+            <label>Agent Provider<select value={form.agent_provider} onChange={setProvider}>
               <option value="codex" disabled={health.providers && !health.providers.codex?.ready}>Codex CLI{health.providers && !health.providers.codex?.ready ? "（未就绪）" : ""}</option>
               <option value="comate" disabled={health.providers && !health.providers.comate?.ready}>Comate Zulu{health.providers && !health.providers.comate?.ready ? "（未登录或未就绪）" : ""}</option>
             </select></label>
+            <label>Agent 基座模型<select value={form.agent_model} onChange={set("agent_model")} disabled={modelCatalog.state === "loading"}>
+              <option value="">{modelCatalog.state === "loading"
+                ? "正在读取模型…"
+                : `自动 / Provider 默认${modelCatalog.default_model ? `（${modelCatalog.default_model}）` : ""}`}</option>
+              {modelCatalog.models.map((model) =>
+                <option key={model.id} value={model.id}>{model.label}</option>
+              )}
+            </select></label>
             {provider && !provider.ready && <div className="provider-warning span-2">{provider.message}</div>}
+            {modelCatalog.state === "error" && <div className="provider-warning span-2">模型列表读取失败，将使用 Provider 默认模型：{modelCatalog.message}</div>}
           </>}
           <label>模型名称<input required value={form.model_name} onChange={set("model_name")} placeholder="GLM5.2" /></label>
           <label>硬件<input required value={form.hardware} onChange={set("hardware")} /></label>

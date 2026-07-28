@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
 import threading
+import tomllib
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -162,10 +164,15 @@ class JobRunner:
         prompt_path.write_text(prompt)
         output_message = job_dir / "agent-final.txt"
         command = [
-            self.settings.codex_bin, "--ask-for-approval", "never", "exec",
+            self.settings.codex_bin, "--ask-for-approval", "never",
+        ]
+        if request.agent_model:
+            command.extend(["--model", request.agent_model])
+        command.extend([
+            "exec",
             "--ephemeral", "--json", "--sandbox", "workspace-write",
             "--skip-git-repo-check", "-C", str(job_dir),
-        ]
+        ])
         for directory in sorted({
             str(path if path.is_dir() else path.parent)
             for path in paths.values() if path is not None
@@ -197,8 +204,9 @@ class JobRunner:
         ]
         if self.settings.comate_username:
             command.extend(["--username", self.settings.comate_username])
-        if self.settings.comate_model:
-            command.extend(["--model", self.settings.comate_model])
+        selected_model = request.agent_model or self.settings.comate_model
+        if selected_model:
+            command.extend(["--model", selected_model])
         self.run_process(
             job_id, job_dir, command, redacted_values={prompt},
             environment=self.comate_environment(),
@@ -291,6 +299,74 @@ Requirements:
         return {
             "codex": self._codex_status(),
             "comate": self._comate_status(),
+        }
+
+    def provider_models(self, provider: str) -> dict[str, object]:
+        if provider == "codex":
+            return self._codex_models()
+        if provider == "comate":
+            return self._comate_models()
+        raise RuntimeError(f"unknown Agent Provider: {provider}")
+
+    def _codex_models(self) -> dict[str, object]:
+        codex_home = Path(os.getenv("CODEX_HOME", Path.home() / ".codex"))
+        configured_model = ""
+        config_path = codex_home / "config.toml"
+        try:
+            config = tomllib.loads(config_path.read_text())
+            configured_model = str(config.get("model") or "")
+        except (OSError, tomllib.TOMLDecodeError):
+            pass
+
+        choices: list[dict[str, str]] = []
+        cache_path = codex_home / "models_cache.json"
+        try:
+            payload = json.loads(cache_path.read_text())
+            records = payload.get("models", []) if isinstance(payload, dict) else payload
+            for record in records:
+                if record.get("visibility") == "hide":
+                    continue
+                model_id = str(record.get("slug") or "")
+                if not model_id:
+                    continue
+                choices.append({
+                    "id": model_id,
+                    "label": str(record.get("display_name") or model_id),
+                })
+        except (OSError, json.JSONDecodeError, AttributeError):
+            pass
+        if configured_model and not any(item["id"] == configured_model for item in choices):
+            choices.insert(0, {"id": configured_model, "label": configured_model})
+        return {
+            "provider": "codex",
+            "default_model": configured_model,
+            "models": choices,
+        }
+
+    def _comate_models(self) -> dict[str, object]:
+        completed = subprocess.run(
+            [self.settings.comate_bin, "model", "list", "--ids"],
+            text=True, capture_output=True, timeout=15,
+            env=self.comate_environment(),
+        )
+        if completed.returncode:
+            detail = (completed.stdout + completed.stderr).strip()
+            raise RuntimeError(detail or "无法读取 Comate 模型列表")
+        choices: list[dict[str, str]] = []
+        ansi = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+        for raw_line in completed.stdout.splitlines():
+            line = ansi.sub("", raw_line).strip()
+            match = re.match(r"^[* ]*(.*?)\s+\(([^()]*)\)\s*$", line)
+            if not match:
+                continue
+            label, model_id = match.groups()
+            if model_id == "auto":
+                continue
+            choices.append({"id": model_id, "label": label.strip() or model_id})
+        return {
+            "provider": "comate",
+            "default_model": self.settings.comate_model or "auto",
+            "models": choices,
         }
 
     def comate_environment(self) -> dict[str, str]:

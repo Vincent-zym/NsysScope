@@ -88,3 +88,9 @@ Provider-specific event output is written to the same job log. Cancellation
 terminates the active provider subprocess. After the provider exits, both paths
 share `find_package`, conversion and validation, so a provider cannot bypass
 the six-table or `analysis.json` contracts.
+
+`GET /api/providers/{provider}/models` exposes the model catalog used by the
+task form. Codex models are read from its local account cache and Comate models
+are queried from Zulu under the same platform, identity and proxy environment
+used for analysis. A non-empty job `agent_model` is forwarded to the selected
+Provider; an empty value preserves that Provider's configured default.
