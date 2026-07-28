@@ -2,14 +2,13 @@ from __future__ import annotations
 
 import json
 import os
-import re
+import shlex
 import shutil
 import subprocess
 import threading
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Callable
 
 from .config import Settings
 from .models import JobCreate
@@ -74,7 +73,7 @@ class JobRunner:
                 (job_dir / "context.json").write_text(
                     json.dumps(context, ensure_ascii=False, indent=2) + "\n",
                 )
-                self.run_codex(job_id, job_dir, request, paths, sqlite_path)
+                self.run_agent(job_id, job_dir, request, paths, sqlite_path)
                 self.state(job_id, job_dir, "converting", 88, "正在构建前端 analysis.json")
                 package = self.find_package(job_dir, request.prefix)
                 self.convert(package, job_dir / "analysis.json", request.prefix)
@@ -140,6 +139,15 @@ class JobRunner:
             raise RuntimeError("nsys export completed without producing SQLite")
         return sqlite_path
 
+    def run_agent(
+        self, job_id: str, job_dir: Path, request: JobCreate,
+        paths: dict[str, Path | None], sqlite_path: Path,
+    ) -> None:
+        if request.agent_provider == "comate":
+            self.run_comate(job_id, job_dir, request, paths, sqlite_path)
+        else:
+            self.run_codex(job_id, job_dir, request, paths, sqlite_path)
+
     def run_codex(
         self, job_id: str, job_dir: Path, request: JobCreate,
         paths: dict[str, Path | None], sqlite_path: Path,
@@ -166,11 +174,61 @@ class JobRunner:
         command.extend(["--output-last-message", str(output_message), "-"])
         self.run_process(job_id, job_dir, command, stdin=prompt)
 
+    def run_comate(
+        self, job_id: str, job_dir: Path, request: JobCreate,
+        paths: dict[str, Path | None], sqlite_path: Path,
+    ) -> None:
+        status = self._comate_status()
+        if not status["ready"]:
+            raise RuntimeError(status["message"])
+        self.state(job_id, job_dir, "analyzing", 30, "Comate Skill Agent 正在分析模型与时间线")
+        prompt = self.build_prompt(job_dir, request, paths, sqlite_path)
+        (job_dir / "prompt.md").write_text(prompt)
+        self.stage_comate_skill(job_dir)
+        command = [
+            self.settings.comate_bin, "run",
+            "--query", prompt,
+            "--cwd", str(job_dir),
+            "--mode", "Agent",
+            "--activate-skill", "sglang-nsys-static-analysis",
+            "--display", "event-stream",
+            "--background-timeout", str(self.settings.comate_timeout_seconds),
+            "--disable-hooks",
+        ]
+        if self.settings.comate_username:
+            command.extend(["--username", self.settings.comate_username])
+        if self.settings.comate_model:
+            command.extend(["--model", self.settings.comate_model])
+        self.run_process(
+            job_id, job_dir, command, redacted_values={prompt},
+        )
+
+    def stage_comate_skill(self, job_dir: Path) -> Path:
+        source = self.settings.skill_dir
+        if not (source / "SKILL.md").exists():
+            raise RuntimeError(f"analysis skill is missing: {source / 'SKILL.md'}")
+        target = job_dir / ".comate" / "skills" / "sglang-nsys-static-analysis"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(
+            source,
+            target,
+            ignore=shutil.ignore_patterns(
+                "result", "evals", "agents", "__pycache__", "*.pyc",
+            ),
+        )
+        skill_md = target / "SKILL.md"
+        skill_md.write_text(
+            skill_md.read_text().replace(
+                "Use when Codex receives", "Use when the analysis agent receives",
+            ),
+        )
+        return target
+
     def build_prompt(
         self, job_dir: Path, request: JobCreate,
         paths: dict[str, Path | None], sqlite_path: Path,
     ) -> str:
-        return f"""Use the installed `sglang-nsys-static-analysis` skill.
+        return f"""Use the activated `sglang-nsys-static-analysis` skill.
 
 Analyze this task without asking follow-up questions:
 - nsys/sqlite: {sqlite_path}
@@ -199,9 +257,11 @@ Requirements:
 
     def run_process(
         self, job_id: str, job_dir: Path, command: list[str], stdin: str | None = None,
+        redacted_values: set[str] | None = None,
     ) -> None:
-        redacted = " ".join(command)
-        self.log(job_dir, f"$ {redacted}")
+        hidden = redacted_values or set()
+        displayed = ["<prompt>" if item in hidden else item for item in command]
+        self.log(job_dir, f"$ {shlex.join(displayed)}")
         process = subprocess.Popen(
             command, stdin=subprocess.PIPE if stdin is not None else None,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -225,6 +285,67 @@ Requirements:
             with self.lock:
                 self.processes.pop(job_id, None)
 
+    def provider_status(self) -> dict[str, dict[str, object]]:
+        return {
+            "codex": self._codex_status(),
+            "comate": self._comate_status(),
+        }
+
+    def _codex_status(self) -> dict[str, object]:
+        if not self.settings.codex_enabled:
+            return {"enabled": False, "ready": False, "message": "Codex Provider 未启用"}
+        executable = shutil.which(self.settings.codex_bin)
+        if not executable:
+            return {"enabled": True, "ready": False, "message": "找不到 Codex CLI"}
+        try:
+            completed = subprocess.run(
+                [executable, "login", "status"],
+                text=True, capture_output=True, timeout=5,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return {"enabled": True, "ready": False, "message": f"Codex 状态检查失败：{exc}"}
+        output = (completed.stdout + completed.stderr).strip()
+        return {
+            "enabled": True,
+            "ready": completed.returncode == 0,
+            "message": output.splitlines()[-1] if output else "Codex CLI 已就绪",
+        }
+
+    def _comate_status(self) -> dict[str, object]:
+        if not self.settings.comate_enabled:
+            return {"enabled": False, "ready": False, "message": "Comate Provider 未启用"}
+        executable = self.settings.comate_bin
+        if (
+            not executable
+            or not Path(executable).is_file()
+            or not os.access(executable, os.X_OK)
+        ):
+            return {"enabled": True, "ready": False, "message": "找不到 Comate Zulu CLI"}
+        command = [executable, "status"]
+        if self.settings.comate_username:
+            command.extend(["--username", self.settings.comate_username])
+        try:
+            completed = subprocess.run(
+                command, text=True, capture_output=True, timeout=5,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return {"enabled": True, "ready": False, "message": f"Comate 状态检查失败：{exc}"}
+        output = (completed.stdout + completed.stderr).strip()
+        not_logged_in = "未登录" in output or "not logged" in output.lower()
+        ready = completed.returncode == 0 and not not_logged_in
+        if ready:
+            message = "Comate Zulu CLI 已登录"
+        elif not_logged_in:
+            message = "Comate Zulu CLI 未登录，请先执行 ./nsysscope login comate"
+        else:
+            detail = output.splitlines()[-1] if output else f"退出码 {completed.returncode}"
+            message = f"Comate 状态检查失败：{detail}"
+        return {
+            "enabled": True,
+            "ready": ready,
+            "message": message,
+        }
+
     def convert(self, package: Path, output: Path, prefix: str) -> None:
         command = [
             "python3", str(self.settings.converter), str(package), str(output),
@@ -246,7 +367,7 @@ Requirements:
         for path in candidates:
             if all((path / f"{prefix}{suffix}").exists() for suffix in CSV_SUFFIXES):
                 return path
-        raise RuntimeError("Codex run did not produce a complete six-table package")
+        raise RuntimeError("Agent run did not produce a complete six-table package")
 
     @staticmethod
     def detect_prefix(package: Path, requested: str) -> str:

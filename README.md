@@ -1,7 +1,7 @@
 # NsysScope
 
 Interactive SGLang Nsight Systems analysis powered by the installed
-`sglang-nsys-static-analysis` Codex skill.
+`sglang-nsys-static-analysis` skill.
 
 ## One-command start
 
@@ -12,7 +12,8 @@ cd /home/users/zhongyuanming/NsysScope
 
 The command automatically:
 
-- verifies Python, Node.js, Nsight Systems, Codex login and the analysis skill;
+- verifies Python, Node.js, Nsight Systems, at least one Agent Provider and the
+  analysis skill;
 - creates or updates the local Python and Node.js dependencies when needed;
 - builds the dashboard;
 - chooses available internal ports;
@@ -35,6 +36,31 @@ Run the prerequisite check by itself with:
 ```bash
 ./nsysscope doctor
 ```
+
+## Agent providers
+
+NsysScope supports two interchangeable analysis providers:
+
+- **Codex CLI** through non-interactive `codex exec`;
+- **Comate Zulu CLI** through non-interactive `zulu run`.
+
+Both providers receive the same prompt and task materials, activate the same
+`sglang-nsys-static-analysis` skill, and must produce the same six-table package
+and pass the same deterministic validation before the dashboard accepts the
+result.
+
+Provider readiness is shown in the **新建分析** dialog. Log in when needed:
+
+```bash
+./nsysscope login codex
+./nsysscope login comate
+```
+
+Restart `./nsysscope start` after login, then select **Codex CLI** or
+**Comate Zulu** in the task form. The launcher discovers the Zulu executable
+shipped with the installed Comate extension; `NSYSSCOPE_COMATE_BIN` can override
+that path. `NSYSSCOPE_COMATE_MODEL` and `NSYSSCOPE_COMATE_TIMEOUT_SECONDS`
+control the optional model and timeout.
 
 ## Create an analysis
 
@@ -61,5 +87,5 @@ Generated jobs and logs are stored under `.data/` by default. Override this with
 ## Existing results
 
 Use **已有六表分析包** to convert a completed normalized package without
-running Codex again, or use **导入 JSON** to open an existing
+running an Agent again, or use **导入 JSON** to open an existing
 `analysis.json`.

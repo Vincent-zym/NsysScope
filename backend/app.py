@@ -55,12 +55,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {
             "status": "ok",
             "codex_enabled": settings.codex_enabled,
+            "providers": runner.provider_status(),
             "auth_required": bool(settings.api_token),
             "max_workers": settings.max_workers,
         }
 
     @app.post("/api/jobs", response_model=JobView, dependencies=[Depends(authorize)])
     def create_job(request: JobCreate) -> JobView:
+        if request.mode != "existing_package":
+            provider = runner.provider_status()[request.agent_provider]
+            if not provider["ready"]:
+                raise HTTPException(status_code=422, detail=provider["message"])
         for field in (
             "report_path", "config_path", "launch_path", "source_path",
             "design_path", "existing_package_path",

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import shutil
+import textwrap
 import time
+from dataclasses import replace
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -27,6 +29,11 @@ def settings(tmp_path: Path) -> Settings:
         max_workers=1,
         codex_enabled=False,
         codex_bin="codex",
+        comate_enabled=False,
+        comate_bin="",
+        comate_username="",
+        comate_model="",
+        comate_timeout_seconds=120,
         nsys_bin="nsys",
         skill_dir=Path("/root/.codex/skills/sglang-nsys-static-analysis"),
         converter=PROJECT / "scripts/build_analysis_json.py",
@@ -140,3 +147,79 @@ def test_log_pagination_and_conversion_retry(tmp_path: Path) -> None:
         time.sleep(0.05)
     assert job["status"] == "succeeded", job
     assert Path(job["output_dir"], "analysis.json").exists()
+
+
+def test_comate_provider_end_to_end_with_fake_zulu(tmp_path: Path) -> None:
+    if not PACKAGE.exists():
+        return
+    fake_zulu = tmp_path / "zulu"
+    fake_zulu.write_text(textwrap.dedent(f"""\
+        #!/usr/bin/env python3
+        import shutil
+        import sys
+        from pathlib import Path
+
+        if sys.argv[1] == "status":
+            print("状态：已登录")
+            raise SystemExit(0)
+        if sys.argv[1] != "run":
+            raise SystemExit(2)
+        cwd = Path(sys.argv[sys.argv.index("--cwd") + 1])
+        package = Path({str(PACKAGE)!r})
+        sources = list(package.glob("glm52_*")) + [
+            package / "position_operator_stats.json",
+            package / "validation_report.json",
+        ]
+        for source in sources:
+            if source.is_file():
+                shutil.copy2(source, cwd / source.name)
+        print('{{"type":"assistant","message":"fake Comate completed"}}')
+    """))
+    fake_zulu.chmod(0o755)
+
+    material = tmp_path / "material"
+    source = material / "source"
+    source.mkdir(parents=True)
+    report = material / "report.sqlite"
+    config = material / "config.json"
+    launch = material / "launch.yaml"
+    report.write_text("")
+    config.write_text("{}")
+    launch.write_text("model: test\n")
+
+    configured = replace(
+        settings(tmp_path),
+        comate_enabled=True,
+        comate_bin=str(fake_zulu),
+    )
+    application = create_app(configured)
+    client = TestClient(application)
+    headers = {"X-NsysScope-Token": "test-token"}
+    response = client.post("/api/jobs", headers=headers, json={
+        "mode": "codex_skill",
+        "agent_provider": "comate",
+        "model_name": "GLM5.2",
+        "stage": "prefill",
+        "hardware": "Nvidia B200",
+        "report_path": str(report),
+        "config_path": str(config),
+        "launch_path": str(launch),
+        "source_path": str(source),
+        "prefix": "glm52",
+    })
+    assert response.status_code == 200, response.text
+    job = response.json()
+    for _ in range(100):
+        job = client.get(f"/api/jobs/{job['id']}", headers=headers).json()
+        if job["status"] in {"succeeded", "failed"}:
+            break
+        time.sleep(0.05)
+    assert job["status"] == "succeeded", job
+    output = Path(job["output_dir"])
+    staged = output / ".comate/skills/sglang-nsys-static-analysis/SKILL.md"
+    assert staged.exists()
+    assert "Use when the analysis agent receives" in staged.read_text()
+    assert "<prompt>" in (output / "job.log").read_text()
+    analysis = client.get(job["analysis_url"], headers=headers).json()
+    assert analysis["schemaVersion"] == "1.0"
+    assert len(analysis["operators"]) == 61

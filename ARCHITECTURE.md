@@ -32,7 +32,8 @@ NsysScope separates report analysis from visualization.
 - authenticates job APIs with `X-NsysScope-Token`;
 - persists jobs in SQLite and runs them with bounded concurrency;
 - exports `.nsys-rep` with `nsys`;
-- invokes the installed analysis skill through non-interactive `codex exec`;
+- invokes the installed analysis skill through a selectable Agent Provider:
+  non-interactive `codex exec` or Comate `zulu run`;
 - exposes cursor-paginated logs, activity timestamps and the resulting
   `analysis.json`;
 - can retry only the deterministic conversion/validation stage when a completed
@@ -72,3 +73,18 @@ an externally managed deployment. For a privately deployed dashboard, expose
 the Analyzer API through an authenticated HTTPS reverse proxy and configure the
 advanced connection settings. Do not expose the analyzer directly to the public
 internet.
+
+## Agent provider boundary
+
+The Analyzer selects a provider from each job's `agent_provider` field:
+
+- `codex` runs the installed skill with `codex exec`, adding each material
+  directory as a read workspace;
+- `comate` copies the runtime-relevant skill files into the job-local
+  `.comate/skills/sglang-nsys-static-analysis` directory and activates it with
+  `zulu run`.
+
+Provider-specific event output is written to the same job log. Cancellation
+terminates the active provider subprocess. After the provider exits, both paths
+share `find_package`, conversion and validation, so a provider cannot bypass
+the six-table or `analysis.json` contracts.

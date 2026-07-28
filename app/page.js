@@ -103,7 +103,8 @@ function JobDialog({ open, onClose, onLoaded }) {
   const [api, setApi] = useState("");
   const [token, setToken] = useState("");
   const [form, setForm] = useState({
-    mode: "codex_skill", model_name: "", stage: "prefill", hardware: "Nvidia B200",
+    mode: "codex_skill", agent_provider: "codex", model_name: "",
+    stage: "prefill", hardware: "Nvidia B200",
     report_path: "", config_path: "", launch_path: "", source_path: "",
     design_path: "", existing_package_path: "", prefix: "analysis", notes: "",
   });
@@ -112,7 +113,9 @@ function JobDialog({ open, onClose, onLoaded }) {
   const logCursor = useRef(0);
   const analysisLoaded = useRef(false);
   const [logHasMore, setLogHasMore] = useState(true);
-  const [health, setHealth] = useState({ state: "checking", message: "正在连接本地 Analyzer…" });
+  const [health, setHealth] = useState({
+    state: "checking", message: "正在连接本地 Analyzer…", providers: null,
+  });
   const [error, setError] = useState("");
   const terminal = ["succeeded", "failed", "cancelled"];
 
@@ -126,7 +129,9 @@ function JobDialog({ open, onClose, onLoaded }) {
     if (!open || !api) return;
     const controller = new AbortController();
     const timer = setTimeout(async () => {
-      setHealth({ state: "checking", message: "正在连接本地 Analyzer…" });
+      setHealth({
+        state: "checking", message: "正在连接本地 Analyzer…", providers: null,
+      });
       try {
         const response = await fetch(`${api.replace(/\/$/, "")}/api/health`, {
           headers: { "X-NsysScope-Token": token },
@@ -134,15 +139,33 @@ function JobDialog({ open, onClose, onLoaded }) {
         });
         const payload = await response.json();
         if (!response.ok) throw new Error(payload.detail || `HTTP ${response.status}`);
+        const providers = payload.providers || {
+          codex: {
+            enabled: Boolean(payload.codex_enabled),
+            ready: Boolean(payload.codex_enabled),
+            message: payload.codex_enabled ? "Codex CLI 可用" : "Codex 未启用",
+          },
+        };
+        const ready = Object.entries(providers)
+          .filter(([, value]) => value.ready)
+          .map(([name]) => name === "codex" ? "Codex" : "Comate");
+        const firstReadyProvider = Object.entries(providers)
+          .find(([, value]) => value.ready)?.[0];
+        if (firstReadyProvider) {
+          setForm((current) => providers[current.agent_provider]?.ready
+            ? current
+            : { ...current, agent_provider: firstReadyProvider });
+        }
         setHealth({
-          state: "ready",
-          message: payload.codex_enabled
-            ? "Analyzer 已连接，Codex Skill Agent 可用"
-            : "Analyzer 已连接，但 Codex 分析未启用",
+          state: ready.length ? "ready" : "warning",
+          message: ready.length
+            ? `可用 Provider：${ready.join("、")}`
+            : "Analyzer 已连接，但没有可用的 Agent Provider",
+          providers,
         });
       } catch (cause) {
         if (cause.name !== "AbortError") {
-          setHealth({ state: "offline", message: cause.message });
+          setHealth({ state: "offline", message: cause.message, providers: null });
         }
       }
     }, 250);
@@ -187,6 +210,7 @@ function JobDialog({ open, onClose, onLoaded }) {
   if (!open) return null;
 
   const set = (key) => (event) => setForm({ ...form, [key]: event.target.value });
+  const provider = health.providers?.[form.agent_provider];
   async function submit(event) {
     event.preventDefault();
     setError("");
@@ -257,7 +281,7 @@ function JobDialog({ open, onClose, onLoaded }) {
       {!job ? <form onSubmit={submit}>
         <div className={`analyzer-connection ${health.state}`}>
           <i />
-          <div><b>{health.state === "ready" ? "本地执行器就绪" : "本地执行器未就绪"}</b><span>{health.message}</span></div>
+          <div><b>{health.state === "ready" ? "本地执行器就绪" : "本地执行器需要配置"}</b><span>{health.message}</span></div>
         </div>
         <details className="advanced-connection">
           <summary>高级连接设置</summary>
@@ -267,8 +291,15 @@ function JobDialog({ open, onClose, onLoaded }) {
           </div>
         </details>
         <div className="form-grid">
-          <label>执行模式<select value={form.mode} onChange={set("mode")}><option value="codex_skill">Codex Skill Agent</option><option value="existing_package">已有六表分析包</option></select></label>
+          <label>执行模式<select value={form.mode} onChange={set("mode")}><option value="codex_skill">Agent 静态分析</option><option value="existing_package">已有六表分析包</option></select></label>
           <label>阶段<select value={form.stage} onChange={set("stage")}><option value="prefill">Prefill</option><option value="decode">Decode</option></select></label>
+          {form.mode === "codex_skill" && <>
+            <label className="span-2">Agent Provider<select value={form.agent_provider} onChange={set("agent_provider")}>
+              <option value="codex" disabled={health.providers && !health.providers.codex?.ready}>Codex CLI{health.providers && !health.providers.codex?.ready ? "（未就绪）" : ""}</option>
+              <option value="comate" disabled={health.providers && !health.providers.comate?.ready}>Comate Zulu{health.providers && !health.providers.comate?.ready ? "（未登录或未就绪）" : ""}</option>
+            </select></label>
+            {provider && !provider.ready && <div className="provider-warning span-2">{provider.message}</div>}
+          </>}
           <label>模型名称<input required value={form.model_name} onChange={set("model_name")} placeholder="GLM5.2" /></label>
           <label>硬件<input required value={form.hardware} onChange={set("hardware")} /></label>
           {form.mode === "existing_package" ? <>

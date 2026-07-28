@@ -8,6 +8,8 @@ DATA_DIR="${NSYSSCOPE_DATA_DIR:-$PROJECT_DIR/.data}"
 SKILL_DIR="${NSYSSCOPE_SKILL_DIR:-/root/.codex/skills/sglang-nsys-static-analysis}"
 ALLOWED_ROOTS="${NSYSSCOPE_ALLOWED_ROOTS:-$(dirname "$PROJECT_DIR")}"
 ANALYZER_PID=""
+CODEX_READY=false
+COMATE_BIN="${NSYSSCOPE_COMATE_BIN:-}"
 
 say() {
   printf '[NsysScope] %s\n' "$*"
@@ -45,10 +47,20 @@ raise SystemExit(f"no free port in {start}..{start + 99}")
 PY
 }
 
+discover_zulu() {
+  if [[ -n "$COMATE_BIN" ]] && [[ -x "$COMATE_BIN" ]]; then
+    printf '%s\n' "$COMATE_BIN"
+    return
+  fi
+  find "${HOME}/.comate-server/bin" \
+    -path '*/extensions/baiducomate.comate/dist/zulu-cli/bin/zulu' \
+    -type f -perm -111 2>/dev/null | sort | tail -1
+}
+
 doctor() {
-  local failed=0
+  local failed=0 provider_ready=0 comate_status comate_status_code
   say "检查运行环境"
-  for command_name in python3 node npm nsys codex openssl curl flock; do
+  for command_name in python3 node npm nsys openssl curl flock; do
     if command -v "$command_name" >/dev/null 2>&1; then
       printf '  ✓ %-9s %s\n' "$command_name" "$(command -v "$command_name")"
     else
@@ -56,11 +68,35 @@ doctor() {
       failed=1
     fi
   done
-  if codex login status >/dev/null 2>&1; then
+  if command -v codex >/dev/null 2>&1 && codex login status >/dev/null 2>&1; then
     printf '  ✓ Codex 已登录\n'
+    CODEX_READY=true
+    provider_ready=1
+  elif command -v codex >/dev/null 2>&1; then
+    printf '  △ Codex 已安装但尚未登录，请运行 codex login\n'
   else
-    printf '  ✗ Codex 尚未登录，请先运行 codex login\n'
-    failed=1
+    printf '  - Codex CLI 未安装\n'
+  fi
+  COMATE_BIN="$(discover_zulu)"
+  if [[ -n "$COMATE_BIN" ]]; then
+    set +e
+    comate_status="$("$COMATE_BIN" status 2>&1)"
+    comate_status_code=$?
+    set -e
+    if [[ "$comate_status_code" -eq 0 ]] \
+      && [[ "$comate_status" != *"未登录"* ]] \
+      && [[ "$comate_status" != *"not logged"* ]]; then
+      printf '  ✓ Comate Zulu 已登录\n'
+      provider_ready=1
+    elif [[ "$comate_status" == *"未登录"* ]] || [[ "$comate_status" == *"not logged"* ]]; then
+      printf '  △ Comate Zulu 已安装但尚未登录\n'
+      printf '    运行: ./nsysscope login comate\n'
+    else
+      printf '  △ Comate Zulu 状态检查失败\n'
+      [[ -z "$comate_status" ]] || printf '    %s\n' "$comate_status"
+    fi
+  else
+    printf '  - Comate Zulu CLI 未安装\n'
   fi
   if [[ -f "$SKILL_DIR/SKILL.md" ]]; then
     printf '  ✓ Skill     %s\n' "$SKILL_DIR"
@@ -70,6 +106,9 @@ doctor() {
   fi
   if [[ "$failed" -ne 0 ]]; then
     fail "环境检查未通过"
+  fi
+  if [[ "$provider_ready" -eq 0 ]]; then
+    fail "Codex 和 Comate 均不可用，请至少登录一个 Provider"
   fi
   say "环境检查通过"
 }
@@ -130,7 +169,9 @@ start() {
     NSYSSCOPE_DATA_DIR="$DATA_DIR" \
     NSYSSCOPE_ALLOWED_ROOTS="$ALLOWED_ROOTS" \
     NSYSSCOPE_API_TOKEN="$internal_token" \
-    NSYSSCOPE_CODEX_ENABLED=true \
+    NSYSSCOPE_CODEX_ENABLED="$CODEX_READY" \
+    NSYSSCOPE_COMATE_ENABLED="$([[ -n "$COMATE_BIN" ]] && printf true || printf false)" \
+    NSYSSCOPE_COMATE_BIN="$COMATE_BIN" \
     NSYSSCOPE_CORS_ORIGINS="http://127.0.0.1:$ui_port,http://localhost:$ui_port" \
     NSYSSCOPE_MAX_WORKERS="${NSYSSCOPE_MAX_WORKERS:-1}" \
     NSYSSCOPE_SKILL_DIR="$SKILL_DIR" \
@@ -175,6 +216,23 @@ start() {
     npx vinext start --hostname 127.0.0.1 --port "$ui_port"
 }
 
+login_provider() {
+  case "${2:-}" in
+    codex)
+      command -v codex >/dev/null 2>&1 || fail "找不到 Codex CLI"
+      exec codex login
+      ;;
+    comate)
+      COMATE_BIN="$(discover_zulu)"
+      [[ -n "$COMATE_BIN" ]] || fail "找不到 Comate Zulu CLI"
+      exec "$COMATE_BIN" login --browser
+      ;;
+    *)
+      fail "请指定 Provider：./nsysscope login [codex|comate]"
+      ;;
+  esac
+}
+
 case "$COMMAND" in
   start)
     start
@@ -182,8 +240,11 @@ case "$COMMAND" in
   doctor)
     doctor
     ;;
+  login)
+    login_provider "$@"
+    ;;
   *)
-    printf 'Usage: %s [start|doctor]\n' "$0" >&2
+    printf 'Usage: %s [start|doctor|login codex|login comate]\n' "$0" >&2
     exit 2
     ;;
 esac
