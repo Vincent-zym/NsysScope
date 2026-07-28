@@ -61,9 +61,9 @@ discover_zulu() {
 run_comate_cli() {
   if [[ "$COMATE_PLATFORM" == "internal" ]]; then
     env -u HTTPS_PROXY -u HTTP_PROXY -u https_proxy -u http_proxy \
-      -u ALL_PROXY -u all_proxy "$COMATE_BIN" "$@"
+      -u ALL_PROXY -u all_proxy PLATFORM=internal "$COMATE_BIN" "$@"
   else
-    "$COMATE_BIN" "$@"
+    env PLATFORM=saas "$COMATE_BIN" "$@"
   fi
 }
 
@@ -241,10 +241,11 @@ login_provider() {
         || fail "Comate 平台只能是 internal 或 saas"
       if [[ "$COMATE_PLATFORM" == "internal" ]]; then
         exec env -u HTTPS_PROXY -u HTTP_PROXY -u https_proxy -u http_proxy \
-          -u ALL_PROXY -u all_proxy "$COMATE_BIN" login \
+          -u ALL_PROXY -u all_proxy PLATFORM=internal "$COMATE_BIN" login \
           --platform internal --no-browser --verbose
       fi
-      exec "$COMATE_BIN" login --platform saas --no-browser --verbose
+      exec env PLATFORM=saas "$COMATE_BIN" login \
+        --platform saas --no-browser --verbose
       ;;
     *)
       fail "请指定 Provider：./nsysscope login [codex|comate]；Comate 可追加 [internal|saas]"

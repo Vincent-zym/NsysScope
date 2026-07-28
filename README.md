@@ -61,7 +61,9 @@ Restart `./nsysscope start` after login, then select **Codex CLI** or
 shipped with the installed Comate extension; `NSYSSCOPE_COMATE_BIN` can override
 that path. The default Comate platform is `internal`; use
 `./nsysscope login comate saas` for public SaaS. Internal Comate commands bypass
-the shell HTTP proxy because the internal endpoint is directly reachable.
+the shell HTTP proxy because the internal endpoint is directly reachable. The
+launcher also supplies Zulu's required `PLATFORM` selector so that `status` and
+`run` reuse the token written by `login`.
 `NSYSSCOPE_COMATE_PLATFORM`, `NSYSSCOPE_COMATE_MODEL` and
 `NSYSSCOPE_COMATE_TIMEOUT_SECONDS` control the platform, optional model and
 timeout.

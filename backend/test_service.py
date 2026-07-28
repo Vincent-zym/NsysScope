@@ -171,6 +171,8 @@ def test_comate_provider_end_to_end_with_fake_zulu(tmp_path: Path) -> None:
             "ALL_PROXY", "all_proxy",
         )):
             raise SystemExit(3)
+        if os.environ.get("PLATFORM") != "internal":
+            raise SystemExit(4)
         cwd = Path(sys.argv[sys.argv.index("--cwd") + 1])
         package = Path({str(PACKAGE)!r})
         sources = list(package.glob("glm52_*")) + [

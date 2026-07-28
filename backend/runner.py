@@ -294,7 +294,11 @@ Requirements:
         }
 
     def comate_environment(self) -> dict[str, str]:
-        environment = {**os.environ, "NO_COLOR": "1"}
+        environment = {
+            **os.environ,
+            "NO_COLOR": "1",
+            "PLATFORM": self.settings.comate_platform,
+        }
         if self.settings.comate_platform == "internal":
             for key in ("HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy", "ALL_PROXY", "all_proxy"):
                 environment.pop(key, None)
