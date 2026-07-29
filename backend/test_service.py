@@ -178,6 +178,40 @@ def test_frontend_payload_repairs_legacy_semantic_operator_alias() -> None:
     assert operator["fullName"] == raw["operator_name"]
 
 
+def test_frontend_payload_rejects_auxiliary_kernel_from_core_category() -> None:
+    base = {
+        "序号": "7",
+        "module": "self_attn/indexer",
+        "duration_min_us": "10",
+        "duration_max_us": "14",
+        "duration_diff_us": "4",
+        "start_ns": "1000",
+        "end_ns": "1300",
+        "device": "0",
+        "stream": "7",
+        "python_function": "model.forward -> indexer",
+        "mapping_reason": "source evidence",
+    }
+    view = {
+        "功能模块": "NSA Indexer",
+        "算子耗时(us)": "12",
+        "算子耗时占比(%)": "1.2",
+        "shape": "",
+        "mfu": "",
+        "功能介绍": "helper",
+    }
+    for kernel in (
+        "per_token_group_quant_8bit_kernel",
+        "void flashinfer::norm::generalLayerNorm<float>(float*)",
+    ):
+        operator = build_operator_payload(
+            {**base, "operator_name": kernel},
+            {**view, "算子名称": kernel},
+            {"category": "core"},
+        )
+        assert operator["category"] == "auxiliary"
+
+
 def test_log_pagination_and_conversion_retry(tmp_path: Path) -> None:
     if not PACKAGE.exists():
         return

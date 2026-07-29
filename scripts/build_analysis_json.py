@@ -11,6 +11,20 @@ from pathlib import Path
 from typing import Any
 
 
+COMMUNICATION_RE = re.compile(
+    r"nccl|allreduce|all_reduce|alltoall|all_to_all|reduce_scatter|"
+    r"allgather|all_gather|broadcast|sendrecv|send_recv",
+    re.I,
+)
+AUXILIARY_RE = re.compile(
+    r"quant|dequant|requant|layer[_]?norm|layernorm|rms[_]?norm|rmsnorm|"
+    r"generalLayerNorm|rope|rotary|topk|sort|dispatch|permute|unpermute|"
+    r"scatter|gather|allgather|cache|memcpy|memset|copy|cast|convert|"
+    r"transpose|reshape|index(?:ing)?|hadamard|activation|silu|gelu",
+    re.I,
+)
+
+
 def read_csv(path: Path) -> list[dict[str, str]]:
     with path.open(encoding="utf-8-sig", newline="") as handle:
         rows = []
@@ -186,6 +200,15 @@ def build_operator_payload(
     rule: dict[str, Any],
 ) -> dict[str, Any]:
     """Build one frontend row, keeping the overview table's human operator name."""
+    operator = raw["operator_name"]
+    leaf = compact_kernel_name(operator).split("<", 1)[0]
+    category = rule.get("category", "auxiliary")
+    if category == "communication" or COMMUNICATION_RE.search(f"{raw['module']} {operator}"):
+        category = "communication"
+    elif AUXILIARY_RE.search(leaf):
+        # Never let a broad semantic-map rule display an obvious helper kernel
+        # as core compute.
+        category = "auxiliary"
     return {
         "index": int(raw["序号"]),
         "module": raw["module"],
@@ -193,7 +216,7 @@ def build_operator_payload(
         "name": view["算子名称"],
         "kernelName": compact_kernel_name(raw["operator_name"], view["算子名称"]),
         "fullName": raw["operator_name"],
-        "category": rule.get("category", "auxiliary"),
+        "category": category,
         "durationUs": number(view["算子耗时(us)"]),
         "durationPct": number(view["算子耗时占比(%)"]),
         "minUs": number(raw["duration_min_us"]),
