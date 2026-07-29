@@ -48,10 +48,15 @@ class Settings:
     def from_env(cls) -> "Settings":
         project = Path(__file__).resolve().parents[1]
         default_root = Path.home().resolve()
+        default_cache = Path(
+            os.getenv("XDG_CACHE_HOME", Path.home() / ".cache")
+        ).expanduser().resolve()
         bundled_skill = project / "bundled" / "skills" / "sglang-nsys-static-analysis"
         comate_bin = os.getenv("NSYSSCOPE_COMATE_BIN", "") or _discover_zulu()
         return cls(
-            data_dir=Path(os.getenv("NSYSSCOPE_DATA_DIR", project / ".data")).expanduser().resolve(),
+            data_dir=Path(os.getenv(
+                "NSYSSCOPE_DATA_DIR", default_cache / "nsysscope" / "state",
+            )).expanduser().resolve(),
             allowed_roots=_paths(os.getenv("NSYSSCOPE_ALLOWED_ROOTS", str(default_root))),
             api_token=os.getenv("NSYSSCOPE_API_TOKEN", ""),
             cors_origins=tuple(
