@@ -105,6 +105,30 @@ def test_auth_and_path_boundary(tmp_path: Path) -> None:
     assert rejected.status_code == 422
 
 
+def test_existing_analysis_json_directory_import(tmp_path: Path) -> None:
+    package = tmp_path / "analysis-only"
+    package.mkdir()
+    shutil.copy2(PROJECT / "public/demo-analysis.json", package / "analysis.json")
+    client = TestClient(create_app(settings(tmp_path)))
+    headers = {"X-NsysScope-Token": "test-token"}
+    response = client.post("/api/jobs", headers=headers, json={
+        "mode": "existing_package",
+        "model_name": "Imported analysis",
+        "stage": "prefill",
+        "hardware": "Unknown",
+        "existing_package_path": str(package),
+        "prefix": "does-not-exist",
+    })
+    assert response.status_code == 200, response.text
+    job = response.json()
+    for _ in range(100):
+        job = client.get(f"/api/jobs/{job['id']}", headers=headers).json()
+        if job["status"] in {"succeeded", "failed"}:
+            break
+        time.sleep(0.05)
+    assert job["status"] == "succeeded", job
+
+
 def test_converter_accepts_current_stats_schema() -> None:
     stats = {
         "accepted_full_template_sample_count": 1188,

@@ -89,10 +89,18 @@ class JobRunner:
                 )
                 self.state(job_id, job_dir, "converting", 70, "正在转换已有六表分析包")
                 csv_package = self.csv_package_dir(package)
-                prefix = self.detect_prefix(csv_package, request.prefix)
-                if not (package / "analysis.json").exists():
+                analysis_path = package / "analysis.json"
+                if analysis_path.exists():
+                    try:
+                        prefix = self.detect_prefix(csv_package, request.prefix)
+                    except RuntimeError:
+                        prefix = None
+                    if prefix:
+                        self.ensure_xlsx(csv_package, package / "xlsx")
+                else:
+                    prefix = self.detect_prefix(csv_package, request.prefix)
                     self.convert(csv_package, package / "analysis.json", prefix)
-                self.ensure_xlsx(csv_package, package / "xlsx")
+                    self.ensure_xlsx(csv_package, package / "xlsx")
             else:
                 paths = self.resolve_inputs(request)
                 context = {key: str(value) if value else None for key, value in paths.items()}
