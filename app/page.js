@@ -79,15 +79,23 @@ function StageBars({ stages, selected, onSelect, colors }) {
   );
 }
 
-function Timeline({ operators, selectedStage, colors, onPick }) {
+function Timeline({ operators, stages, selectedStage, colors, onPick, onStage }) {
   const start = Math.min(...operators.map((op) => op.startNs));
   const end = Math.max(...operators.map((op) => op.endNs));
-  const span = end - start;
+  const span = Math.max(end - start, 1);
   const streams = [...new Set(operators.map((op) => op.stream))].sort((a, b) => a - b);
+  const stageByName = Object.fromEntries(stages.map((stage) => [stage.name, stage]));
+  const orderedStageNames = [...new Set(
+    [...operators].sort((a, b) => a.startNs - b.startNs).map((op) => op.stage),
+  )];
+  const orderedStages = [
+    ...orderedStageNames.map((name) => stageByName[name]).filter(Boolean),
+    ...stages.filter((stage) => !orderedStageNames.includes(stage.name)),
+  ];
   return (
     <div className="timeline">
       <div className="axis">
-        <span>0</span><span>{fmt(span / 2000)} ms</span><span>{fmt(span / 1000)} ms</span>
+        <span>0</span><span>{fmt(span / 2_000_000)} ms</span><span>{fmt(span / 1_000_000)} ms</span>
       </div>
       {streams.map((stream) => (
         <div className="lane" key={stream}>
@@ -108,6 +116,24 @@ function Timeline({ operators, selectedStage, colors, onPick }) {
           </div>
         </div>
       ))}
+      <div className="timeline-stage-list">
+        <div className="timeline-stage-heading">
+          <b>功能模块执行顺序</b>
+          <span>点击模块，高亮对应时间区间</span>
+        </div>
+        <div className="timeline-stage-buttons">
+          {orderedStages.map((stage, index) => (
+            <button
+              key={stage.name}
+              className={selectedStage === stage.name ? "active" : ""}
+              onClick={() => onStage(selectedStage === stage.name ? null : stage.name)}
+            >
+              <i style={{ background: colors[stage.name] }}>{index + 1}</i>
+              <span><b>{stage.name}</b><small>{fmt(stage.durationUs)} us · {fmt(stage.durationPct)}%</small></span>
+            </button>
+          ))}
+        </div>
+      </div>
     </div>
   );
 }
@@ -124,24 +150,38 @@ function ClassificationDonut({ classifications }) {
     }),
   }));
   const totalDuration = rows.reduce((sum, row) => sum + row.durationUs, 0);
+  const radius = 54;
+  const circumference = 2 * Math.PI * radius;
   let cursor = 0;
-  const slices = rows.map((row) => {
-    const start = cursor;
-    const share = totalDuration ? row.durationUs / totalDuration * 100 : 0;
-    cursor += share;
-    return `${row.color} ${start}% ${cursor}%`;
-  });
   return (
     <div className="classification-summary">
-      <div className="donut" style={{ background: `conic-gradient(${slices.join(",")})` }}>
-        <div><b>{rows.reduce((sum, row) => sum + row.count, 0)}</b><span>算子</span></div>
+      <div className="donut">
+        <svg viewBox="0 0 144 144" aria-label="计算、通信和辅助算子耗时占比">
+          <circle className="donut-track" cx="72" cy="72" r={radius} />
+          {rows.map((row) => {
+            const share = totalDuration ? row.durationUs / totalDuration * 100 : 0;
+            const offset = -cursor / 100 * circumference;
+            cursor += share;
+            return share > 0 && <circle
+              key={row.name}
+              className="donut-segment"
+              cx="72"
+              cy="72"
+              r={radius}
+              stroke={row.color}
+              strokeDasharray={`${Math.max(share / 100 * circumference - 4, 1)} ${circumference}`}
+              strokeDashoffset={offset}
+            />;
+          })}
+        </svg>
+        <div><b>{rows.reduce((sum, row) => sum + row.count, 0)}</b><span>算子总数</span></div>
       </div>
       <div className="classification-legend">
         {rows.map((row) => {
           const share = totalDuration ? row.durationUs / totalDuration * 100 : 0;
           return <div key={row.name}>
             <i style={{ background: row.color }} />
-            <span><b>{row.label}</b><small>{row.count} 个算子</small></span>
+            <span><b>{row.label}</b><small>{row.count} 个算子 · {fmt(row.durationUs)} us</small></span>
             <strong>{fmt(share)}%</strong>
           </div>;
         })}
@@ -489,13 +529,16 @@ export default function Dashboard() {
 
   const filtered = useMemo(() => {
     if (!data) return [];
-    return data.operators.filter((op) => {
+    const operators = data.operators.filter((op) => {
       const stageOk = !selectedStage || op.stage === selectedStage;
       const categoryOk = category === "all" || op.category === category;
       const q = query.trim().toLowerCase();
       const queryOk = !q || `${op.name} ${op.module} ${op.stage}`.toLowerCase().includes(q);
       return stageOk && categoryOk && queryOk;
-    }).sort((a, b) => b.durationUs - a.durationUs);
+    });
+    return operators.sort(category === "all"
+      ? (a, b) => a.startNs - b.startNs || a.index - b.index
+      : (a, b) => b.durationUs - a.durationUs || a.startNs - b.startNs);
   }, [data, selectedStage, category, query]);
 
   async function loadFile(event) {
@@ -573,14 +616,21 @@ export default function Dashboard() {
           </article>
 
           <article className="panel classification-panel">
-            <div className="panel-head"><div><span>COMPOSITION</span><h2>计算 · 通信 · 辅助模块</h2></div><small>按三类累计耗时归一化</small></div>
+            <div className="panel-head"><div><span>COMPOSITION</span><h2>计算 · 通信 · 辅助算子占比</h2></div><small>按三类累计耗时归一化</small></div>
             <ClassificationDonut classifications={data.classifications} />
           </article>
         </section>
 
         <section className="panel timeline-panel">
-          <div className="panel-head"><div><span>CUDA TIMELINE</span><h2>重复单元时间线</h2></div><small>按真实 stream 展示 · 点击 kernel 查看证据</small></div>
-          <Timeline operators={data.operators} selectedStage={selectedStage} colors={colors} onPick={setSelectedOp} />
+          <div className="panel-head"><div><span>CUDA TIMELINE</span><h2>多 Stream 时间线</h2></div><small>按真实 Stream 展示 · 点击算子查看证据</small></div>
+          <Timeline
+            operators={data.operators}
+            stages={data.stages}
+            selectedStage={selectedStage}
+            colors={colors}
+            onPick={setSelectedOp}
+            onStage={setSelectedStage}
+          />
         </section>
 
         <section className="operator-workbench">
@@ -588,27 +638,36 @@ export default function Dashboard() {
             <div className="panel-head table-tools">
               <div><span>OPERATORS</span><h2>算子明细</h2></div>
               <div className="filters">
-                <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="搜索算子、module…" />
+                <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="搜索算子、功能模块…" />
                 {["all", "core", "communication", "auxiliary"].map((key) => (
                   <button key={key} className={category === key ? "active" : ""} onClick={() => setCategory(key)}>
-                    {key === "all" ? "全部" : CATEGORY[key].label}
+                    {key === "all" ? "全部算子" : CATEGORY[key].label}
                   </button>
                 ))}
               </div>
             </div>
             <div className="table-wrap">
-              <table>
-                <thead><tr><th>#</th><th>算子名</th><th>分类</th><th>耗时(us)</th><th>占比(%)</th><th>Shape</th><th>MFU(%)</th></tr></thead>
+              <table className="operator-table">
+                <colgroup>
+                  <col className="col-index" />
+                  <col className="col-operator" />
+                  <col className="col-category" />
+                  <col className="col-duration" />
+                  <col className="col-share" />
+                  <col className="col-shape" />
+                  <col className="col-mfu" />
+                </colgroup>
+                <thead><tr><th className="center">#</th><th>算子名称 / 功能模块</th><th>分类</th><th className="numeric">耗时(us)</th><th className="numeric">占比(%)</th><th>Shape</th><th className="numeric">MFU(%)</th></tr></thead>
                 <tbody>
                   {filtered.map((op) => (
                     <tr key={op.index} className={selectedOp?.index === op.index ? "selected" : ""} onClick={() => setSelectedOp(op)}>
-                      <td className="mono muted">{op.index}</td>
-                      <td><div className="op-title"><i style={{ background: colors[op.stage] }} /><div><b>{op.name}</b><span>{op.module}</span><small>{op.stage}</small></div></div></td>
+                      <td className="mono muted center">{op.index}</td>
+                      <td><div className="op-title"><i style={{ background: colors[op.stage] }} /><div><b title={op.name}>{op.name}</b><span>{op.stage}</span></div></div></td>
                       <td><span className={`category ${op.category}`}>{CATEGORY[op.category]?.label}</span></td>
-                      <td className="mono">{fmt(op.durationUs)}</td>
-                      <td className="mono">{fmt(op.durationPct)}</td>
+                      <td className="mono numeric">{fmt(op.durationUs)}</td>
+                      <td className="mono numeric">{fmt(op.durationPct)}</td>
                       <td className="mono shape-cell" title={op.shape || ""}>{op.shape || "—"}</td>
-                      <td className="mono">{op.mfu != null ? fmt(op.mfu) : "—"}</td>
+                      <td className="mono numeric">{op.mfu != null ? fmt(op.mfu) : "—"}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -618,7 +677,11 @@ export default function Dashboard() {
           <aside className="panel evidence-panel">
             <div className="panel-head"><div><span>EVIDENCE</span><h2>算子证据</h2></div><small>{selectedOp ? `#${selectedOp.index}` : "选择算子"}</small></div>
             {selectedOp ? <div className="evidence-body">
-              <div className="evidence-title"><i style={{ background: colors[selectedOp.stage] }} /><div><b>{selectedOp.name}</b><span>{selectedOp.stage} · {selectedOp.module}</span></div></div>
+              <div className="evidence-title">
+                <i style={{ background: colors[selectedOp.stage] }}>{selectedOp.index}</i>
+                <div><b>{selectedOp.name}</b><span>{selectedOp.stage}</span></div>
+                <em className={`category ${selectedOp.category}`}>{CATEGORY[selectedOp.category]?.label}</em>
+              </div>
               <div className="evidence-stats">
                 <div><span>平均耗时</span><b>{fmt(selectedOp.durationUs)} us</b></div>
                 <div><span>最小 / 最大</span><b>{fmt(selectedOp.minUs)} / {fmt(selectedOp.maxUs)} us</b></div>
@@ -626,13 +689,17 @@ export default function Dashboard() {
               </div>
               <dl className="evidence-facts">
                 <div><dt>Shape</dt><dd>{selectedOp.shape || "N/A"}</dd></div>
-                <div><dt>分类</dt><dd>{CATEGORY[selectedOp.category]?.label || selectedOp.category}</dd></div>
+                <div><dt>技术模块</dt><dd>{selectedOp.module || "N/A"}</dd></div>
                 <div><dt>设备 / Stream</dt><dd>GPU {selectedOp.device} / Stream {selectedOp.stream}</dd></div>
                 <div><dt>层内序号</dt><dd>#{selectedOp.index}</dd></div>
               </dl>
-              <h3>功能说明</h3><p>{selectedOp.introduction || "暂无说明"}</p>
-              <h3>Python 调用链</h3><CallStack value={selectedOp.pythonFunction} />
-              <details><summary>完整 CUDA 符号</summary><code>{selectedOp.fullName}</code></details>
+              <section className="evidence-section">
+                <h3>功能说明</h3><p>{selectedOp.introduction || "暂无说明"}</p>
+              </section>
+              <section className="evidence-section">
+                <h3>Python 调用链</h3><CallStack value={selectedOp.pythonFunction} />
+              </section>
+              <details className="cuda-symbol"><summary>查看完整 CUDA 符号</summary><code>{selectedOp.fullName}</code></details>
             </div> : <div className="evidence-empty">从左侧选择一个算子查看详细信息。</div>}
           </aside>
         </section>

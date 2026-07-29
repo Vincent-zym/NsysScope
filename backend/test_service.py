@@ -16,7 +16,11 @@ from backend.config import Settings
 from backend.models import JobCreate
 from backend.runner import JobRunner
 from backend.store import JobStore
-from scripts.build_analysis_json import included_devices, stable_sample_count
+from scripts.build_analysis_json import (
+    build_operator_payload,
+    included_devices,
+    stable_sample_count,
+)
 
 
 PROJECT = Path(__file__).resolve().parents[1]
@@ -139,6 +143,38 @@ def test_converter_accepts_current_stats_schema() -> None:
     }
     assert stable_sample_count(stats, {}) == 1188
     assert included_devices(stats, {}) == [0, 1]
+
+
+def test_frontend_operator_name_comes_from_overview_table() -> None:
+    raw = {
+        "序号": "7",
+        "module": "attention/q_projection",
+        "operator_name": "void deep_gemm::very_long_raw_cuda_symbol<int>()",
+        "duration_min_us": "10",
+        "duration_max_us": "14",
+        "duration_diff_us": "4",
+        "start_ns": "1000",
+        "end_ns": "1300",
+        "device": "0",
+        "stream": "7",
+        "python_function": "model.forward -> q_proj",
+        "mapping_reason": "source evidence",
+    }
+    overview = {
+        "功能模块": "QKV 投影",
+        "算子名称": "Q-B 投影",
+        "算子耗时(us)": "12",
+        "算子耗时占比(%)": "1.2",
+        "shape": "(M=1,N=2,K=3)",
+        "mfu": "60%",
+        "功能介绍": "简化后的算子说明",
+    }
+
+    operator = build_operator_payload(raw, overview, {"category": "core"})
+
+    assert operator["name"] == "Q-B 投影"
+    assert operator["stage"] == "QKV 投影"
+    assert operator["fullName"] == raw["operator_name"]
 
 
 def test_log_pagination_and_conversion_retry(tmp_path: Path) -> None:

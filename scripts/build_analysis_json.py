@@ -143,6 +143,36 @@ def match_rule(module: str, operator: str, rules: list[dict[str, Any]]) -> dict[
     return {}
 
 
+def build_operator_payload(
+    raw: dict[str, str],
+    view: dict[str, str],
+    rule: dict[str, Any],
+) -> dict[str, Any]:
+    """Build one frontend row, keeping the overview table's human operator name."""
+    return {
+        "index": int(raw["序号"]),
+        "module": raw["module"],
+        "stage": view["功能模块"],
+        "name": view["算子名称"],
+        "fullName": raw["operator_name"],
+        "category": rule.get("category", "auxiliary"),
+        "durationUs": number(view["算子耗时(us)"]),
+        "durationPct": number(view["算子耗时占比(%)"]),
+        "minUs": number(raw["duration_min_us"]),
+        "maxUs": number(raw["duration_max_us"]),
+        "diffUs": number(raw["duration_diff_us"]),
+        "shape": view["shape"] or None,
+        "mfu": number(view["mfu"]),
+        "startNs": int(raw["start_ns"]),
+        "endNs": int(raw["end_ns"]),
+        "device": int(raw["device"]),
+        "stream": int(raw["stream"]),
+        "pythonFunction": raw["python_function"],
+        "introduction": view["功能介绍"],
+        "mappingReason": raw["mapping_reason"],
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("input_dir", type=Path)
@@ -180,28 +210,7 @@ def main() -> None:
     operators = []
     for raw, view in zip(origin_ops, overview, strict=True):
         rule = match_rule(raw["module"], raw["operator_name"], semantic.get("rules", []))
-        operators.append({
-            "index": int(raw["序号"]),
-            "module": raw["module"],
-            "stage": view["功能模块"],
-            "name": view["算子名称"],
-            "fullName": raw["operator_name"],
-            "category": rule.get("category", "auxiliary"),
-            "durationUs": number(view["算子耗时(us)"]),
-            "durationPct": number(view["算子耗时占比(%)"]),
-            "minUs": number(raw["duration_min_us"]),
-            "maxUs": number(raw["duration_max_us"]),
-            "diffUs": number(raw["duration_diff_us"]),
-            "shape": view["shape"] or None,
-            "mfu": number(view["mfu"]),
-            "startNs": int(raw["start_ns"]),
-            "endNs": int(raw["end_ns"]),
-            "device": int(raw["device"]),
-            "stream": int(raw["stream"]),
-            "pythonFunction": raw["python_function"],
-            "introduction": view["功能介绍"],
-            "mappingReason": raw["mapping_reason"],
-        })
+        operators.append(build_operator_payload(raw, view, rule))
 
     payload = {
         "schemaVersion": "1.0",
