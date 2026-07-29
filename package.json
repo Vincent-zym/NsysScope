@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "next dev",
     "build": "vinext build && node scripts/prepare_sites_dist.mjs",
+    "build:local": "vite build --config vite.local.config.mjs",
     "build:next": "next build",
     "start": "next start",
     "lint": "next lint",

@@ -12,14 +12,16 @@ cd /home/users/zhongyuanming/NsysScope
 
 The command automatically:
 
-- verifies Python, Node.js, Nsight Systems, at least one Agent Provider and the
-  analysis skill;
-- creates or updates the local Python and Node.js dependencies when needed;
-- builds the dashboard;
-- chooses available internal ports;
-- generates an internal API token;
-- starts the Analyzer and dashboard together;
-- stops both processes when `Ctrl-C` is pressed.
+- verifies Python, Nsight Systems, at least one Agent Provider and the analysis
+  skill;
+- creates or updates the small Python environment when needed;
+- starts the prebuilt dashboard and Analyzer as one FastAPI process;
+- chooses an available loopback port;
+- removes temporary state when `Ctrl-C` is pressed.
+
+Node.js and npm are not required for normal local use. They are only development
+dependencies used to rebuild the checked-in browser bundle or deploy the hosted
+demo.
 
 Open the page printed by the command, normally:
 

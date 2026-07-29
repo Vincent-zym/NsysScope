@@ -83,7 +83,7 @@ run_comate_cli() {
 doctor() {
   local failed=0 provider_ready=0 comate_status comate_status_code
   say "检查运行环境"
-  for command_name in python3 node npm nsys openssl curl flock; do
+  for command_name in python3 nsys curl flock; do
     if command -v "$command_name" >/dev/null 2>&1; then
       printf '  ✓ %-9s %s\n' "$command_name" "$(command -v "$command_name")"
     else
@@ -153,21 +153,6 @@ prepare_python() {
   fi
 }
 
-prepare_frontend() {
-  local lock_hash
-  lock_hash="$(sha256sum "$PROJECT_DIR/package-lock.json" | awk '{print $1}')"
-  local stamp="$VENV_DIR/.nsysscope-package-lock.sha256"
-  if [[ -x "$PROJECT_DIR/node_modules/.bin/vinext" ]] && [[ ! -f "$stamp" ]]; then
-    printf '%s\n' "$lock_hash" > "$stamp"
-  elif [[ ! -x "$PROJECT_DIR/node_modules/.bin/vinext" ]] || [[ "$(<"$stamp")" != "$lock_hash" ]]; then
-    say "安装前端依赖"
-    npm install
-    printf '%s\n' "$lock_hash" > "$stamp"
-  fi
-  say "构建本地前端"
-  npm run build
-}
-
 start() {
   cd "$PROJECT_DIR"
   doctor
@@ -188,22 +173,15 @@ start() {
   RUNTIME_DIR="$(mktemp -d "$DATA_DIR/runtime.XXXXXX")"
   trap cleanup EXIT
   prepare_python
-  prepare_frontend
 
-  local analyzer_port ui_port internal_token
-  analyzer_port="$(find_port "${NSYSSCOPE_PORT:-8787}")"
+  local ui_port
   ui_port="$(find_port "${NSYSSCOPE_UI_PORT:-3000}")"
-  if [[ "$ui_port" == "$analyzer_port" ]]; then
-    ui_port="$(find_port "$((ui_port + 1))")"
-  fi
-  internal_token="$(openssl rand -hex 24)"
-  mkdir -p "$DATA_DIR"
 
-  say "启动 Analyzer（内部端口 $analyzer_port）"
+  say "启动 NsysScope（端口 $ui_port）"
   env \
     NSYSSCOPE_DATA_DIR="$DATA_DIR" \
     NSYSSCOPE_ALLOWED_ROOTS="$ALLOWED_ROOTS" \
-    NSYSSCOPE_API_TOKEN="$internal_token" \
+    NSYSSCOPE_API_TOKEN="" \
     NSYSSCOPE_CODEX_ENABLED="$CODEX_READY" \
     NSYSSCOPE_COMATE_ENABLED="$([[ -n "$COMATE_BIN" ]] && printf true || printf false)" \
     NSYSSCOPE_COMATE_BIN="$COMATE_BIN" \
@@ -212,7 +190,7 @@ start() {
     NSYSSCOPE_MAX_WORKERS="${NSYSSCOPE_MAX_WORKERS:-1}" \
     NSYSSCOPE_SKILL_DIR="$SKILL_DIR" \
     "$VENV_DIR/bin/uvicorn" backend.app:app \
-      --host 127.0.0.1 --port "$analyzer_port" \
+      --host 127.0.0.1 --port "$ui_port" \
       --no-access-log >>"$RUNTIME_DIR/analyzer.log" 2>&1 &
   ANALYZER_PID=$!
   trap cleanup EXIT
@@ -221,7 +199,7 @@ start() {
   local ready=0
   for _ in {1..80}; do
     if curl --noproxy '*' --silent --fail \
-      "http://127.0.0.1:$analyzer_port/api/health" >/dev/null 2>&1; then
+      "http://127.0.0.1:$ui_port/api/health" >/dev/null 2>&1; then
       ready=1
       break
     fi
@@ -249,11 +227,7 @@ start() {
   printf '\n'
   say "按 Ctrl-C 停止全部服务"
 
-  env \
-    NSYSSCOPE_ANALYZER_INTERNAL_URL="http://127.0.0.1:$analyzer_port" \
-    NSYSSCOPE_INTERNAL_TOKEN="$internal_token" \
-    NO_PROXY="127.0.0.1,localhost,${NO_PROXY:-}" \
-    npx vinext start --hostname 127.0.0.1 --port "$ui_port"
+  wait "$ANALYZER_PID"
 }
 
 login_provider() {

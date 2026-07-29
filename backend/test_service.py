@@ -92,6 +92,9 @@ def test_existing_package_job(tmp_path: Path) -> None:
 
 def test_auth_and_path_boundary(tmp_path: Path) -> None:
     client = TestClient(create_app(settings(tmp_path)))
+    dashboard = client.get("/")
+    assert dashboard.status_code == 200
+    assert "NsysScope" in dashboard.text
     assert client.get("/api/health").status_code == 200
     unauthorized = client.get("/api/jobs")
     assert unauthorized.status_code == 401

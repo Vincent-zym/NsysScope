@@ -71,14 +71,17 @@ cd /path/to/NsysScope
 ./nsysscope start
 ```
 
-The launcher checks prerequisites, prepares dependencies, generates an
-ephemeral internal token, starts the Analyzer on loopback, builds and starts the
-dashboard, and shuts both down together. The browser uses the same-origin
-`/analyzer-api/*` route; the server-side proxy injects the token, so normal local
-use requires one port and no connection form.
+The launcher checks prerequisites, prepares only the Python dependencies and
+starts one FastAPI process on loopback. FastAPI serves both the checked-in
+browser bundle and `/api/*`, so normal local use needs neither Node.js nor a
+second frontend process. The local same-origin API does not require a token;
+loopback binding remains the security boundary.
+
+The browser bundle is rebuilt for development with `npm run build:local`.
+Node.js dependencies are not installed or inspected by the normal launcher.
 
 The lower-level `npm run analyzer` command remains available for development or
-an externally managed deployment. For a privately deployed dashboard, expose
+an externally managed deployment. For a remotely deployed dashboard, expose
 the Analyzer API through an authenticated HTTPS reverse proxy and configure the
 advanced connection settings. Do not expose the analyzer directly to the public
 internet.

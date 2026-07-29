@@ -125,7 +125,8 @@ function JobDialog({ open, onClose, onLoaded }) {
 
   useEffect(() => {
     if (!open) return;
-    setApi(localStorage.getItem("nsysscope.api.v2") || "/analyzer-api");
+    const defaultApi = window.__NSYSSCOPE_LOCAL__ ? "." : "/analyzer-api";
+    setApi(localStorage.getItem("nsysscope.api.v2") ?? defaultApi);
     setToken(sessionStorage.getItem("nsysscope.token") || "");
   }, [open]);
 
