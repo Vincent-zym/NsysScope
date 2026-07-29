@@ -325,6 +325,19 @@ class JobRunner:
     ) -> str:
         return f"""Use the activated `sglang-nsys-static-analysis` skill.
 
+<user_acceptance_criteria>
+{request.notes.strip() or "No additional scope constraint was supplied."}
+</user_acceptance_criteria>
+
+The acceptance criteria above are binding task requirements, not optional notes.
+They have priority when selecting the analyzed layer, branch, and repeating-unit boundary.
+If the user requests a specific layer subtype or branch, select exactly one complete layer
+matching that subtype; do not silently widen it to a multi-layer architectural period.
+In particular, "GLM5.2 non-shared Indexer" means one complete GLM5.2 layer containing the
+non-shared Indexer, not the four-layer full/shared Indexer cycle. If the requested scope
+cannot be proven from the supplied trace and materials, fail validation and explain why
+instead of substituting another scope.
+
 Analyze this task without asking follow-up questions:
 - nsys/sqlite: {sqlite_path}
 - original report: {paths['report']}
@@ -335,18 +348,19 @@ Analyze this task without asking follow-up questions:
 - deployment YAML/script: {paths['launch']}
 - model source root: {paths['source']}
 - design notes: {paths['design'] or 'not supplied'}
-- user notes: {request.notes or 'none'}
 
 Write all artifacts only under:
 {job_dir}
 
 Requirements:
 1. Read model evidence first and derive a task-specific functional taxonomy.
-2. Select and prove one complete repeating unit.
+2. Select and prove the exact complete unit required by `user_acceptance_criteria`.
 3. Generate the normalized six CSV tables with prefix `{request.prefix}`.
 4. Write `{request.prefix}_analysis_manifest.json`, semantic map, stable-statistics sidecar,
    and `validation_report.json`.
-5. Validate every required invariant and finish only when validation passes.
+5. Validate every required invariant, including the requested scope, and finish only when
+   validation passes. The manifest boundary evidence must explicitly show how the selected
+   unit satisfies the acceptance criteria.
 6. Never edit input reports, config, launch files, design notes, or model source.
 """
 

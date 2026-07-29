@@ -92,7 +92,14 @@ Click **新建分析**, then provide:
 - the corresponding SGLang/model source root;
 - model name, inference stage and hardware;
 - an empty or not-yet-created result directory;
-- optional design notes and task-specific requirements.
+- optional design notes;
+- analysis scope and hard acceptance criteria.
+
+Scope criteria are binding. If a specific layer subtype or branch is requested,
+the Agent must select that exact unit or fail with evidence; it may not silently
+replace it with a wider architectural period. For example, requesting a single
+GLM5.2 non-shared Indexer layer must not select the four-layer full/shared
+Indexer cycle.
 
 The paths are resolved on the machine running NsysScope. By default, the tool
 allows materials under the directory containing this repository. Override the

@@ -381,6 +381,7 @@ def test_codex_selected_model_is_forwarded(tmp_path: Path) -> None:
         launch_path=str(launch),
         source_path=str(source),
         result_path=str(job_dir),
+        notes="只分析 GLM5.2 的单个非 shared Indexer 层",
     )
     captured: dict[str, object] = {}
 
@@ -403,6 +404,10 @@ def test_codex_selected_model_is_forwarded(tmp_path: Path) -> None:
     )
     command = captured["command"]
     assert command[command.index("--model") + 1] == "quality-codex"
+    prompt = captured["stdin"]
+    assert "<user_acceptance_criteria>" in prompt
+    assert "只分析 GLM5.2 的单个非 shared Indexer 层" in prompt
+    assert "not the four-layer full/shared Indexer cycle" in prompt
 
 
 def test_job_log_is_bounded_and_clips_large_lines(tmp_path: Path) -> None:

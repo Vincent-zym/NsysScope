@@ -20,6 +20,28 @@ const fmt = (value, digits = 2) =>
 
 const basename = (path) => path?.split("/").pop() || "—";
 
+function calculateOverlapPct(operators) {
+  const intervals = operators
+    .map((op) => [Number(op.startNs), Number(op.endNs)])
+    .filter(([start, end]) => Number.isFinite(start) && Number.isFinite(end) && end > start)
+    .sort((a, b) => a[0] - b[0]);
+  if (!intervals.length) return null;
+
+  const accumulatedNs = intervals.reduce((sum, [start, end]) => sum + end - start, 0);
+  let unionNs = 0;
+  let [currentStart, currentEnd] = intervals[0];
+  for (const [start, end] of intervals.slice(1)) {
+    if (start <= currentEnd) {
+      currentEnd = Math.max(currentEnd, end);
+    } else {
+      unionNs += currentEnd - currentStart;
+      [currentStart, currentEnd] = [start, end];
+    }
+  }
+  unionNs += currentEnd - currentStart;
+  return accumulatedNs ? Math.max(0, (accumulatedNs - unionNs) / accumulatedNs * 100) : null;
+}
+
 function Metric({ label, value, suffix, note, accent }) {
   return (
     <article className="metric">
@@ -90,12 +112,52 @@ function Timeline({ operators, selectedStage, colors, onPick }) {
   );
 }
 
-function Insight({ index, title, children, tone = "blue" }) {
+function ClassificationDonut({ classifications }) {
+  const rows = [
+    { name: "核心计算", label: "计算", color: "#6a91ff" },
+    { name: "通信", label: "通信", color: "#f4b860" },
+    { name: "辅助算子", label: "辅助", color: "#66758c" },
+  ].map((item) => ({
+    ...item,
+    ...(classifications.find((entry) => entry.name === item.name) || {
+      count: 0, durationUs: 0,
+    }),
+  }));
+  const totalDuration = rows.reduce((sum, row) => sum + row.durationUs, 0);
+  let cursor = 0;
+  const slices = rows.map((row) => {
+    const start = cursor;
+    const share = totalDuration ? row.durationUs / totalDuration * 100 : 0;
+    cursor += share;
+    return `${row.color} ${start}% ${cursor}%`;
+  });
   return (
-    <article className={`insight ${tone}`}>
-      <span>{String(index).padStart(2, "0")}</span>
-      <div><strong>{title}</strong><p>{children}</p></div>
-    </article>
+    <div className="classification-summary">
+      <div className="donut" style={{ background: `conic-gradient(${slices.join(",")})` }}>
+        <div><b>{rows.reduce((sum, row) => sum + row.count, 0)}</b><span>算子</span></div>
+      </div>
+      <div className="classification-legend">
+        {rows.map((row) => {
+          const share = totalDuration ? row.durationUs / totalDuration * 100 : 0;
+          return <div key={row.name}>
+            <i style={{ background: row.color }} />
+            <span><b>{row.label}</b><small>{row.count} 个算子</small></span>
+            <strong>{fmt(share)}%</strong>
+          </div>;
+        })}
+      </div>
+    </div>
+  );
+}
+
+function CallStack({ value }) {
+  const frames = String(value || "").split(/\s*(?:->|→)\s*/).filter(Boolean);
+  return (
+    <ol className="call-stack">
+      {frames.length
+        ? frames.map((frame, index) => <li key={`${index}-${frame}`}><span>{index + 1}</span><code>{frame}</code></li>)
+        : <li className="empty-stack">暂无调用栈证据</li>}
+    </ol>
   );
 }
 
@@ -103,7 +165,7 @@ function JobDialog({ open, onClose, onLoaded }) {
   const [api, setApi] = useState("");
   const [token, setToken] = useState("");
   const [form, setForm] = useState({
-    mode: "codex_skill", agent_provider: "codex", agent_model: "", model_name: "",
+    mode: "codex_skill", agent_provider: "codex", agent_model: "", model_name: "GLM5.2",
     stage: "prefill", hardware: "Nvidia B200",
     report_path: "", config_path: "", launch_path: "", source_path: "",
     design_path: "", existing_package_path: "", result_path: "",
@@ -359,8 +421,15 @@ function JobDialog({ open, onClose, onLoaded }) {
             {modelCatalog.state === "error" && <div className="provider-warning span-2">模型列表读取失败，将使用 Provider 默认模型：{modelCatalog.message}</div>}
           </>}
           {!importingPackage && <>
-            <label>模型名称<input required value={form.model_name} onChange={set("model_name")} placeholder="GLM5.2" /></label>
-            <label>硬件<input required value={form.hardware} onChange={set("hardware")} /></label>
+            <label>模型<select required value={form.model_name} onChange={set("model_name")}>
+              <option value="GLM5.2">GLM5.2</option>
+              <option value="DeepSeekV4">DeepSeekV4</option>
+              <option value="KiMi3">KiMi3</option>
+            </select></label>
+            <label>硬件<select required value={form.hardware} onChange={set("hardware")}>
+              <option value="Nvidia B200">Nvidia B200</option>
+              <option value="Nvidia B300">Nvidia B300</option>
+            </select></label>
           </>}
           {form.mode === "existing_package" ? <>
             <label className="span-2">NsysScope 结果目录<input required value={form.existing_package_path} onChange={set("existing_package_path")} placeholder="/path/to/result-package" /></label>
@@ -374,7 +443,7 @@ function JobDialog({ open, onClose, onLoaded }) {
             <label className="span-2">结果保存目录<input required value={form.result_path} onChange={set("result_path")} placeholder="/path/to/result-package（必须为空或不存在）" /></label>
           </>}
           <label>输出前缀<input required value={form.prefix} onChange={set("prefix")} pattern="[a-zA-Z0-9_-]+" /></label>
-          {!importingPackage && <label>补充要求<input value={form.notes} onChange={set("notes")} placeholder="目标层、batch、特殊分支…" /></label>}
+          {!importingPackage && <label className="span-2">分析范围与硬性要求<textarea value={form.notes} onChange={set("notes")} placeholder="例如：只分析 GLM5.2 的单个非 shared Indexer 层，不要扩展为 4 层周期。" /><small>Agent 必须按这里限定重复单元和分支；无法满足时任务应失败，不能静默改用其他范围。</small></label>}
         </div>
         {error && <div className="error">{error}</div>}
         <div className="dialog-actions"><button type="button" onClick={onClose}>取消</button><button className="primary" type="submit">提交分析</button></div>
@@ -456,10 +525,8 @@ export default function Dashboard() {
   if (!data) return <main className="loading"><div className="pulse" />正在载入分析数据…</main>;
 
   const topStage = data.stages[0];
-  const highVariance = [...data.operators]
-    .filter((op) => op.durationUs > 0)
-    .sort((a, b) => (b.diffUs / b.durationUs) - (a.diffUs / a.durationUs))[0];
   const compute = data.classifications.find((x) => x.name === "核心计算");
+  const overlapPct = calculateOverlapPct(data.operators);
   const displayModel = String(data.metadata.model || "Unknown model")
     .split(" / ", 1)[0].split(" (", 1)[0].slice(0, 80);
 
@@ -492,10 +559,11 @@ export default function Dashboard() {
         {error && <div className="error">{error}</div>}
 
         <section className="metrics">
-          <Metric label="重复单元平均耗时" value={fmt(data.summary.totalDurationUs / 1000, 3)} suffix=" ms" note={`${data.summary.stableSamples} 个稳定样本`} accent />
+          <Metric label="单层耗时" value={fmt(data.summary.totalDurationUs / 1000, 3)} suffix=" ms" note={`${data.summary.stableSamples} 个稳定样本`} accent />
           <Metric label="算子数量" value={data.summary.operatorCount} suffix="" note={`${data.stages.length} 个功能阶段`} />
+          <Metric label="最高耗时功能模块" value={fmt(topStage.durationUs)} suffix=" μs" note={`${topStage.name} · ${fmt(topStage.durationPct)}%`} />
           <Metric label="核心计算占比" value={fmt(compute?.durationPct)} suffix="%" note={`${compute?.count || 0} 个核心算子`} />
-          <Metric label="最高实测 MFU" value={fmt(data.summary.maxMfu)} suffix="%" note="仅统计 shape 可证明的 GEMM" />
+          <Metric label="Overlap 率" value={fmt(overlapPct)} suffix="%" note="基于算子时间区间并集" />
         </section>
 
         <section className="analysis-grid">
@@ -504,19 +572,9 @@ export default function Dashboard() {
             <StageBars stages={data.stages} selected={selectedStage} onSelect={setSelectedStage} colors={colors} />
           </article>
 
-          <article className="panel insight-panel">
-            <div className="panel-head"><div><span>FINDINGS</span><h2>性能结论</h2></div><small>基于当前重复单元</small></div>
-            <div className="insights">
-              <Insight index={1} title="首要耗时阶段">
-                {topStage.name} 占 {fmt(topStage.durationPct)}%，平均 {fmt(topStage.durationUs)} μs。
-              </Insight>
-              <Insight index={2} title="计算密集度" tone="violet">
-                核心计算累计 {fmt(compute?.durationPct)}%；百分比以 wall-span 为分母，重叠流不做归一化。
-              </Insight>
-              <Insight index={3} title="稳定性关注点" tone="amber">
-                {highVariance.name} 的 max-min 为 {fmt(highVariance.diffUs)} μs，建议进一步按 rank 和输入形态拆分。
-              </Insight>
-            </div>
+          <article className="panel classification-panel">
+            <div className="panel-head"><div><span>COMPOSITION</span><h2>计算 · 通信 · 辅助模块</h2></div><small>按三类累计耗时归一化</small></div>
+            <ClassificationDonut classifications={data.classifications} />
           </article>
         </section>
 
@@ -540,17 +598,17 @@ export default function Dashboard() {
             </div>
             <div className="table-wrap">
               <table>
-                <thead><tr><th>#</th><th>功能模块 / 算子</th><th>分类</th><th>耗时</th><th>占比</th><th>MFU</th><th>波动</th></tr></thead>
+                <thead><tr><th>#</th><th>算子名</th><th>分类</th><th>耗时(us)</th><th>占比(%)</th><th>Shape</th><th>MFU(%)</th></tr></thead>
                 <tbody>
                   {filtered.map((op) => (
                     <tr key={op.index} className={selectedOp?.index === op.index ? "selected" : ""} onClick={() => setSelectedOp(op)}>
                       <td className="mono muted">{op.index}</td>
-                      <td><div className="op-title"><i style={{ background: colors[op.stage] }} /><div><b>{op.name}</b><span>{op.stage} · {op.module}</span></div></div></td>
+                      <td><div className="op-title"><i style={{ background: colors[op.stage] }} /><div><b>{op.name}</b><span>{op.module}</span><small>{op.stage}</small></div></div></td>
                       <td><span className={`category ${op.category}`}>{CATEGORY[op.category]?.label}</span></td>
-                      <td className="mono">{fmt(op.durationUs)} μs</td>
-                      <td className="mono">{fmt(op.durationPct)}%</td>
-                      <td className="mono">{op.mfu ? `${fmt(op.mfu)}%` : "—"}</td>
-                      <td className="mono muted">{fmt(op.diffUs)} μs</td>
+                      <td className="mono">{fmt(op.durationUs)}</td>
+                      <td className="mono">{fmt(op.durationPct)}</td>
+                      <td className="mono shape-cell" title={op.shape || ""}>{op.shape || "—"}</td>
+                      <td className="mono">{op.mfu != null ? fmt(op.mfu) : "—"}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -562,15 +620,20 @@ export default function Dashboard() {
             {selectedOp ? <div className="evidence-body">
               <div className="evidence-title"><i style={{ background: colors[selectedOp.stage] }} /><div><b>{selectedOp.name}</b><span>{selectedOp.stage} · {selectedOp.module}</span></div></div>
               <div className="evidence-stats">
-                <div><span>AVG</span><b>{fmt(selectedOp.durationUs)} μs</b></div>
-                <div><span>MIN / MAX</span><b>{fmt(selectedOp.minUs)} / {fmt(selectedOp.maxUs)}</b></div>
-                <div><span>SHAPE / MFU</span><b>{selectedOp.shape || "N/A"} · {selectedOp.mfu ? `${fmt(selectedOp.mfu)}%` : "N/A"}</b></div>
+                <div><span>平均耗时</span><b>{fmt(selectedOp.durationUs)} us</b></div>
+                <div><span>最小 / 最大</span><b>{fmt(selectedOp.minUs)} / {fmt(selectedOp.maxUs)} us</b></div>
+                <div><span>MFU</span><b>{selectedOp.mfu != null ? `${fmt(selectedOp.mfu)}%` : "N/A"}</b></div>
               </div>
+              <dl className="evidence-facts">
+                <div><dt>Shape</dt><dd>{selectedOp.shape || "N/A"}</dd></div>
+                <div><dt>分类</dt><dd>{CATEGORY[selectedOp.category]?.label || selectedOp.category}</dd></div>
+                <div><dt>设备 / Stream</dt><dd>GPU {selectedOp.device} / Stream {selectedOp.stream}</dd></div>
+                <div><dt>层内序号</dt><dd>#{selectedOp.index}</dd></div>
+              </dl>
               <h3>功能说明</h3><p>{selectedOp.introduction || "暂无说明"}</p>
-              <h3>Python 调用链</h3><code>{selectedOp.pythonFunction || "暂无调用链证据"}</code>
-              <h3>映射依据</h3><p>{selectedOp.mappingReason || "暂无映射依据"}</p>
+              <h3>Python 调用链</h3><CallStack value={selectedOp.pythonFunction} />
               <details><summary>完整 CUDA 符号</summary><code>{selectedOp.fullName}</code></details>
-            </div> : <div className="evidence-empty">从左侧选择一个算子查看映射证据。</div>}
+            </div> : <div className="evidence-empty">从左侧选择一个算子查看详细信息。</div>}
           </aside>
         </section>
       </section>
