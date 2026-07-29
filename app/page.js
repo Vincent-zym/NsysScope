@@ -93,7 +93,7 @@ function StageBars({ stages, selected, onSelect, colors }) {
         <button
           key={stage.name}
           className={`stage-row ${selected === stage.name ? "active" : ""}`}
-          onClick={() => onSelect(selected === stage.name ? null : stage.name)}
+          onClick={() => onSelect(stage.name)}
         >
           <div className="stage-label">
             <span>{stage.name}</span>
@@ -112,7 +112,7 @@ function StageBars({ stages, selected, onSelect, colors }) {
   );
 }
 
-function Timeline({ operators, stages, selectedStage, colors, onPick, onStage }) {
+function Timeline({ operators, stages, selectedStage, selectedOp, colors, onPick, onStage }) {
   const start = Math.min(...operators.map((op) => op.startNs));
   const end = Math.max(...operators.map((op) => op.endNs));
   const span = Math.max(end - start, 1);
@@ -137,11 +137,14 @@ function Timeline({ operators, stages, selectedStage, colors, onPick, onStage })
             {operators.filter((op) => op.stream === stream).map((op) => {
               const left = (op.startNs - start) / span * 100;
               const width = Math.max((op.endNs - op.startNs) / span * 100, 0.12);
-              const dim = selectedStage && op.stage !== selectedStage;
+              const operatorSelected = selectedOp?.index === op.index;
+              const dim = selectedOp
+                ? !operatorSelected
+                : selectedStage && op.stage !== selectedStage;
               return <button
                 key={op.index}
                 title={`${operatorDisplayName(op)} · ${fmt(op.durationUs)} μs`}
-                className={`kernel ${dim ? "dim" : ""}`}
+                className={`kernel ${dim ? "dim" : ""} ${operatorSelected ? "selected" : ""}`}
                 style={{ left: `${left}%`, width: `${width}%`, background: colors[op.stage] }}
                 onClick={() => onPick(op)}
               />;
@@ -151,15 +154,24 @@ function Timeline({ operators, stages, selectedStage, colors, onPick, onStage })
       ))}
       <div className="timeline-stage-list">
         <div className="timeline-stage-heading">
-          <b>功能模块执行顺序</b>
-          <span>点击模块，高亮对应时间区间</span>
+          <b>功能模块</b>
+          <span>选择全部、模块或时间线中的单个算子</span>
         </div>
         <div className="timeline-stage-buttons">
+          <button
+            className={`total-stage ${!selectedStage && !selectedOp ? "active" : ""}`}
+            onClick={() => onStage(null)}
+          >
+            <i>全</i>
+            <span><b>总模块</b><small>{operators.length} 个算子 · 全部时间区间</small></span>
+          </button>
           {orderedStages.map((stage, index) => (
             <button
               key={stage.name}
-              className={selectedStage === stage.name ? "active" : ""}
-              onClick={() => onStage(selectedStage === stage.name ? null : stage.name)}
+              className={
+                selectedStage === stage.name || selectedOp?.stage === stage.name ? "active" : ""
+              }
+              onClick={() => onStage(stage.name)}
             >
               <i style={{ background: colors[stage.name] }}>{index + 1}</i>
               <span><b>{stage.name}</b><small>{fmt(stage.durationUs)} us · {fmt(stage.durationPct)}%</small></span>
@@ -551,7 +563,7 @@ export default function Dashboard() {
   useEffect(() => {
     fetch("/demo-analysis.json").then((r) => r.json()).then((payload) => {
       setData(payload);
-      setSelectedOp(payload.operators?.[0] || null);
+      setSelectedOp(null);
     })
       .catch(() => setError("示例数据加载失败"));
   }, []);
@@ -584,7 +596,7 @@ export default function Dashboard() {
       }
       setData(parsed);
       setSelectedStage(null);
-      setSelectedOp(parsed.operators?.[0] || null);
+      setSelectedOp(null);
       setError("");
     } catch {
       setError("无法读取：请选择 NsysScope analysis.json（schemaVersion 1.0）");
@@ -594,7 +606,7 @@ export default function Dashboard() {
   const loadAnalysis = useCallback((payload) => {
     setData(payload);
     setSelectedStage(null);
-    setSelectedOp(payload.operators?.[0] || null);
+    setSelectedOp(null);
     setError("");
   }, []);
 
@@ -605,6 +617,19 @@ export default function Dashboard() {
   const overlapPct = calculateOverlapPct(data.operators);
   const displayModel = String(data.metadata.model || "Unknown model")
     .split(" / ", 1)[0].split(" (", 1)[0].slice(0, 80);
+  const highlightedStage = selectedOp?.stage || selectedStage;
+
+  const selectStage = (stageName) => {
+    setSelectedOp(null);
+    setSelectedStage((current) => (
+      stageName && current !== stageName ? stageName : null
+    ));
+  };
+
+  const selectOperator = (operator) => {
+    setSelectedStage(null);
+    setSelectedOp(operator);
+  };
 
   return (
     <main>
@@ -645,7 +670,7 @@ export default function Dashboard() {
         <section className="analysis-grid">
           <article className="panel stage-panel">
             <div className="panel-head"><div><span>BREAKDOWN</span><h2>功能模块耗时</h2></div><small>点击模块联动筛选</small></div>
-            <StageBars stages={data.stages} selected={selectedStage} onSelect={setSelectedStage} colors={colors} />
+            <StageBars stages={data.stages} selected={highlightedStage} onSelect={selectStage} colors={colors} />
           </article>
 
           <article className="panel classification-panel">
@@ -660,9 +685,10 @@ export default function Dashboard() {
             operators={data.operators}
             stages={data.stages}
             selectedStage={selectedStage}
+            selectedOp={selectedOp}
             colors={colors}
-            onPick={setSelectedOp}
-            onStage={setSelectedStage}
+            onPick={selectOperator}
+            onStage={selectStage}
           />
         </section>
 
@@ -693,7 +719,7 @@ export default function Dashboard() {
                 <thead><tr><th className="center">#</th><th>算子名</th><th>分类</th><th className="numeric">耗时(us)</th><th className="numeric">占比(%)</th><th>Shape</th><th className="numeric">MFU(%)</th></tr></thead>
                 <tbody>
                   {filtered.map((op) => (
-                    <tr key={op.index} className={selectedOp?.index === op.index ? "selected" : ""} onClick={() => setSelectedOp(op)}>
+                    <tr key={op.index} className={selectedOp?.index === op.index ? "selected" : ""} onClick={() => selectOperator(op)}>
                       <td className="mono muted center">{op.index}</td>
                       <td><div className="op-title"><i style={{ background: colors[op.stage] }} /><div><b title={operatorDisplayName(op)}>{operatorDisplayName(op)}</b><span>{op.stage}</span></div></div></td>
                       <td><span className={`category ${op.category}`}>{CATEGORY[op.category]?.label}</span></td>
@@ -715,21 +741,18 @@ export default function Dashboard() {
                 <div><b>{operatorDisplayName(selectedOp)}</b><span>{selectedOp.stage}</span></div>
                 <em className={`category ${selectedOp.category}`}>{CATEGORY[selectedOp.category]?.label}</em>
               </div>
-              <div className="evidence-stats">
+              <div className="evidence-summary">
                 <div><span>平均耗时</span><b>{fmt(selectedOp.durationUs)} us</b></div>
                 <div><span>最小 / 最大</span><b>{fmt(selectedOp.minUs)} / {fmt(selectedOp.maxUs)} us</b></div>
                 <div><span>MFU</span><b>{selectedOp.mfu != null ? `${fmt(selectedOp.mfu)}%` : "N/A"}</b></div>
+                <div><span>Shape</span><b>{selectedOp.shape || "N/A"}</b></div>
+                <div><span>设备 / Stream</span><b>GPU {selectedOp.device} / Stream {selectedOp.stream}</b></div>
+                <div><span>技术模块</span><b>{selectedOp.module || "N/A"}</b></div>
               </div>
-              <dl className="evidence-facts">
-                <div><dt>Shape</dt><dd>{selectedOp.shape || "N/A"}</dd></div>
-                <div><dt>技术模块</dt><dd>{selectedOp.module || "N/A"}</dd></div>
-                <div><dt>设备 / Stream</dt><dd>GPU {selectedOp.device} / Stream {selectedOp.stream}</dd></div>
-                <div><dt>层内序号</dt><dd>#{selectedOp.index}</dd></div>
-              </dl>
               <section className="evidence-section">
                 <h3>功能说明</h3><p>{selectedOp.introduction || "暂无说明"}</p>
               </section>
-              <section className="evidence-section">
+              <section className="evidence-section call-stack-section">
                 <h3>Python 调用链</h3><CallStack value={selectedOp.pythonFunction} />
               </section>
               <details className="cuda-symbol"><summary>查看完整 CUDA 符号</summary><code>{selectedOp.fullName}</code></details>
