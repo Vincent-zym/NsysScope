@@ -184,7 +184,7 @@ function Timeline({ operators, stages, selectedStage, selectedOp, colors, onPick
 }
 
 function ClassificationDonut({ classifications }) {
-  const rows = [
+  const baseRows = [
     { name: "核心计算", label: "计算", color: "#6a91ff" },
     { name: "通信", label: "通信", color: "#f4b860" },
     { name: "辅助算子", label: "辅助", color: "#66758c" },
@@ -194,42 +194,67 @@ function ClassificationDonut({ classifications }) {
       count: 0, durationUs: 0,
     }),
   }));
-  const totalDuration = rows.reduce((sum, row) => sum + row.durationUs, 0);
+  const totalDuration = baseRows.reduce((sum, row) => sum + row.durationUs, 0);
+  const rows = baseRows.map((row) => ({
+    ...row,
+    share: totalDuration ? row.durationUs / totalDuration * 100 : 0,
+  }));
+  const adviceText = {
+    核心计算: "优先检查高耗时、低 MFU 的核心算子，结合 Shape 评估矩阵尺寸、精度和布局是否匹配硬件。",
+    通信: "检查通信与计算的重叠窗口、集合通信粒度和 Stream 排布，减少串行等待与同步空洞。",
+    辅助算子: "关注量化、归一化、数据重排及缓存管理等碎片化算子，优先评估融合与批量化。",
+  };
+  const advice = [...rows].sort((a, b) => b.share - a.share);
   const radius = 54;
   const circumference = 2 * Math.PI * radius;
   let cursor = 0;
   return (
     <div className="classification-summary">
-      <div className="donut">
-        <svg viewBox="0 0 144 144" aria-label="计算、通信和辅助算子耗时占比">
-          <circle className="donut-track" cx="72" cy="72" r={radius} />
-          {rows.map((row) => {
-            const share = totalDuration ? row.durationUs / totalDuration * 100 : 0;
-            const offset = -cursor / 100 * circumference;
-            cursor += share;
-            return share > 0 && <circle
-              key={row.name}
-              className="donut-segment"
-              cx="72"
-              cy="72"
-              r={radius}
-              stroke={row.color}
-              strokeDasharray={`${Math.max(share / 100 * circumference - 4, 1)} ${circumference}`}
-              strokeDashoffset={offset}
-            />;
-          })}
-        </svg>
-        <div><b>{rows.reduce((sum, row) => sum + row.count, 0)}</b><span>算子总数</span></div>
-      </div>
-      <div className="classification-legend">
-        {rows.map((row) => {
-          const share = totalDuration ? row.durationUs / totalDuration * 100 : 0;
-          return <div key={row.name}>
+      <div className="classification-upper">
+        <div className="donut">
+          <svg viewBox="0 0 144 144" aria-label="计算、通信和辅助算子耗时占比">
+            <circle className="donut-track" cx="72" cy="72" r={radius} />
+            {rows.map((row) => {
+              const offset = -cursor / 100 * circumference;
+              cursor += row.share;
+              return row.share > 0 && <circle
+                key={row.name}
+                className="donut-segment"
+                cx="72"
+                cy="72"
+                r={radius}
+                stroke={row.color}
+                strokeDasharray={`${Math.max(row.share / 100 * circumference - 4, 1)} ${circumference}`}
+                strokeDashoffset={offset}
+              />;
+            })}
+          </svg>
+          <div><b>{rows.reduce((sum, row) => sum + row.count, 0)}</b><span>算子总数</span></div>
+        </div>
+        <div className="classification-legend">
+          {rows.map((row) => <div key={row.name}>
             <i style={{ background: row.color }} />
             <span><b>{row.label}</b><small>{row.count} 个算子 · {fmt(row.durationUs)} us</small></span>
-            <strong>{fmt(share)}%</strong>
-          </div>;
-        })}
+            <strong>{fmt(row.share)}%</strong>
+          </div>)}
+        </div>
+      </div>
+      <div className="optimization-advice">
+        <div className="advice-heading">
+          <b>优化建议</b>
+          <span>按当前耗时占比排序</span>
+        </div>
+        <div className="advice-list">
+          {advice.map((row, index) => (
+            <article key={row.name}>
+              <i>{String(index + 1).padStart(2, "0")}</i>
+              <div>
+                <b>{row.label} · {fmt(row.share)}%</b>
+                <p>{adviceText[row.name]}</p>
+              </div>
+            </article>
+          ))}
+        </div>
       </div>
     </div>
   );
