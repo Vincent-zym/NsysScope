@@ -113,10 +113,20 @@ result-package/
 └── metadata/            # request, prompt, manifest and validation evidence
 ```
 
-NsysScope's own `.data/` directory only keeps the small job index, dependency
-stamps and lock. The launcher's operational log is temporary and is deleted
-when `./nsysscope start` stops. Override the local state location with
-`NSYSSCOPE_DATA_DIR`.
+By default, `./nsysscope start` keeps its job index, lock and operational log
+in a temporary runtime directory and deletes that directory when the tool
+stops. The result packages are the only persistent task data.
+
+Persistent task history is optional. Enable it explicitly when needed:
+
+```bash
+NSYSSCOPE_PERSIST_STATE=true \
+NSYSSCOPE_DATA_DIR=/path/to/small-state-dir \
+./nsysscope start
+```
+
+Even in persistent mode, this directory contains only lightweight task
+metadata; CSV, XLSX, SQLite and task logs remain in their result packages.
 
 Agent logs are bounded by default:
 

@@ -42,9 +42,11 @@ NsysScope separates report analysis from visualization.
 - can retry only the deterministic conversion/validation stage when a completed
   six-table package survives an agent-side failure.
 
-The Analyzer's local state is deliberately small: the jobs database stores only
-task metadata and absolute package paths. Bulk artifacts live in the selected
-result directory, which can later be re-imported without rerunning an Agent.
+The one-command launcher uses an ephemeral jobs database by default and removes
+it together with the operational log on normal shutdown. Persistent state is an
+explicit opt-in and still stores only task metadata and absolute package paths.
+Bulk artifacts live in the selected result directory, which can later be
+re-imported without rerunning an Agent.
 
 The package converter accepts both the legacy `accepted_unit_count` sidecar and
 the current `accepted_full_template_sample_count` schema. It prefers package-local

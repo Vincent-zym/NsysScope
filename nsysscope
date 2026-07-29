@@ -4,11 +4,15 @@ set -euo pipefail
 PROJECT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 COMMAND="${1:-start}"
 VENV_DIR="${NSYSSCOPE_VENV_DIR:-$PROJECT_DIR/.venv}"
-DATA_DIR="${NSYSSCOPE_DATA_DIR:-$PROJECT_DIR/.data}"
+DATA_DIR=""
 SKILL_DIR="${NSYSSCOPE_SKILL_DIR:-/root/.codex/skills/sglang-nsys-static-analysis}"
 ALLOWED_ROOTS="${NSYSSCOPE_ALLOWED_ROOTS:-$(dirname "$PROJECT_DIR")}"
 ANALYZER_PID=""
 RUNTIME_DIR=""
+DATA_DIR_OWNED=false
+RUNTIME_BASE="${XDG_RUNTIME_DIR:-/tmp}"
+PERSIST_STATE="${NSYSSCOPE_PERSIST_STATE:-false}"
+PERSIST_DATA_DIR="${NSYSSCOPE_DATA_DIR:-$PROJECT_DIR/.data}"
 CODEX_READY=false
 COMATE_BIN="${NSYSSCOPE_COMATE_BIN:-}"
 COMATE_PLATFORM="${NSYSSCOPE_COMATE_PLATFORM:-internal}"
@@ -32,6 +36,10 @@ cleanup() {
   if [[ -n "${RUNTIME_DIR:-}" ]] && [[ -d "$RUNTIME_DIR" ]]; then
     rm -rf -- "$RUNTIME_DIR"
     RUNTIME_DIR=""
+  fi
+  if [[ "$DATA_DIR_OWNED" == true ]] && [[ -n "${DATA_DIR:-}" ]] && [[ -d "$DATA_DIR" ]]; then
+    rm -rf -- "$DATA_DIR"
+    DATA_DIR=""
   fi
 }
 
@@ -146,10 +154,9 @@ prepare_python() {
 }
 
 prepare_frontend() {
-  mkdir -p "$DATA_DIR"
   local lock_hash
   lock_hash="$(sha256sum "$PROJECT_DIR/package-lock.json" | awk '{print $1}')"
-  local stamp="$DATA_DIR/package-lock.sha256"
+  local stamp="$VENV_DIR/.nsysscope-package-lock.sha256"
   if [[ -x "$PROJECT_DIR/node_modules/.bin/vinext" ]] && [[ ! -f "$stamp" ]]; then
     printf '%s\n' "$lock_hash" > "$stamp"
   elif [[ ! -x "$PROJECT_DIR/node_modules/.bin/vinext" ]] || [[ "$(<"$stamp")" != "$lock_hash" ]]; then
@@ -164,9 +171,20 @@ prepare_frontend() {
 start() {
   cd "$PROJECT_DIR"
   doctor
-  mkdir -p "$DATA_DIR"
-  exec 9>"$DATA_DIR/nsysscope.lock"
-  flock -n 9 || fail "已有一个 NsysScope 实例正在使用 $DATA_DIR"
+  mkdir -p "$RUNTIME_BASE"
+  exec 9>"$RUNTIME_BASE/nsysscope-${UID}.lock"
+  flock -n 9 || fail "已有一个 NsysScope 实例正在运行"
+  if [[ "$PERSIST_STATE" == true ]]; then
+    DATA_DIR="$PERSIST_DATA_DIR"
+    mkdir -p "$DATA_DIR"
+  else
+    if [[ -n "${NSYSSCOPE_DATA_DIR:-}" ]]; then
+      say "忽略旧的 NSYSSCOPE_DATA_DIR；运行状态默认使用临时目录"
+      say "如确需保留任务索引，请设置 NSYSSCOPE_PERSIST_STATE=true"
+    fi
+    DATA_DIR="$(mktemp -d "$RUNTIME_BASE/nsysscope-${UID}.XXXXXX")"
+    DATA_DIR_OWNED=true
+  fi
   RUNTIME_DIR="$(mktemp -d "$DATA_DIR/runtime.XXXXXX")"
   trap cleanup EXIT
   prepare_python
@@ -219,7 +237,11 @@ start() {
   say "启动完成"
   printf '  页面地址:  http://127.0.0.1:%s\n' "$ui_port"
   printf '  物料范围:  %s\n' "$ALLOWED_ROOTS"
-  printf '  数据目录:  %s\n' "$DATA_DIR"
+  if [[ "$DATA_DIR_OWNED" == true ]]; then
+    printf '  任务状态:  %s（停止后自动清理）\n' "$DATA_DIR"
+  else
+    printf '  任务状态:  %s（持久保留）\n' "$DATA_DIR"
+  fi
   printf '  运行日志:  %s/analyzer.log（停止后自动清理）\n' "$RUNTIME_DIR"
   printf '\n'
   printf '  如果通过 SSH 使用，请在本地电脑执行：\n'
