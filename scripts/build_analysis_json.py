@@ -143,6 +143,43 @@ def match_rule(module: str, operator: str, rules: list[dict[str, Any]]) -> dict[
     return {}
 
 
+def compact_kernel_name(raw_name: str, overview_name: str = "") -> str:
+    """Prefer a kernel-like overview name and repair legacy semantic aliases."""
+    candidate = overview_name.strip()
+    if re.fullmatch(r"[A-Za-z_$][A-Za-z0-9_.$]*(?:<[^>]+>)?", candidate):
+        return candidate
+
+    text = re.sub(r"^(?:void|int|float|double|bool)\s+", "", raw_name.strip())
+    depth = 0
+    cut = len(text)
+    for index, char in enumerate(text):
+        if char == "<":
+            depth += 1
+        elif char == ">" and depth:
+            depth -= 1
+        elif char == "(" and depth == 0:
+            cut = index
+            break
+    text = text[:cut].strip()
+    depth = 0
+    leaf_start = 0
+    index = 0
+    while index + 1 < len(text):
+        if text[index] == "<":
+            depth += 1
+        elif text[index] == ">" and depth:
+            depth -= 1
+        elif text[index:index + 2] == "::" and depth == 0:
+            leaf_start = index + 2
+            index += 1
+        index += 1
+    leaf = text[leaf_start:].strip() or raw_name.strip()
+    template_at = leaf.find("<")
+    if template_at > 0 and len(leaf) > 96:
+        leaf = f"{leaf[:template_at]}<…>"
+    return leaf
+
+
 def build_operator_payload(
     raw: dict[str, str],
     view: dict[str, str],
@@ -154,6 +191,7 @@ def build_operator_payload(
         "module": raw["module"],
         "stage": view["功能模块"],
         "name": view["算子名称"],
+        "kernelName": compact_kernel_name(raw["operator_name"], view["算子名称"]),
         "fullName": raw["operator_name"],
         "category": rule.get("category", "auxiliary"),
         "durationUs": number(view["算子耗时(us)"]),

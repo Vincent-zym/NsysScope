@@ -20,6 +20,39 @@ const fmt = (value, digits = 2) =>
 
 const basename = (path) => path?.split("/").pop() || "—";
 
+function compactKernelName(rawName) {
+  const source = String(rawName || "").trim().replace(/^(?:void|int|float|double|bool)\s+/, "");
+  let depth = 0;
+  let cut = source.length;
+  for (let index = 0; index < source.length; index += 1) {
+    const char = source[index];
+    if (char === "<") depth += 1;
+    else if (char === ">" && depth) depth -= 1;
+    else if (char === "(" && depth === 0) {
+      cut = index;
+      break;
+    }
+  }
+  const symbol = source.slice(0, cut).trim();
+  depth = 0;
+  let leafStart = 0;
+  for (let index = 0; index + 1 < symbol.length; index += 1) {
+    if (symbol[index] === "<") depth += 1;
+    else if (symbol[index] === ">" && depth) depth -= 1;
+    else if (symbol.slice(index, index + 2) === "::" && depth === 0) {
+      leafStart = index + 2;
+      index += 1;
+    }
+  }
+  const leaf = symbol.slice(leafStart).trim() || String(rawName || "").trim();
+  const templateAt = leaf.indexOf("<");
+  return templateAt > 0 && leaf.length > 96 ? `${leaf.slice(0, templateAt)}<…>` : leaf;
+}
+
+function operatorDisplayName(operator) {
+  return operator.kernelName || compactKernelName(operator.fullName) || operator.name || "未知算子";
+}
+
 function calculateOverlapPct(operators) {
   const intervals = operators
     .map((op) => [Number(op.startNs), Number(op.endNs)])
@@ -107,7 +140,7 @@ function Timeline({ operators, stages, selectedStage, colors, onPick, onStage })
               const dim = selectedStage && op.stage !== selectedStage;
               return <button
                 key={op.index}
-                title={`${op.name} · ${fmt(op.durationUs)} μs`}
+                title={`${operatorDisplayName(op)} · ${fmt(op.durationUs)} μs`}
                 className={`kernel ${dim ? "dim" : ""}`}
                 style={{ left: `${left}%`, width: `${width}%`, background: colors[op.stage] }}
                 onClick={() => onPick(op)}
@@ -533,7 +566,7 @@ export default function Dashboard() {
       const stageOk = !selectedStage || op.stage === selectedStage;
       const categoryOk = category === "all" || op.category === category;
       const q = query.trim().toLowerCase();
-      const queryOk = !q || `${op.name} ${op.module} ${op.stage}`.toLowerCase().includes(q);
+      const queryOk = !q || `${operatorDisplayName(op)} ${op.name} ${op.module} ${op.stage}`.toLowerCase().includes(q);
       return stageOk && categoryOk && queryOk;
     });
     return operators.sort(category === "all"
@@ -657,12 +690,12 @@ export default function Dashboard() {
                   <col className="col-shape" />
                   <col className="col-mfu" />
                 </colgroup>
-                <thead><tr><th className="center">#</th><th>算子名称 / 功能模块</th><th>分类</th><th className="numeric">耗时(us)</th><th className="numeric">占比(%)</th><th>Shape</th><th className="numeric">MFU(%)</th></tr></thead>
+                <thead><tr><th className="center">#</th><th>算子名</th><th>分类</th><th className="numeric">耗时(us)</th><th className="numeric">占比(%)</th><th>Shape</th><th className="numeric">MFU(%)</th></tr></thead>
                 <tbody>
                   {filtered.map((op) => (
                     <tr key={op.index} className={selectedOp?.index === op.index ? "selected" : ""} onClick={() => setSelectedOp(op)}>
                       <td className="mono muted center">{op.index}</td>
-                      <td><div className="op-title"><i style={{ background: colors[op.stage] }} /><div><b title={op.name}>{op.name}</b><span>{op.stage}</span></div></div></td>
+                      <td><div className="op-title"><i style={{ background: colors[op.stage] }} /><div><b title={operatorDisplayName(op)}>{operatorDisplayName(op)}</b><span>{op.stage}</span></div></div></td>
                       <td><span className={`category ${op.category}`}>{CATEGORY[op.category]?.label}</span></td>
                       <td className="mono numeric">{fmt(op.durationUs)}</td>
                       <td className="mono numeric">{fmt(op.durationPct)}</td>
@@ -679,7 +712,7 @@ export default function Dashboard() {
             {selectedOp ? <div className="evidence-body">
               <div className="evidence-title">
                 <i style={{ background: colors[selectedOp.stage] }}>{selectedOp.index}</i>
-                <div><b>{selectedOp.name}</b><span>{selectedOp.stage}</span></div>
+                <div><b>{operatorDisplayName(selectedOp)}</b><span>{selectedOp.stage}</span></div>
                 <em className={`category ${selectedOp.category}`}>{CATEGORY[selectedOp.category]?.label}</em>
               </div>
               <div className="evidence-stats">

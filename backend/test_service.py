@@ -145,7 +145,7 @@ def test_converter_accepts_current_stats_schema() -> None:
     assert included_devices(stats, {}) == [0, 1]
 
 
-def test_frontend_operator_name_comes_from_overview_table() -> None:
+def test_frontend_payload_repairs_legacy_semantic_operator_alias() -> None:
     raw = {
         "序号": "7",
         "module": "attention/q_projection",
@@ -173,6 +173,7 @@ def test_frontend_operator_name_comes_from_overview_table() -> None:
     operator = build_operator_payload(raw, overview, {"category": "core"})
 
     assert operator["name"] == "Q-B 投影"
+    assert operator["kernelName"] == "very_long_raw_cuda_symbol<int>"
     assert operator["stage"] == "QKV 投影"
     assert operator["fullName"] == raw["operator_name"]
 
