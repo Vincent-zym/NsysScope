@@ -292,13 +292,20 @@ function JobDialog({ open, onClose, onLoaded }) {
   const [modelCatalog, setModelCatalog] = useState({
     state: "idle", default_model: "", models: [], message: "",
   });
+  const [modelRefresh, setModelRefresh] = useState(0);
   const [error, setError] = useState("");
   const terminal = ["succeeded", "failed", "cancelled"];
 
   useEffect(() => {
     if (!open) return;
-    const defaultApi = window.__NSYSSCOPE_LOCAL__ ? "." : "/analyzer-api";
-    setApi(localStorage.getItem("nsysscope.api.v2") ?? defaultApi);
+    const isLocal = Boolean(window.__NSYSSCOPE_LOCAL__);
+    const defaultApi = isLocal ? "." : "/analyzer-api";
+    // A local one-command launch must always talk to the Analyzer that served
+    // this page. Reusing an old remote/manual URL makes Provider discovery
+    // appear broken even though the local service is healthy.
+    setApi(isLocal
+      ? defaultApi
+      : (localStorage.getItem("nsysscope.api.v2") ?? defaultApi));
     setToken(sessionStorage.getItem("nsysscope.token") || "");
   }, [open]);
 
@@ -313,6 +320,7 @@ function JobDialog({ open, onClose, onLoaded }) {
         const response = await fetch(`${api.replace(/\/$/, "")}/api/health`, {
           headers: { "X-NsysScope-Token": token },
           signal: controller.signal,
+          cache: "no-store",
         });
         const payload = await response.json();
         if (!response.ok) throw new Error(payload.detail || `HTTP ${response.status}`);
@@ -367,6 +375,7 @@ function JobDialog({ open, onClose, onLoaded }) {
     fetch(`${api.replace(/\/$/, "")}/api/providers/${form.agent_provider}/models`, {
       headers: { "X-NsysScope-Token": token },
       signal: controller.signal,
+      cache: "no-store",
     }).then(async (response) => {
       const payload = await response.json();
       if (!response.ok) throw new Error(payload.detail || `HTTP ${response.status}`);
@@ -384,7 +393,7 @@ function JobDialog({ open, onClose, onLoaded }) {
       }
     });
     return () => controller.abort();
-  }, [api, form.agent_provider, form.mode, health.providers, open, token]);
+  }, [api, form.agent_provider, form.mode, health.providers, modelRefresh, open, token]);
 
   useEffect(() => {
     if (!job || (terminal.includes(job.status) && !logHasMore)) return;
@@ -519,16 +528,36 @@ function JobDialog({ open, onClose, onLoaded }) {
               <option value="codex" disabled={health.providers && !health.providers.codex?.ready}>Codex CLI{health.providers && !health.providers.codex?.ready ? "（未就绪）" : ""}</option>
               <option value="comate" disabled={health.providers && !health.providers.comate?.ready}>Comate Zulu{health.providers && !health.providers.comate?.ready ? "（未登录或未就绪）" : ""}</option>
             </select></label>
-            <label>Agent 基座模型<select value={form.agent_model} onChange={set("agent_model")} disabled={modelCatalog.state === "loading"}>
-              <option value="">{modelCatalog.state === "loading"
-                ? "正在读取模型…"
-                : `自动 / Provider 默认${modelCatalog.default_model ? `（${modelCatalog.default_model}）` : ""}`}</option>
-              {modelCatalog.models.map((model) =>
-                <option key={model.id} value={model.id}>{model.label}</option>
-              )}
-            </select></label>
+            <label className="model-picker">
+              <span className="field-title">
+                Agent 基座模型
+                {modelCatalog.state === "ready" && <em>{modelCatalog.models.length} 个可选</em>}
+              </span>
+              <span className="model-select-row">
+                <select value={form.agent_model} onChange={set("agent_model")} disabled={modelCatalog.state === "loading"}>
+                  <option value="">{modelCatalog.state === "loading"
+                    ? "正在读取模型…"
+                    : `自动 / Provider 默认${modelCatalog.default_model ? `（${modelCatalog.default_model}）` : ""}`}</option>
+                  {modelCatalog.models.map((model) =>
+                    <option key={model.id} value={model.id}>{model.label}</option>
+                  )}
+                </select>
+                <button
+                  type="button"
+                  className="model-refresh"
+                  onClick={() => setModelRefresh((value) => value + 1)}
+                  disabled={modelCatalog.state === "loading" || !provider?.ready}
+                >
+                  刷新
+                </button>
+              </span>
+              {modelCatalog.state === "ready" && modelCatalog.models.length > 0 &&
+                <small>已从 {form.agent_provider === "codex" ? "Codex CLI" : "Comate Zulu"} 自动读取</small>}
+            </label>
             {provider && !provider.ready && <div className="provider-warning span-2">{provider.message}</div>}
             {modelCatalog.state === "error" && <div className="provider-warning span-2">模型列表读取失败，将使用 Provider 默认模型：{modelCatalog.message}</div>}
+            {modelCatalog.state === "ready" && modelCatalog.models.length === 0 &&
+              <div className="provider-warning span-2">Provider 已就绪，但没有返回可选模型；可点击“刷新”重试。</div>}
           </>}
           <label>模型<select required value={form.model_name} onChange={set("model_name")}>
             <option value="GLM5.2">GLM5.2</option>

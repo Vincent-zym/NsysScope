@@ -69,6 +69,7 @@ RUNTIME_BASE="${{XDG_DATA_HOME:-${{HOME}}/.local/share}}/nsysscope"
 CACHE_BASE="${{XDG_CACHE_HOME:-${{HOME}}/.cache}}/nsysscope"
 INSTALL_DIR="$RUNTIME_BASE/runtime-{runtime_id}"
 PAYLOAD_LINE="$(awk '/^__NSYSSCOPE_ARCHIVE_BELOW__$/ {{ print NR + 1; exit }}' "$0")"
+MATERIAL_ROOT="$(pwd -P)"
 
 if [[ ! -x "$INSTALL_DIR/nsysscope" ]]; then
   mkdir -p "$INSTALL_DIR" "$CACHE_BASE"
@@ -77,6 +78,7 @@ if [[ ! -x "$INSTALL_DIR/nsysscope" ]]; then
 fi
 
 export NSYSSCOPE_VENV_DIR="${{NSYSSCOPE_VENV_DIR:-$CACHE_BASE/venv-{version}}}"
+export NSYSSCOPE_ALLOWED_ROOTS="${{NSYSSCOPE_ALLOWED_ROOTS:-$MATERIAL_ROOT}}"
 exec "$INSTALL_DIR/nsysscope" "$@"
 
 __NSYSSCOPE_ARCHIVE_BELOW__

@@ -506,23 +506,40 @@ Requirements:
         except (OSError, tomllib.TOMLDecodeError):
             pass
 
+        payload: object | None = None
+        executable = shutil.which(self.settings.codex_bin)
+        if executable:
+            try:
+                completed = subprocess.run(
+                    [executable, "debug", "models"],
+                    text=True, capture_output=True, timeout=15,
+                )
+                if completed.returncode == 0:
+                    payload = json.loads(completed.stdout)
+            except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError):
+                pass
+
+        if payload is None:
+            cache_path = codex_home / "models_cache.json"
+            try:
+                payload = json.loads(cache_path.read_text())
+            except (OSError, json.JSONDecodeError):
+                payload = {}
+
+        records = payload.get("models", []) if isinstance(payload, dict) else payload
         choices: list[dict[str, str]] = []
-        cache_path = codex_home / "models_cache.json"
-        try:
-            payload = json.loads(cache_path.read_text())
-            records = payload.get("models", []) if isinstance(payload, dict) else payload
-            for record in records:
-                if record.get("visibility") == "hide":
-                    continue
-                model_id = str(record.get("slug") or "")
-                if not model_id:
-                    continue
-                choices.append({
-                    "id": model_id,
-                    "label": str(record.get("display_name") or model_id),
-                })
-        except (OSError, json.JSONDecodeError, AttributeError):
-            pass
+        seen: set[str] = set()
+        for record in records if isinstance(records, list) else []:
+            if not isinstance(record, dict) or record.get("visibility") == "hide":
+                continue
+            model_id = str(record.get("slug") or record.get("id") or "")
+            if not model_id or model_id in seen:
+                continue
+            seen.add(model_id)
+            choices.append({
+                "id": model_id,
+                "label": str(record.get("display_name") or record.get("name") or model_id),
+            })
         if configured_model and not any(item["id"] == configured_model for item in choices):
             choices.insert(0, {"id": configured_model, "label": configured_model})
         return {
@@ -544,7 +561,10 @@ Requirements:
         ansi = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
         for raw_line in completed.stdout.splitlines():
             line = ansi.sub("", raw_line).strip()
-            match = re.match(r"^[* ]*(.*?)\s+\(([^()]*)\)\s*$", line)
+            match = re.match(
+                r"^[*•·\s-]*(.*?)\s+[(（]([^()（）]+)[)）]\s*$",
+                line,
+            )
             if not match:
                 continue
             label, model_id = match.groups()

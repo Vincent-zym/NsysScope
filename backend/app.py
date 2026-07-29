@@ -6,7 +6,7 @@ import secrets
 from datetime import UTC, datetime
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -62,7 +62,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         }
 
     @app.get("/api/providers/{provider}/models", dependencies=[Depends(authorize)])
-    def provider_models(provider: str) -> dict:
+    def provider_models(provider: str, response: Response) -> dict:
+        response.headers["Cache-Control"] = "no-store"
         if provider not in {"codex", "comate"}:
             raise HTTPException(status_code=404, detail="unknown Agent Provider")
         status = runner.provider_status()[provider]

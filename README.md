@@ -146,8 +146,9 @@ GLM5.2 non-shared Indexer layer must not select the four-layer full/shared
 Indexer cycle.
 
 The paths are resolved on the machine running NsysScope. By default, the tool
-allows materials under the directory containing this repository. Override the
-scope when needed:
+allows materials under the directory containing this repository. The portable
+`.run` file instead uses the directory from which it was launched, never its
+private extraction directory. Override the scope when needed:
 
 ```bash
 NSYSSCOPE_ALLOWED_ROOTS=/reports:/model-source ./nsysscope start

@@ -206,6 +206,13 @@ tbody tr.selected { background: rgba(92,129,220,.12); box-shadow: inset 3px 0 #6
 .form-grid textarea { min-height: 88px; resize: vertical; line-height: 1.55; }
 .form-grid label > small { color: #78869b; font-size: 11px; line-height: 1.5; letter-spacing: 0; }
 .form-grid input:focus, .form-grid select:focus, .form-grid textarea:focus { border-color: #4a6bc8; box-shadow: 0 0 0 2px rgba(74,107,200,.12); }
+.field-title { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.field-title em { color: #75a7ff; font-size: 10px; font-style: normal; letter-spacing: 0; }
+.model-select-row { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 7px; }
+.model-select-row select { min-width: 0; }
+.model-refresh { border: 1px solid #34435a; border-radius: 8px; background: #182131; color: #b8c7dc; padding: 0 11px; font-size: 11px; cursor: pointer; }
+.model-refresh:hover:not(:disabled) { border-color: #5879be; color: #e4ecfa; }
+.model-refresh:disabled { cursor: wait; opacity: .55; }
 .package-hint { margin: -3px 0 0; color: #78869b; font-size: 11px; line-height: 1.6; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
 .dialog-actions button { border: 1px solid #2c3544; border-radius: 8px; background: #171d27; color: #a8b4c5; padding: 9px 15px; font-size: 12px; cursor: pointer; }

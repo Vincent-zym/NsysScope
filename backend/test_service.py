@@ -524,6 +524,7 @@ def test_codex_model_catalog_from_local_cache(tmp_path: Path, monkeypatch) -> No
         headers={"X-NsysScope-Token": "test-token"},
     )
     assert response.status_code == 200, response.text
+    assert response.headers["cache-control"] == "no-store"
     assert response.json() == {
         "provider": "codex",
         "default_model": "quality-codex",
@@ -532,6 +533,47 @@ def test_codex_model_catalog_from_local_cache(tmp_path: Path, monkeypatch) -> No
             {"id": "fast-codex", "label": "Fast Codex"},
         ],
     }
+
+
+def test_codex_model_catalog_prefers_cli_catalog(tmp_path: Path, monkeypatch) -> None:
+    fake_codex = tmp_path / "codex"
+    fake_codex.write_text(textwrap.dedent("""\
+        #!/usr/bin/env python3
+        import json
+        import sys
+
+        if sys.argv[1:] == ["login", "status"]:
+            print("Logged in using ChatGPT")
+            raise SystemExit(0)
+        if sys.argv[1:] == ["debug", "models"]:
+            print(json.dumps({"models": [
+                {"slug": "live-codex", "display_name": "Live Codex", "visibility": "list"},
+                {"slug": "hidden-codex", "display_name": "Hidden", "visibility": "hide"},
+            ]}))
+            raise SystemExit(0)
+        raise SystemExit(2)
+    """))
+    fake_codex.chmod(0o755)
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    (codex_home / "models_cache.json").write_text(json.dumps({
+        "models": [{"slug": "stale-codex", "display_name": "Stale Codex"}],
+    }))
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    configured = replace(
+        settings(tmp_path),
+        codex_enabled=True,
+        codex_bin=str(fake_codex),
+    )
+    client = TestClient(create_app(configured))
+    response = client.get(
+        "/api/providers/codex/models",
+        headers={"X-NsysScope-Token": "test-token"},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["models"] == [
+        {"id": "live-codex", "label": "Live Codex"},
+    ]
 
 
 def test_codex_selected_model_is_forwarded(tmp_path: Path) -> None:
