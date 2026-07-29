@@ -25,6 +25,7 @@ class JobCreate(BaseModel):
     source_path: str | None = None
     design_path: str | None = None
     existing_package_path: str | None = None
+    result_path: str | None = None
     prefix: str = Field(default="analysis", pattern=r"^[a-zA-Z0-9_-]+$")
     notes: str = Field(default="", max_length=4000)
 
@@ -39,6 +40,7 @@ class JobCreate(BaseModel):
             "config_path": self.config_path,
             "launch_path": self.launch_path,
             "source_path": self.source_path,
+            "result_path": self.result_path,
         }
         missing = [name for name, value in required.items() if not value]
         if missing:

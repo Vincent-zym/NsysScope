@@ -45,8 +45,15 @@ class JobRunner:
     def submit_conversion_retry(self, job_id: str) -> None:
         self.pool.submit(self.retry_conversion, job_id)
 
+    @staticmethod
+    def job_log_path(job_dir: Path) -> Path:
+        structured = job_dir / "logs" / "job.log"
+        legacy = job_dir / "job.log"
+        return legacy if legacy.exists() and not structured.exists() else structured
+
     def log(self, job_dir: Path, message: str) -> None:
-        log_path = job_dir / "job.log"
+        log_path = self.job_log_path(job_dir)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
         text = message.rstrip() + "\n"
         payload = text.encode("utf-8", errors="replace")
         line_limit = self.settings.job_log_line_max_bytes
@@ -81,35 +88,53 @@ class JobRunner:
                     request.existing_package_path or "", kind="existing package",
                 )
                 self.state(job_id, job_dir, "converting", 70, "正在转换已有六表分析包")
-                prefix = self.detect_prefix(package, request.prefix)
-                self.convert(package, job_dir / "analysis.json", prefix)
+                csv_package = self.csv_package_dir(package)
+                prefix = self.detect_prefix(csv_package, request.prefix)
+                if not (package / "analysis.json").exists():
+                    self.convert(csv_package, package / "analysis.json", prefix)
+                self.ensure_xlsx(csv_package, package / "xlsx")
             else:
                 paths = self.resolve_inputs(request)
                 context = {key: str(value) if value else None for key, value in paths.items()}
                 context.update(request.model_dump())
-                (job_dir / "context.json").write_text(
+                metadata_dir = job_dir / "metadata"
+                metadata_dir.mkdir(exist_ok=True)
+                (metadata_dir / "context.json").write_text(
                     json.dumps(context, ensure_ascii=False, indent=2) + "\n",
                 )
                 sqlite_path = self.export_nsys(job_id, job_dir, paths["report"])
                 context["sqlite_path"] = str(sqlite_path)
-                (job_dir / "context.json").write_text(
+                (metadata_dir / "context.json").write_text(
                     json.dumps(context, ensure_ascii=False, indent=2) + "\n",
                 )
                 self.run_agent(job_id, job_dir, request, paths, sqlite_path)
                 self.state(job_id, job_dir, "converting", 88, "正在构建前端 analysis.json")
                 package = self.find_package(job_dir, request.prefix)
                 self.convert(package, job_dir / "analysis.json", request.prefix)
+                trace_path = self.organize_result_package(
+                    job_dir, package, request.prefix, sqlite_path,
+                )
+                context["sqlite_path"] = str(trace_path)
+                (metadata_dir / "context.json").write_text(
+                    json.dumps(context, ensure_ascii=False, indent=2) + "\n",
+                )
 
             self.state(job_id, job_dir, "validating", 95, "正在校验前端数据契约")
             self.validate_analysis(job_dir / "analysis.json")
             self.state(job_id, job_dir, "succeeded", 100, "分析完成")
         except Exception as exc:
-            self.log(job_dir, traceback.format_exc())
-            if self.store.get(job_id)["status"] != "cancelled":
+            if self.store.get(job_id)["status"] == "cancelled":
+                self.log(job_dir, "[cancelled] Agent 进程已终止")
+            else:
+                self.log(job_dir, traceback.format_exc())
                 self.store.update(
                     job_id, status="failed", progress=100,
                     message="分析失败", error=str(exc),
                 )
+        finally:
+            staged_skill = job_dir / ".comate"
+            if staged_skill.exists():
+                shutil.rmtree(staged_skill)
 
     def retry_conversion(self, job_id: str) -> None:
         job = self.store.get(job_id)
@@ -120,6 +145,29 @@ class JobRunner:
             package = self.find_package(job_dir, request.prefix)
             prefix = self.detect_prefix(package, request.prefix)
             self.convert(package, job_dir / "analysis.json", prefix)
+            if request.mode == "existing_package" or package == job_dir / "csv":
+                self.ensure_xlsx(package, job_dir / "xlsx")
+            else:
+                context_path = job_dir / "metadata" / "context.json"
+                context = json.loads(context_path.read_text()) if context_path.exists() else {}
+                candidates = [
+                    Path(context["sqlite_path"]) if context.get("sqlite_path") else None,
+                    *job_dir.glob("trace/*.sqlite"),
+                    *job_dir.glob("*.sqlite"),
+                ]
+                sqlite_path = next(
+                    (path for path in candidates if path is not None and path.exists()),
+                    None,
+                )
+                if sqlite_path is None:
+                    raise RuntimeError("conversion retry cannot locate the SQLite trace")
+                trace_path = self.organize_result_package(
+                    job_dir, package, prefix, sqlite_path,
+                )
+                context["sqlite_path"] = str(trace_path)
+                context_path.write_text(
+                    json.dumps(context, ensure_ascii=False, indent=2) + "\n",
+                )
             self.state(job_id, job_dir, "validating", 95, "正在校验前端数据契约")
             self.validate_analysis(job_dir / "analysis.json")
             self.state(job_id, job_dir, "succeeded", 100, "分析完成")
@@ -180,9 +228,10 @@ class JobRunner:
             )
         self.state(job_id, job_dir, "analyzing", 30, "Codex Skill Agent 正在分析模型与时间线")
         prompt = self.build_prompt(job_dir, request, paths, sqlite_path)
-        prompt_path = job_dir / "prompt.md"
+        prompt_path = job_dir / "metadata" / "prompt.md"
+        prompt_path.parent.mkdir(exist_ok=True)
         prompt_path.write_text(prompt)
-        output_message = job_dir / "agent-final.txt"
+        output_message = job_dir / "metadata" / "agent-final.txt"
         command = [
             self.settings.codex_bin, "--ask-for-approval", "never",
         ]
@@ -214,7 +263,9 @@ class JobRunner:
             raise RuntimeError(status["message"])
         self.state(job_id, job_dir, "analyzing", 30, "Comate Skill Agent 正在分析模型与时间线")
         prompt = self.build_prompt(job_dir, request, paths, sqlite_path)
-        (job_dir / "prompt.md").write_text(prompt)
+        metadata_dir = job_dir / "metadata"
+        metadata_dir.mkdir(exist_ok=True)
+        (metadata_dir / "prompt.md").write_text(prompt)
         self.stage_comate_skill(job_dir)
         command = [
             self.settings.comate_bin, "run",
@@ -307,6 +358,7 @@ Requirements:
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, bufsize=1, cwd=job_dir,
             env=environment or {**os.environ, "NO_COLOR": "1"},
+            start_new_session=True,
         )
         with self.lock:
             self.processes[job_id] = process
@@ -515,6 +567,74 @@ Requirements:
         if completed.returncode:
             raise RuntimeError(completed.stderr.strip() or "analysis conversion failed")
 
+    def ensure_xlsx(self, csv_dir: Path, xlsx_dir: Path) -> None:
+        command = [
+            "python3", str(self.settings.xlsx_converter),
+            str(csv_dir), str(xlsx_dir),
+        ]
+        completed = subprocess.run(command, text=True, capture_output=True)
+        if completed.returncode:
+            raise RuntimeError(completed.stderr.strip() or "CSV to XLSX conversion failed")
+
+    def organize_result_package(
+        self, result_dir: Path, package_dir: Path, prefix: str, sqlite_path: Path,
+    ) -> Path:
+        csv_dir = result_dir / "csv"
+        xlsx_dir = result_dir / "xlsx"
+        trace_dir = result_dir / "trace"
+        metadata_dir = result_dir / "metadata"
+        for directory in (csv_dir, xlsx_dir, trace_dir, metadata_dir):
+            directory.mkdir(exist_ok=True)
+
+        csv_files = []
+        for suffix in CSV_SUFFIXES:
+            source = package_dir / f"{prefix}{suffix}"
+            target = csv_dir / source.name
+            shutil.move(str(source), target)
+            csv_files.append(target.name)
+        for source_dir in dict.fromkeys((package_dir, result_dir)):
+            for extra_csv in source_dir.glob("*.csv"):
+                shutil.move(str(extra_csv), metadata_dir / extra_csv.name)
+
+        self.ensure_xlsx(csv_dir, xlsx_dir)
+        trace_path = trace_dir / sqlite_path.name
+        if sqlite_path.resolve() != trace_path.resolve():
+            if sqlite_path.is_relative_to(result_dir):
+                shutil.move(str(sqlite_path), trace_path)
+            else:
+                shutil.copy2(sqlite_path, trace_path)
+
+        for source_dir in dict.fromkeys((package_dir, result_dir)):
+            for sidecar in source_dir.glob("*.json"):
+                if sidecar.name in {"analysis.json", "nsysscope-package.json"}:
+                    continue
+                shutil.move(str(sidecar), metadata_dir / sidecar.name)
+        staged_skill = result_dir / ".comate"
+        if staged_skill.exists():
+            shutil.rmtree(staged_skill)
+
+        manifest = {
+            "schemaVersion": "1.0",
+            "kind": "nsysscope-analysis-package",
+            "analysis": "analysis.json",
+            "csvDirectory": "csv",
+            "xlsxDirectory": "xlsx",
+            "trace": f"trace/{trace_path.name}",
+            "log": "logs/job.log",
+            "metadataDirectory": "metadata",
+            "prefix": prefix,
+            "tables": csv_files,
+        }
+        (result_dir / "nsysscope-package.json").write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+        )
+        return trace_path
+
+    @staticmethod
+    def csv_package_dir(package: Path) -> Path:
+        csv_dir = package / "csv"
+        return csv_dir if csv_dir.is_dir() else package
+
     @staticmethod
     def validate_analysis(path: Path) -> None:
         payload = json.loads(path.read_text())
@@ -551,6 +671,9 @@ Requirements:
         with self.lock:
             process = self.processes.get(job_id)
         if process and process.poll() is None:
-            process.terminate()
-            return True
+            try:
+                os.killpg(process.pid, 15)
+                return True
+            except ProcessLookupError:
+                return False
         return False

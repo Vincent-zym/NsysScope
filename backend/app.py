@@ -21,7 +21,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     settings.prepare()
     store = JobStore(settings.data_dir / "jobs.sqlite")
     runner = JobRunner(settings, store)
-    app = FastAPI(title="NsysScope Analyzer API", version="0.4.0")
+    app = FastAPI(title="NsysScope Analyzer API", version="0.5.0")
     app.add_middleware(
         CORSMiddleware,
         allow_origins=list(settings.cors_origins),
@@ -39,7 +39,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if isinstance(updated, str):
             updated = datetime.fromisoformat(updated)
         activity = updated
-        log_path = Path(job["output_dir"]) / "job.log"
+        log_path = runner.job_log_path(Path(job["output_dir"]))
         if log_path.exists():
             log_activity = datetime.fromtimestamp(log_path.stat().st_mtime, UTC)
             activity = max(activity, log_activity)
@@ -89,9 +89,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 except ValueError as exc:
                     raise HTTPException(status_code=422, detail=str(exc)) from exc
         job_id = secrets.token_hex(8)
-        output_dir = settings.data_dir / "jobs" / job_id
-        output_dir.mkdir(parents=True)
-        (output_dir / "request.json").write_text(
+        try:
+            output_dir = (
+                settings.resolve_allowed(
+                    request.existing_package_path or "", kind="existing package",
+                )
+                if request.mode == "existing_package"
+                else settings.prepare_result_dir(request.result_path or "")
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        metadata_dir = output_dir / "metadata"
+        metadata_dir.mkdir(exist_ok=True)
+        (output_dir / "logs").mkdir(exist_ok=True)
+        (metadata_dir / "request.json").write_text(
             request.model_dump_json(indent=2) + "\n",
         )
         created = store.create(job_id, request, output_dir)
@@ -119,7 +130,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             job = store.get(job_id)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="job not found") from exc
-        path = Path(job["output_dir"]) / "job.log"
+        path = runner.job_log_path(Path(job["output_dir"]))
         lines: list[str] = []
         reset = False
         total = path.stat().st_size if path.exists() else 0

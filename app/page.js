@@ -106,7 +106,8 @@ function JobDialog({ open, onClose, onLoaded }) {
     mode: "codex_skill", agent_provider: "codex", agent_model: "", model_name: "",
     stage: "prefill", hardware: "Nvidia B200",
     report_path: "", config_path: "", launch_path: "", source_path: "",
-    design_path: "", existing_package_path: "", prefix: "analysis", notes: "",
+    design_path: "", existing_package_path: "", result_path: "",
+    prefix: "analysis", notes: "",
   });
   const [job, setJob] = useState(null);
   const [logs, setLogs] = useState([]);
@@ -253,6 +254,7 @@ function JobDialog({ open, onClose, onLoaded }) {
     ...form, agent_provider: event.target.value, agent_model: "",
   });
   const provider = health.providers?.[form.agent_provider];
+  const importingPackage = form.mode === "existing_package";
   async function submit(event) {
     event.preventDefault();
     setError("");
@@ -264,6 +266,10 @@ function JobDialog({ open, onClose, onLoaded }) {
     sessionStorage.setItem("nsysscope.token", token);
     try {
       const payload = { ...form };
+      if (payload.mode === "existing_package") {
+        payload.model_name ||= "Imported analysis";
+        payload.hardware ||= "Unknown";
+      }
       for (const key of Object.keys(payload)) {
         if (payload[key] === "") delete payload[key];
       }
@@ -333,8 +339,8 @@ function JobDialog({ open, onClose, onLoaded }) {
           </div>
         </details>
         <div className="form-grid">
-          <label>执行模式<select value={form.mode} onChange={set("mode")}><option value="codex_skill">Agent 静态分析</option><option value="existing_package">已有六表分析包</option></select></label>
-          <label>阶段<select value={form.stage} onChange={set("stage")}><option value="prefill">Prefill</option><option value="decode">Decode</option></select></label>
+          <label className={importingPackage ? "span-2" : ""}>执行模式<select value={form.mode} onChange={set("mode")}><option value="codex_skill">Agent 静态分析</option><option value="existing_package">导入结果目录（无需 Agent）</option></select></label>
+          {!importingPackage && <label>阶段<select value={form.stage} onChange={set("stage")}><option value="prefill">Prefill</option><option value="decode">Decode</option></select></label>}
           {form.mode === "codex_skill" && <>
             <label>Agent Provider<select value={form.agent_provider} onChange={setProvider}>
               <option value="codex" disabled={health.providers && !health.providers.codex?.ready}>Codex CLI{health.providers && !health.providers.codex?.ready ? "（未就绪）" : ""}</option>
@@ -351,25 +357,30 @@ function JobDialog({ open, onClose, onLoaded }) {
             {provider && !provider.ready && <div className="provider-warning span-2">{provider.message}</div>}
             {modelCatalog.state === "error" && <div className="provider-warning span-2">模型列表读取失败，将使用 Provider 默认模型：{modelCatalog.message}</div>}
           </>}
-          <label>模型名称<input required value={form.model_name} onChange={set("model_name")} placeholder="GLM5.2" /></label>
-          <label>硬件<input required value={form.hardware} onChange={set("hardware")} /></label>
+          {!importingPackage && <>
+            <label>模型名称<input required value={form.model_name} onChange={set("model_name")} placeholder="GLM5.2" /></label>
+            <label>硬件<input required value={form.hardware} onChange={set("hardware")} /></label>
+          </>}
           {form.mode === "existing_package" ? <>
-            <label className="span-2">六表目录<input required value={form.existing_package_path} onChange={set("existing_package_path")} placeholder="/path/to/analysis-package" /></label>
+            <label className="span-2">NsysScope 结果目录<input required value={form.existing_package_path} onChange={set("existing_package_path")} placeholder="/path/to/result-package" /></label>
+            <p className="package-hint span-2">目录内有 analysis.json 时直接展示；只有六表 CSV 时会自动转换。支持新版 csv/ 子目录和旧版平铺目录。</p>
           </> : <>
             <label className="span-2">Nsight 报告<input required value={form.report_path} onChange={set("report_path")} placeholder="/path/to/report.nsys-rep" /></label>
             <label>Model config<input required value={form.config_path} onChange={set("config_path")} placeholder="/path/to/config.json" /></label>
             <label>部署 YAML / 脚本<input required value={form.launch_path} onChange={set("launch_path")} placeholder="/path/to/launch.yaml" /></label>
             <label className="span-2">模型源码根目录<input required value={form.source_path} onChange={set("source_path")} placeholder="/path/to/sglang/source" /></label>
             <label className="span-2">设计说明（可选）<input value={form.design_path} onChange={set("design_path")} placeholder="/path/to/design.md" /></label>
+            <label className="span-2">结果保存目录<input required value={form.result_path} onChange={set("result_path")} placeholder="/path/to/result-package（必须为空或不存在）" /></label>
           </>}
           <label>输出前缀<input required value={form.prefix} onChange={set("prefix")} pattern="[a-zA-Z0-9_-]+" /></label>
-          <label>补充要求<input value={form.notes} onChange={set("notes")} placeholder="目标层、batch、特殊分支…" /></label>
+          {!importingPackage && <label>补充要求<input value={form.notes} onChange={set("notes")} placeholder="目标层、batch、特殊分支…" /></label>}
         </div>
         {error && <div className="error">{error}</div>}
         <div className="dialog-actions"><button type="button" onClick={onClose}>取消</button><button className="primary" type="submit">提交分析</button></div>
       </form> : <div className="job-progress">
         <div className="job-status"><span>{job.status.toUpperCase()}</span><b>{job.message}</b><em>{job.progress}%</em></div>
         <div className="progress-track"><i style={{ width: `${job.progress}%` }} /></div>
+        {job.status === "succeeded" && <div className="result-location"><span>结果目录</span><code>{job.output_dir}</code></div>}
         {job.idle_seconds > 180 && <div className="activity-warning">执行器超过 {Math.floor(job.idle_seconds / 60)} 分钟没有新输出，请检查日志；任务仍在运行，可随时取消。</div>}
         <div className="job-log">{logs.length ? logs.map((line, index) => <code key={`${index}-${line}`}>{line}</code>) : <code>等待执行器输出…</code>}</div>
         {(error || job.error) && <div className="error">{error || job.error}</div>}
@@ -395,7 +406,10 @@ export default function Dashboard() {
   const fileRef = useRef(null);
 
   useEffect(() => {
-    fetch("/demo-analysis.json").then((r) => r.json()).then(setData)
+    fetch("/demo-analysis.json").then((r) => r.json()).then((payload) => {
+      setData(payload);
+      setSelectedOp(payload.operators?.[0] || null);
+    })
       .catch(() => setError("示例数据加载失败"));
   }, []);
 
@@ -424,7 +438,7 @@ export default function Dashboard() {
       }
       setData(parsed);
       setSelectedStage(null);
-      setSelectedOp(null);
+      setSelectedOp(parsed.operators?.[0] || null);
       setError("");
     } catch {
       setError("无法读取：请选择 NsysScope analysis.json（schemaVersion 1.0）");
@@ -434,7 +448,7 @@ export default function Dashboard() {
   const loadAnalysis = useCallback((payload) => {
     setData(payload);
     setSelectedStage(null);
-    setSelectedOp(null);
+    setSelectedOp(payload.operators?.[0] || null);
     setError("");
   }, []);
 
@@ -445,12 +459,14 @@ export default function Dashboard() {
     .filter((op) => op.durationUs > 0)
     .sort((a, b) => (b.diffUs / b.durationUs) - (a.diffUs / a.durationUs))[0];
   const compute = data.classifications.find((x) => x.name === "核心计算");
+  const displayModel = String(data.metadata.model || "Unknown model")
+    .split(" / ", 1)[0].split(" (", 1)[0].slice(0, 80);
 
   return (
     <main>
       <header className="topbar">
         <div className="brand"><i>NS</i><div><b>NsysScope</b><span>GPU INFERENCE PROFILER</span></div></div>
-        <div className="report-chip"><span className="status-dot" />{data.metadata.model}</div>
+        <div className="report-chip"><span className="status-dot" />{displayModel}</div>
         <div className="top-actions">
           <button className="ghost-action" onClick={() => fileRef.current?.click()}>导入 JSON</button>
           <button className="import" onClick={() => setJobOpen(true)}>新建分析</button>
@@ -459,15 +475,16 @@ export default function Dashboard() {
       </header>
 
       <section className="shell">
-        <div className="breadcrumb">ANALYSES <span>/</span> {basename(data.metadata.report)}</div>
-        <div className="title-row">
+        <div className="title-row compact-title">
           <div>
-            <p className="eyebrow">REPEATING UNIT ANALYSIS</p>
-            <h1>{data.metadata.model}</h1>
-            <p>{data.metadata.repeatingUnit} · {data.metadata.stage?.toUpperCase()} · {data.metadata.hardware}</p>
+            <p className="eyebrow">PERFORMANCE REPORT</p>
+            <h1>{displayModel}</h1>
+            <p>{basename(data.metadata.report)} </p>
           </div>
           <div className="run-meta">
             <span>STATUS <b>VALIDATED</b></span>
+            <span>STAGE <b>{data.metadata.stage?.toUpperCase()}</b></span>
+            <span>HARDWARE <b>{data.metadata.hardware}</b></span>
             <span>DEVICES <b>{data.summary.devices.length} × GPU</b></span>
           </div>
         </div>
@@ -507,64 +524,55 @@ export default function Dashboard() {
           <Timeline operators={data.operators} selectedStage={selectedStage} colors={colors} onPick={setSelectedOp} />
         </section>
 
-        <section className="panel table-panel">
-          <div className="panel-head table-tools">
-            <div><span>OPERATORS</span><h2>算子明细</h2></div>
-            <div className="filters">
-              <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="搜索算子、module…" />
-              {["all", "core", "communication", "auxiliary"].map((key) => (
-                <button key={key} className={category === key ? "active" : ""} onClick={() => setCategory(key)}>
-                  {key === "all" ? "全部" : CATEGORY[key].label}
-                </button>
-              ))}
-            </div>
-          </div>
-          <div className="table-wrap">
-            <table>
-              <thead><tr><th>#</th><th>功能模块 / 算子</th><th>分类</th><th>耗时</th><th>占比</th><th>Shape</th><th>MFU</th><th>波动</th></tr></thead>
-              <tbody>
-                {filtered.map((op) => (
-                  <tr key={op.index} onClick={() => setSelectedOp(op)}>
-                    <td className="mono muted">{op.index}</td>
-                    <td><div className="op-title"><i style={{ background: colors[op.stage] }} /><div><b>{op.name}</b><span>{op.stage} · {op.module}</span></div></div></td>
-                    <td><span className={`category ${op.category}`}>{CATEGORY[op.category]?.label}</span></td>
-                    <td className="mono">{fmt(op.durationUs)} μs</td>
-                    <td className="mono">{fmt(op.durationPct)}%</td>
-                    <td className="mono muted">{op.shape || "—"}</td>
-                    <td className="mono">{op.mfu ? `${fmt(op.mfu)}%` : "—"}</td>
-                    <td className="mono muted">{fmt(op.diffUs)} μs</td>
-                  </tr>
+        <section className="operator-workbench">
+          <article className="panel table-panel">
+            <div className="panel-head table-tools">
+              <div><span>OPERATORS</span><h2>算子明细</h2></div>
+              <div className="filters">
+                <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="搜索算子、module…" />
+                {["all", "core", "communication", "auxiliary"].map((key) => (
+                  <button key={key} className={category === key ? "active" : ""} onClick={() => setCategory(key)}>
+                    {key === "all" ? "全部" : CATEGORY[key].label}
+                  </button>
                 ))}
-              </tbody>
-            </table>
-          </div>
-        </section>
-
-        <section className="pipeline">
-          <div><span>01</span><b>输入物料</b><p>.nsys-rep · config · YAML · model source</p></div>
-          <i>→</i><div><span>02</span><b>静态分析</b><p>边界识别 · 模块映射 · 稳定统计 · MFU</p></div>
-          <i>→</i><div><span>03</span><b>标准契约</b><p>analysis.json · 六张 CSV · manifest</p></div>
-          <i>→</i><div><span>04</span><b>交互洞察</b><p>阶段 · 时间线 · 算子 · 证据 · 对比</p></div>
+              </div>
+            </div>
+            <div className="table-wrap">
+              <table>
+                <thead><tr><th>#</th><th>功能模块 / 算子</th><th>分类</th><th>耗时</th><th>占比</th><th>MFU</th><th>波动</th></tr></thead>
+                <tbody>
+                  {filtered.map((op) => (
+                    <tr key={op.index} className={selectedOp?.index === op.index ? "selected" : ""} onClick={() => setSelectedOp(op)}>
+                      <td className="mono muted">{op.index}</td>
+                      <td><div className="op-title"><i style={{ background: colors[op.stage] }} /><div><b>{op.name}</b><span>{op.stage} · {op.module}</span></div></div></td>
+                      <td><span className={`category ${op.category}`}>{CATEGORY[op.category]?.label}</span></td>
+                      <td className="mono">{fmt(op.durationUs)} μs</td>
+                      <td className="mono">{fmt(op.durationPct)}%</td>
+                      <td className="mono">{op.mfu ? `${fmt(op.mfu)}%` : "—"}</td>
+                      <td className="mono muted">{fmt(op.diffUs)} μs</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </article>
+          <aside className="panel evidence-panel">
+            <div className="panel-head"><div><span>EVIDENCE</span><h2>算子证据</h2></div><small>{selectedOp ? `#${selectedOp.index}` : "选择算子"}</small></div>
+            {selectedOp ? <div className="evidence-body">
+              <div className="evidence-title"><i style={{ background: colors[selectedOp.stage] }} /><div><b>{selectedOp.name}</b><span>{selectedOp.stage} · {selectedOp.module}</span></div></div>
+              <div className="evidence-stats">
+                <div><span>AVG</span><b>{fmt(selectedOp.durationUs)} μs</b></div>
+                <div><span>MIN / MAX</span><b>{fmt(selectedOp.minUs)} / {fmt(selectedOp.maxUs)}</b></div>
+                <div><span>SHAPE / MFU</span><b>{selectedOp.shape || "N/A"} · {selectedOp.mfu ? `${fmt(selectedOp.mfu)}%` : "N/A"}</b></div>
+              </div>
+              <h3>功能说明</h3><p>{selectedOp.introduction || "暂无说明"}</p>
+              <h3>Python 调用链</h3><code>{selectedOp.pythonFunction || "暂无调用链证据"}</code>
+              <h3>映射依据</h3><p>{selectedOp.mappingReason || "暂无映射依据"}</p>
+              <details><summary>完整 CUDA 符号</summary><code>{selectedOp.fullName}</code></details>
+            </div> : <div className="evidence-empty">从左侧选择一个算子查看映射证据。</div>}
+          </aside>
         </section>
       </section>
-
-      {selectedOp && <div className="drawer-backdrop" onClick={() => setSelectedOp(null)}>
-        <aside className="drawer" onClick={(e) => e.stopPropagation()}>
-          <button className="close" onClick={() => setSelectedOp(null)}>×</button>
-          <span className="drawer-kicker">OPERATOR #{selectedOp.index}</span>
-          <h2>{selectedOp.name}</h2>
-          <p className="drawer-module">{selectedOp.stage} · {selectedOp.module}</p>
-          <div className="drawer-stats">
-            <div><span>AVG</span><b>{fmt(selectedOp.durationUs)} μs</b></div>
-            <div><span>MIN / MAX</span><b>{fmt(selectedOp.minUs)} / {fmt(selectedOp.maxUs)}</b></div>
-            <div><span>MFU</span><b>{selectedOp.mfu ? `${fmt(selectedOp.mfu)}%` : "N/A"}</b></div>
-          </div>
-          <h3>功能说明</h3><p>{selectedOp.introduction}</p>
-          <h3>Python 调用链</h3><code>{selectedOp.pythonFunction}</code>
-          <h3>映射依据</h3><p>{selectedOp.mappingReason}</p>
-          <h3>完整 CUDA 符号</h3><code>{selectedOp.fullName}</code>
-        </aside>
-      </div>}
       <JobDialog open={jobOpen} onClose={() => setJobOpen(false)} onLoaded={loadAnalysis} />
     </main>
   );

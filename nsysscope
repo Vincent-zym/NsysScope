@@ -8,6 +8,7 @@ DATA_DIR="${NSYSSCOPE_DATA_DIR:-$PROJECT_DIR/.data}"
 SKILL_DIR="${NSYSSCOPE_SKILL_DIR:-/root/.codex/skills/sglang-nsys-static-analysis}"
 ALLOWED_ROOTS="${NSYSSCOPE_ALLOWED_ROOTS:-$(dirname "$PROJECT_DIR")}"
 ANALYZER_PID=""
+RUNTIME_DIR=""
 CODEX_READY=false
 COMATE_BIN="${NSYSSCOPE_COMATE_BIN:-}"
 COMATE_PLATFORM="${NSYSSCOPE_COMATE_PLATFORM:-internal}"
@@ -27,6 +28,10 @@ cleanup() {
     kill "$ANALYZER_PID" >/dev/null 2>&1 || true
     wait "$ANALYZER_PID" 2>/dev/null || true
     ANALYZER_PID=""
+  fi
+  if [[ -n "${RUNTIME_DIR:-}" ]] && [[ -d "$RUNTIME_DIR" ]]; then
+    rm -rf -- "$RUNTIME_DIR"
+    RUNTIME_DIR=""
   fi
 }
 
@@ -162,6 +167,8 @@ start() {
   mkdir -p "$DATA_DIR"
   exec 9>"$DATA_DIR/nsysscope.lock"
   flock -n 9 || fail "已有一个 NsysScope 实例正在使用 $DATA_DIR"
+  RUNTIME_DIR="$(mktemp -d "$DATA_DIR/runtime.XXXXXX")"
+  trap cleanup EXIT
   prepare_python
   prepare_frontend
 
@@ -188,7 +195,7 @@ start() {
     NSYSSCOPE_SKILL_DIR="$SKILL_DIR" \
     "$VENV_DIR/bin/uvicorn" backend.app:app \
       --host 127.0.0.1 --port "$analyzer_port" \
-      >>"$DATA_DIR/analyzer.log" 2>&1 &
+      --no-access-log >>"$RUNTIME_DIR/analyzer.log" 2>&1 &
   ANALYZER_PID=$!
   trap cleanup EXIT
   trap 'exit 130' INT TERM
@@ -201,19 +208,19 @@ start() {
       break
     fi
     if ! kill -0 "$ANALYZER_PID" >/dev/null 2>&1; then
-      tail -40 "$DATA_DIR/analyzer.log" >&2 || true
+      tail -40 "$RUNTIME_DIR/analyzer.log" >&2 || true
       fail "Analyzer 启动失败"
     fi
     sleep 0.1
   done
-  [[ "$ready" -eq 1 ]] || fail "Analyzer 健康检查超时，请查看 $DATA_DIR/analyzer.log"
+  [[ "$ready" -eq 1 ]] || fail "Analyzer 健康检查超时，请查看 $RUNTIME_DIR/analyzer.log"
 
   printf '\n'
   say "启动完成"
   printf '  页面地址:  http://127.0.0.1:%s\n' "$ui_port"
   printf '  物料范围:  %s\n' "$ALLOWED_ROOTS"
   printf '  数据目录:  %s\n' "$DATA_DIR"
-  printf '  后端日志:  %s/analyzer.log\n' "$DATA_DIR"
+  printf '  运行日志:  %s/analyzer.log（停止后自动清理）\n' "$RUNTIME_DIR"
   printf '\n'
   printf '  如果通过 SSH 使用，请在本地电脑执行：\n'
   printf '  ssh -N -L %s:127.0.0.1:%s <用户名>@<服务器地址>\n' "$ui_port" "$ui_port"

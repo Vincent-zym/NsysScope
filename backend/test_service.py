@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import shutil
 import textwrap
+import threading
 import time
+import zipfile
 from dataclasses import replace
 from pathlib import Path
 
@@ -45,12 +47,23 @@ def settings(tmp_path: Path) -> Settings:
         nsys_bin="nsys",
         skill_dir=Path("/root/.codex/skills/sglang-nsys-static-analysis"),
         converter=PROJECT / "scripts/build_analysis_json.py",
+        xlsx_converter=PROJECT / "scripts/csv_to_xlsx.py",
     )
+
+
+def package_copy(tmp_path: Path) -> Path:
+    target = tmp_path / "package"
+    target.mkdir()
+    for source in PACKAGE.iterdir():
+        if source.is_file():
+            shutil.copy2(source, target / source.name)
+    return target
 
 
 def test_existing_package_job(tmp_path: Path) -> None:
     if not PACKAGE.exists():
         return
+    package = package_copy(tmp_path)
     client = TestClient(create_app(settings(tmp_path)))
     headers = {"X-NsysScope-Token": "test-token"}
     response = client.post("/api/jobs", headers=headers, json={
@@ -58,7 +71,7 @@ def test_existing_package_job(tmp_path: Path) -> None:
         "model_name": "GLM5.2",
         "stage": "prefill",
         "hardware": "Nvidia B200",
-        "existing_package_path": str(PACKAGE),
+        "existing_package_path": str(package),
         "prefix": "glm52",
     })
     assert response.status_code == 200, response.text
@@ -104,6 +117,7 @@ def test_converter_accepts_current_stats_schema() -> None:
 def test_log_pagination_and_conversion_retry(tmp_path: Path) -> None:
     if not PACKAGE.exists():
         return
+    package = package_copy(tmp_path)
     application = create_app(settings(tmp_path))
     client = TestClient(application)
     headers = {"X-NsysScope-Token": "test-token"}
@@ -112,7 +126,7 @@ def test_log_pagination_and_conversion_retry(tmp_path: Path) -> None:
         "model_name": "GLM5.2",
         "stage": "prefill",
         "hardware": "Nvidia B200",
-        "existing_package_path": str(PACKAGE),
+        "existing_package_path": str(package),
         "prefix": "glm52",
     })
     job = response.json()
@@ -123,7 +137,7 @@ def test_log_pagination_and_conversion_retry(tmp_path: Path) -> None:
         time.sleep(0.05)
     assert job["status"] == "succeeded", job
 
-    log_path = Path(job["output_dir"]) / "job.log"
+    log_path = application.state.runner.job_log_path(Path(job["output_dir"]))
     with log_path.open("a") as handle:
         handle.writelines(f"line-{index}\n" for index in range(7))
     page = client.get(
@@ -140,13 +154,6 @@ def test_log_pagination_and_conversion_retry(tmp_path: Path) -> None:
     assert next_page["lines"]
 
     Path(job["output_dir"], "analysis.json").unlink()
-    for source in [
-        *PACKAGE.glob("glm52_*"),
-        PACKAGE / "position_operator_stats.json",
-        PACKAGE / "validation_report.json",
-    ]:
-        if source.is_file():
-            shutil.copy2(source, Path(job["output_dir"]) / source.name)
     application.state.store.update(
         job["id"], status="failed", progress=100, message="simulated converter failure",
     )
@@ -243,6 +250,7 @@ def test_comate_provider_end_to_end_with_fake_zulu(tmp_path: Path) -> None:
         "config_path": str(config),
         "launch_path": str(launch),
         "source_path": str(source),
+        "result_path": str(tmp_path / "result"),
         "prefix": "glm52",
     })
     assert response.status_code == 200, response.text
@@ -254,16 +262,26 @@ def test_comate_provider_end_to_end_with_fake_zulu(tmp_path: Path) -> None:
         time.sleep(0.05)
     assert job["status"] == "succeeded", job
     output = Path(job["output_dir"])
-    staged = output / ".comate/skills/sglang-nsys-static-analysis/SKILL.md"
-    assert staged.exists()
-    assert "Use when the analysis agent receives" in staged.read_text()
-    assert "<prompt>" in (output / "job.log").read_text()
-    zulu_args = json.loads((output / "zulu-args.json").read_text())
+    assert not (output / ".comate").exists()
+    assert "Use the activated `sglang-nsys-static-analysis` skill." in (
+        output / "metadata/prompt.md"
+    ).read_text()
+    log_path = output / "logs/job.log"
+    assert "<prompt>" in log_path.read_text()
+    zulu_args = json.loads((output / "metadata/zulu-args.json").read_text())
     assert zulu_args[zulu_args.index("--model") + 1] == "quality-model-id"
     assert zulu_args[zulu_args.index("--display") + 1] == "task-json"
-    job_log = (output / "job.log").read_text()
+    job_log = log_path.read_text()
     assert "详细会话未写入日志" in job_log
     assert len(job_log.encode()) < 50_000
+    assert len(list((output / "csv").glob("*.csv"))) == 6
+    workbooks = list((output / "xlsx").glob("*.xlsx"))
+    assert len(workbooks) == 6
+    for workbook in workbooks:
+        with zipfile.ZipFile(workbook) as archive:
+            assert "xl/worksheets/sheet1.xml" in archive.namelist()
+    assert (output / "trace/report.sqlite").exists()
+    assert (output / "nsysscope-package.json").exists()
     analysis = client.get(job["analysis_url"], headers=headers).json()
     assert analysis["schemaVersion"] == "1.0"
     assert len(analysis["operators"]) == 61
@@ -335,6 +353,7 @@ def test_codex_selected_model_is_forwarded(tmp_path: Path) -> None:
         config_path=str(config),
         launch_path=str(launch),
         source_path=str(source),
+        result_path=str(job_dir),
     )
     captured: dict[str, object] = {}
 
@@ -371,7 +390,7 @@ def test_job_log_is_bounded_and_clips_large_lines(tmp_path: Path) -> None:
     job_dir.mkdir()
     for index in range(30):
         runner.log(job_dir, f"message-{index} " + "x" * 500)
-    log_path = job_dir / "job.log"
+    log_path = runner.job_log_path(job_dir)
     assert log_path.stat().st_size <= 1024
     content = log_path.read_text(errors="replace")
     assert "日志单条内容已截断" in content
@@ -390,4 +409,33 @@ def test_run_process_emits_heartbeat(tmp_path: Path) -> None:
         heartbeat_seconds=1,
         heartbeat_message="测试进程仍在运行",
     )
-    assert "[heartbeat] 测试进程仍在运行" in (job_dir / "job.log").read_text()
+    assert "[heartbeat] 测试进程仍在运行" in runner.job_log_path(job_dir).read_text()
+
+
+def test_cancel_terminates_agent_process_group(tmp_path: Path) -> None:
+    configured = settings(tmp_path)
+    configured.prepare()
+    runner = JobRunner(configured, JobStore(configured.data_dir / "jobs.sqlite"))
+    job_dir = tmp_path / "cancel"
+    job_dir.mkdir()
+    stopped = threading.Event()
+
+    def run() -> None:
+        try:
+            runner.run_process(
+                "cancel-job", job_dir,
+                ["/bin/sh", "-c", "sleep 30"],
+            )
+        except RuntimeError:
+            stopped.set()
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    for _ in range(100):
+        if "cancel-job" in runner.processes:
+            break
+        time.sleep(0.01)
+    assert runner.cancel("cancel-job") is True
+    thread.join(timeout=3)
+    assert stopped.is_set()
+    assert not thread.is_alive()

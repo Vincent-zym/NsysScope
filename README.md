@@ -89,6 +89,7 @@ Click **新建分析**, then provide:
 - the real deployment YAML or launch script;
 - the corresponding SGLang/model source root;
 - model name, inference stage and hardware;
+- an empty or not-yet-created result directory;
 - optional design notes and task-specific requirements.
 
 The paths are resolved on the machine running NsysScope. By default, the tool
@@ -99,7 +100,22 @@ scope when needed:
 NSYSSCOPE_ALLOWED_ROOTS=/reports:/model-source ./nsysscope start
 ```
 
-Generated jobs and logs are stored under `.data/` by default. Override this with
+The result directory is the portable unit of storage. A successful run writes:
+
+```text
+result-package/
+├── analysis.json
+├── nsysscope-package.json
+├── csv/                 # exactly six normalized CSV tables
+├── xlsx/                # one XLSX workbook for each CSV
+├── trace/               # exported or copied SQLite trace
+├── logs/job.log         # bounded Agent/job log
+└── metadata/            # request, prompt, manifest and validation evidence
+```
+
+NsysScope's own `.data/` directory only keeps the small job index, dependency
+stamps and lock. The launcher's operational log is temporary and is deleted
+when `./nsysscope start` stops. Override the local state location with
 `NSYSSCOPE_DATA_DIR`.
 
 Agent logs are bounded by default:
@@ -109,7 +125,7 @@ Agent logs are bounded by default:
 - a lightweight heartbeat is recorded every 30 seconds while an Agent is
   silent;
 - individual log records are capped at 16 KiB and each job log is capped at
-  8 MiB;
+  2 MiB;
 - the dashboard reads logs incrementally by byte offset rather than loading the
   whole file.
 
@@ -118,6 +134,8 @@ The limits can be adjusted with `NSYSSCOPE_AGENT_HEARTBEAT_SECONDS`,
 
 ## Existing results
 
-Use **已有六表分析包** to convert a completed normalized package without
-running an Agent again, or use **导入 JSON** to open an existing
-`analysis.json`.
+Use **导入结果目录（无需 Agent）** and enter the package directory. If it
+already contains `analysis.json`, NsysScope opens it directly; if it only has
+the normalized six CSV files, NsysScope builds `analysis.json` automatically.
+Both the new `csv/` layout and legacy flat six-table directories are supported.
+Use **导入 JSON** only for a standalone browser-side preview.

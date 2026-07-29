@@ -82,9 +82,12 @@ def repeating_unit_label(value: Any) -> str | None:
 def model_label(manifest: dict[str, Any]) -> str | None:
     model = manifest.get("model")
     architecture = manifest.get("model_architecture")
-    if model and architecture and architecture not in str(model):
-        return f"{model} / {architecture}"
-    return model or architecture
+    value = str(model or architecture or "").strip()
+    if not value:
+        return None
+    for separator in (" / ", " (", ", architectures=", ", model_type="):
+        value = value.split(separator, 1)[0].strip()
+    return value[:80]
 
 
 def mfu_peak_label(manifest: dict[str, Any]) -> str | None:
@@ -206,8 +209,13 @@ def main() -> None:
             "model": model_label(manifest),
             "stage": manifest.get("stage"),
             "hardware": manifest.get("hardware"),
-            "report": manifest.get("input_report") or (manifest.get("inputs") or {}).get("original_report"),
-            "repeatingUnit": repeating_unit_label(manifest.get("repeating_unit")),
+            "report": manifest.get("input_report") or first_value(
+                manifest.get("inputs") or {}, "original_report", "nsys_rep", "sqlite",
+            ),
+            "repeatingUnit": repeating_unit_label(
+                manifest.get("repeating_unit")
+                or manifest.get("repeating_unit_selection")
+            ),
             "layerIdEvidence": manifest.get("layer_id_evidence"),
             "generatedFrom": str(root),
         },
@@ -232,7 +240,9 @@ def main() -> None:
         } for row in classes],
         "operators": operators,
         "evidence": {
-            "boundary": manifest.get("boundary_evidence"),
+            "boundary": manifest.get("boundary_evidence") or (
+                manifest.get("repeating_unit_selection") or {}
+            ).get("boundary_evidence"),
             "uncertainMappings": [
                 *manifest.get("uncertain_mappings", []),
                 *manifest.get("recorded_uncertainties", []),

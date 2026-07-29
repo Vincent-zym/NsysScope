@@ -42,6 +42,7 @@ class Settings:
     nsys_bin: str
     skill_dir: Path
     converter: Path
+    xlsx_converter: Path
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -76,7 +77,7 @@ class Settings:
                 5, int(os.getenv("NSYSSCOPE_AGENT_HEARTBEAT_SECONDS", "30")),
             ),
             job_log_max_bytes=max(
-                1_048_576, int(os.getenv("NSYSSCOPE_JOB_LOG_MAX_BYTES", str(8 * 1024 * 1024))),
+                1_048_576, int(os.getenv("NSYSSCOPE_JOB_LOG_MAX_BYTES", str(2 * 1024 * 1024))),
             ),
             job_log_line_max_bytes=max(
                 1024, int(os.getenv("NSYSSCOPE_JOB_LOG_LINE_MAX_BYTES", str(16 * 1024))),
@@ -89,6 +90,10 @@ class Settings:
             converter=Path(os.getenv(
                 "NSYSSCOPE_CONVERTER",
                 project / "scripts/build_analysis_json.py",
+            )).resolve(),
+            xlsx_converter=Path(os.getenv(
+                "NSYSSCOPE_XLSX_CONVERTER",
+                project / "scripts/csv_to_xlsx.py",
             )).resolve(),
         )
 
@@ -105,4 +110,14 @@ class Settings:
             raise ValueError(f"{kind} is outside NSYSSCOPE_ALLOWED_ROOTS: {roots}")
         if not path.exists():
             raise ValueError(f"{kind} does not exist: {path}")
+        return path
+
+    def prepare_result_dir(self, value: str | Path) -> Path:
+        path = Path(value).expanduser().resolve()
+        if not any(path == root or path.is_relative_to(root) for root in self.allowed_roots):
+            roots = ", ".join(map(str, self.allowed_roots))
+            raise ValueError(f"result path is outside NSYSSCOPE_ALLOWED_ROOTS: {roots}")
+        if path.exists() and (not path.is_dir() or any(path.iterdir())):
+            raise ValueError(f"result path must be a new or empty directory: {path}")
+        path.mkdir(parents=True, exist_ok=True)
         return path

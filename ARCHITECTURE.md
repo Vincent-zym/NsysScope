@@ -6,11 +6,13 @@ NsysScope separates report analysis from visualization.
 
 1. The analyzer runs where NVIDIA Nsight Systems, model source and deployment
    materials are available.
-2. It exports `.nsys-rep` to SQLite and generates the normalized six-table
-   package plus manifest.
-3. `scripts/build_analysis_json.py` converts that package into the versioned
-   frontend contract.
-4. The dashboard loads `analysis.json` and remains model-independent.
+2. It writes the exported SQLite, bounded logs and analysis evidence directly
+   into the user-selected result directory.
+3. The six normalized tables are stored in `csv/`; a dependency-free converter
+   creates the matching six workbooks in `xlsx/`.
+4. `scripts/build_analysis_json.py` converts that package into the versioned
+   frontend contract and `nsysscope-package.json` makes the directory portable.
+5. The dashboard loads `analysis.json` and remains model-independent.
 
 ## Contract
 
@@ -29,6 +31,7 @@ NsysScope separates report analysis from visualization.
 
 - accepts trusted server-side material paths;
 - restricts paths to `NSYSSCOPE_ALLOWED_ROOTS`;
+- requires a new or empty user-selected result directory for Agent runs;
 - authenticates job APIs with `X-NsysScope-Token`;
 - persists jobs in SQLite and runs them with bounded concurrency;
 - exports `.nsys-rep` with `nsys`;
@@ -38,6 +41,10 @@ NsysScope separates report analysis from visualization.
   `analysis.json`;
 - can retry only the deterministic conversion/validation stage when a completed
   six-table package survives an agent-side failure.
+
+The Analyzer's local state is deliberately small: the jobs database stores only
+task metadata and absolute package paths. Bulk artifacts live in the selected
+result directory, which can later be re-imported without rerunning an Agent.
 
 The package converter accepts both the legacy `accepted_unit_count` sidecar and
 the current `accepted_full_template_sample_count` schema. It prefers package-local
@@ -88,6 +95,10 @@ Provider-specific event output is written to the same job log. Cancellation
 terminates the active provider subprocess. After the provider exits, both paths
 share `find_package`, conversion and validation, so a provider cannot bypass
 the six-table or `analysis.json` contracts.
+
+On success, provider staging files are removed and the package is normalized as
+`csv/`, `xlsx/`, `trace/`, `logs/`, `metadata/`, `analysis.json`, and
+`nsysscope-package.json`.
 
 `GET /api/providers/{provider}/models` exposes the model catalog used by the
 task form. Codex models are read from its local account cache and Comate models
