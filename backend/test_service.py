@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
+import subprocess
 import textwrap
 import threading
 import time
@@ -134,6 +136,108 @@ def test_existing_analysis_json_directory_import(tmp_path: Path) -> None:
             break
         time.sleep(0.05)
     assert job["status"] == "succeeded", job
+
+
+def test_existing_six_tables_import_without_sidecars(tmp_path: Path) -> None:
+    if not PACKAGE.exists():
+        return
+    package = tmp_path / "six-tables-only"
+    package.mkdir()
+    for source in PACKAGE.glob("glm52_*.csv"):
+        shutil.copy2(source, package / source.name)
+    client = TestClient(create_app(settings(tmp_path)))
+    headers = {"X-NsysScope-Token": "test-token"}
+    response = client.post("/api/jobs", headers=headers, json={
+        "mode": "existing_package",
+        "model_name": "GLM5.2",
+        "stage": "prefill",
+        "hardware": "Nvidia B200",
+        "existing_package_path": str(package),
+        "prefix": "glm52",
+    })
+    assert response.status_code == 200, response.text
+    job = response.json()
+    for _ in range(100):
+        job = client.get(f"/api/jobs/{job['id']}", headers=headers).json()
+        if job["status"] in {"succeeded", "failed"}:
+            break
+        time.sleep(0.05)
+    assert job["status"] == "succeeded", job
+    assert len(list((package / "xlsx").glob("*.xlsx"))) == 6
+    payload = json.loads((package / "analysis.json").read_text())
+    assert payload["metadata"]["model"] == "GLM5.2"
+    assert payload["summary"]["stableSamples"] == 1
+    assert sum(item["count"] for item in payload["classifications"]) == 61
+    by_name = {
+        operator["kernelName"]: operator["category"]
+        for operator in payload["operators"]
+    }
+    assert any(
+        name.startswith("per_token_group_quant_8bit_kernel")
+        and category == "auxiliary"
+        for name, category in by_name.items()
+    )
+    assert any(
+        name.startswith("generalLayerNorm") and category == "auxiliary"
+        for name, category in by_name.items()
+    )
+
+
+def test_external_skill_selection_uses_lightweight_pointer(tmp_path: Path) -> None:
+    external = tmp_path / "external-skill"
+    shutil.copytree(PROJECT / "bundled/skills/sglang-nsys-static-analysis", external)
+    environment = {
+        **os.environ,
+        "NSYSSCOPE_CONFIG_DIR": str(tmp_path / "config"),
+    }
+    manager = PROJECT / "scripts/skill_manager.py"
+    selected = subprocess.run(
+        ["python3", str(manager), "use", str(external)],
+        check=True, text=True, capture_output=True, env=environment,
+    )
+    assert "已切换到外部 Skill" in selected.stdout
+    resolved = subprocess.run(
+        ["python3", str(manager), "resolve"],
+        check=True, text=True, capture_output=True, env=environment,
+    )
+    assert Path(resolved.stdout.strip()) == external
+    config = json.loads((tmp_path / "config/config.json").read_text())
+    assert config["skill_dir"] == str(external)
+    assert len(config["skill_sha256"]) == 64
+
+
+def test_zip_six_table_import_writes_only_to_selected_result(tmp_path: Path) -> None:
+    if not PACKAGE.exists():
+        return
+    archive_path = tmp_path / "shared-result.zip"
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        for source in PACKAGE.glob("glm52_*.csv"):
+            archive.write(source, f"shared/csv/{source.name}")
+    result_path = tmp_path / "imported-result"
+    client = TestClient(create_app(settings(tmp_path)))
+    headers = {"X-NsysScope-Token": "test-token"}
+    response = client.post("/api/jobs", headers=headers, json={
+        "mode": "existing_package",
+        "model_name": "GLM5.2",
+        "stage": "prefill",
+        "hardware": "Nvidia B200",
+        "existing_package_path": str(archive_path),
+        "result_path": str(result_path),
+        "prefix": "glm52",
+    })
+    assert response.status_code == 200, response.text
+    job = response.json()
+    for _ in range(100):
+        job = client.get(f"/api/jobs/{job['id']}", headers=headers).json()
+        if job["status"] in {"succeeded", "failed"}:
+            break
+        time.sleep(0.05)
+    assert job["status"] == "succeeded", job
+    assert len(list((result_path / "csv").glob("*.csv"))) == 6
+    assert len(list((result_path / "xlsx").glob("*.xlsx"))) == 6
+    assert (result_path / "analysis.json").exists()
+    assert (result_path / "nsysscope-package.json").exists()
+    assert not list(tmp_path.glob("import-*"))
 
 
 def test_converter_accepts_current_stats_schema() -> None:
@@ -361,9 +465,12 @@ def test_comate_provider_end_to_end_with_fake_zulu(tmp_path: Path) -> None:
     assert job["status"] == "succeeded", job
     output = Path(job["output_dir"])
     assert not (output / ".comate").exists()
-    assert "Use the activated `sglang-nsys-static-analysis` skill." in (
+    assert "Use the `sglang-nsys-static-analysis` skill at:" in (
         output / "metadata/prompt.md"
     ).read_text()
+    skill_info = json.loads((output / "metadata/skill.json").read_text())
+    assert skill_info["name"] == "sglang-nsys-static-analysis"
+    assert len(skill_info["sha256"]) == 64
     log_path = output / "logs/job.log"
     assert "<prompt>" in log_path.read_text()
     zulu_args = json.loads((output / "metadata/zulu-args.json").read_text())
@@ -476,6 +583,7 @@ def test_codex_selected_model_is_forwarded(tmp_path: Path) -> None:
     command = captured["command"]
     assert command[command.index("--model") + 1] == "quality-codex"
     prompt = captured["stdin"]
+    assert "Read that SKILL.md completely before analysis." in prompt
     assert "<user_acceptance_criteria>" in prompt
     assert "只分析 GLM5.2 的单个非 shared Indexer 层" in prompt
     assert "not the four-layer full/shared Indexer cycle" in prompt

@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
 import shlex
 import shutil
 import subprocess
+import tempfile
 import threading
 import tomllib
 import traceback
+import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Callable
@@ -88,25 +91,31 @@ class JobRunner:
                     request.existing_package_path or "", kind="existing package",
                 )
                 self.state(job_id, job_dir, "converting", 70, "正在转换已有六表分析包")
-                csv_package = self.csv_package_dir(package)
-                analysis_path = package / "analysis.json"
-                if analysis_path.exists():
-                    try:
-                        prefix = self.detect_prefix(csv_package, request.prefix)
-                    except RuntimeError:
-                        prefix = None
-                    if prefix:
-                        self.ensure_xlsx(csv_package, package / "xlsx")
+                if package.is_file():
+                    self.import_zip_package(package, job_dir, request)
                 else:
-                    prefix = self.detect_prefix(csv_package, request.prefix)
-                    self.convert(csv_package, package / "analysis.json", prefix)
-                    self.ensure_xlsx(csv_package, package / "xlsx")
+                    csv_package = self.csv_package_dir(package)
+                    analysis_path = package / "analysis.json"
+                    if analysis_path.exists():
+                        try:
+                            prefix = self.detect_prefix(csv_package, request.prefix)
+                        except RuntimeError:
+                            prefix = None
+                        if prefix:
+                            self.ensure_xlsx(csv_package, package / "xlsx")
+                    else:
+                        prefix = self.detect_prefix(csv_package, request.prefix)
+                        self.convert(csv_package, package / "analysis.json", prefix, request)
+                        self.ensure_xlsx(csv_package, package / "xlsx")
             else:
                 paths = self.resolve_inputs(request)
                 context = {key: str(value) if value else None for key, value in paths.items()}
                 context.update(request.model_dump())
                 metadata_dir = job_dir / "metadata"
                 metadata_dir.mkdir(exist_ok=True)
+                (metadata_dir / "skill.json").write_text(
+                    json.dumps(self.skill_provenance(), ensure_ascii=False, indent=2) + "\n",
+                )
                 (metadata_dir / "context.json").write_text(
                     json.dumps(context, ensure_ascii=False, indent=2) + "\n",
                 )
@@ -118,7 +127,7 @@ class JobRunner:
                 self.run_agent(job_id, job_dir, request, paths, sqlite_path)
                 self.state(job_id, job_dir, "converting", 88, "正在构建前端 analysis.json")
                 package = self.find_package(job_dir, request.prefix)
-                self.convert(package, job_dir / "analysis.json", request.prefix)
+                self.convert(package, job_dir / "analysis.json", request.prefix, request)
                 trace_path = self.organize_result_package(
                     job_dir, package, request.prefix, sqlite_path,
                 )
@@ -152,7 +161,7 @@ class JobRunner:
             self.state(job_id, job_dir, "converting", 88, "正在重试构建前端 analysis.json")
             package = self.find_package(job_dir, request.prefix)
             prefix = self.detect_prefix(package, request.prefix)
-            self.convert(package, job_dir / "analysis.json", prefix)
+            self.convert(package, job_dir / "analysis.json", prefix, request)
             if request.mode == "existing_package" or package == job_dir / "csv":
                 self.ensure_xlsx(package, job_dir / "xlsx")
             else:
@@ -226,6 +235,36 @@ class JobRunner:
         else:
             self.run_codex(job_id, job_dir, request, paths, sqlite_path)
 
+    def skill_provenance(self) -> dict[str, str]:
+        root = self.settings.skill_dir.resolve()
+        project = Path(__file__).resolve().parents[1]
+        bundled = project / "bundled" / "skills"
+        if root.is_relative_to(bundled):
+            source = "bundled"
+        elif ".codex/skills" in root.as_posix():
+            source = "codex"
+        else:
+            source = "external"
+        digest = hashlib.sha256()
+        ignored = {"result", "evals", "__pycache__"}
+        for path in sorted(root.rglob("*")):
+            if (
+                not path.is_file()
+                or any(part in ignored for part in path.relative_to(root).parts)
+                or path.suffix in {".pyc", ".pyo"}
+            ):
+                continue
+            digest.update(path.relative_to(root).as_posix().encode())
+            digest.update(b"\0")
+            digest.update(path.read_bytes())
+            digest.update(b"\0")
+        return {
+            "name": "sglang-nsys-static-analysis",
+            "source": source,
+            "path": str(root),
+            "sha256": digest.hexdigest(),
+        }
+
     def run_codex(
         self, job_id: str, job_dir: Path, request: JobCreate,
         paths: dict[str, Path | None], sqlite_path: Path,
@@ -252,7 +291,8 @@ class JobRunner:
         ])
         for directory in sorted({
             str(path if path.is_dir() else path.parent)
-            for path in paths.values() if path is not None
+            for path in (*paths.values(), self.settings.skill_dir)
+            if path is not None
         }):
             command.extend(["--add-dir", directory])
         command.extend(["--output-last-message", str(output_message), "-"])
@@ -323,7 +363,11 @@ class JobRunner:
         self, job_dir: Path, request: JobCreate,
         paths: dict[str, Path | None], sqlite_path: Path,
     ) -> str:
-        return f"""Use the activated `sglang-nsys-static-analysis` skill.
+        return f"""Use the `sglang-nsys-static-analysis` skill at:
+{self.settings.skill_dir}
+
+Read that SKILL.md completely before analysis. This exact path is the task's
+selected Skill version and overrides any older installed copy.
 
 <user_acceptance_criteria>
 {request.notes.strip() or "No additional scope constraint was supplied."}
@@ -580,11 +624,20 @@ Requirements:
             "message": message,
         }
 
-    def convert(self, package: Path, output: Path, prefix: str) -> None:
+    def convert(
+        self, package: Path, output: Path, prefix: str,
+        request: JobCreate | None = None,
+    ) -> None:
         command = [
             "python3", str(self.settings.converter), str(package), str(output),
             "--prefix", prefix,
         ]
+        if request is not None:
+            command.extend([
+                "--model", request.model_name,
+                "--stage", request.stage,
+                "--hardware", request.hardware,
+            ])
         completed = subprocess.run(command, text=True, capture_output=True)
         if completed.returncode:
             raise RuntimeError(completed.stderr.strip() or "analysis conversion failed")
@@ -597,6 +650,82 @@ Requirements:
         completed = subprocess.run(command, text=True, capture_output=True)
         if completed.returncode:
             raise RuntimeError(completed.stderr.strip() or "CSV to XLSX conversion failed")
+
+    def import_zip_package(
+        self, archive_path: Path, result_dir: Path, request: JobCreate,
+    ) -> None:
+        if archive_path.suffix.lower() != ".zip":
+            raise RuntimeError("existing package file must be a .zip archive")
+        with tempfile.TemporaryDirectory(
+            prefix="import-", dir=self.settings.data_dir,
+        ) as temporary:
+            extracted = Path(temporary)
+            with zipfile.ZipFile(archive_path) as archive:
+                total_size = sum(item.file_size for item in archive.infolist())
+                if total_size > 100 * 1024 * 1024 * 1024:
+                    raise RuntimeError("ZIP package expands beyond the 100 GiB safety limit")
+                for item in archive.infolist():
+                    target = (extracted / item.filename).resolve()
+                    if not target.is_relative_to(extracted.resolve()):
+                        raise RuntimeError(f"unsafe ZIP path: {item.filename}")
+                archive.extractall(extracted)
+            source = self.find_import_root(extracted, request.prefix)
+            csv_source = self.csv_package_dir(source)
+            prefix = self.detect_prefix(csv_source, request.prefix)
+            csv_dir = result_dir / "csv"
+            xlsx_dir = result_dir / "xlsx"
+            metadata_dir = result_dir / "metadata"
+            trace_dir = result_dir / "trace"
+            for directory in (csv_dir, xlsx_dir, metadata_dir, trace_dir):
+                directory.mkdir(exist_ok=True)
+            for suffix in CSV_SUFFIXES:
+                shutil.copy2(csv_source / f"{prefix}{suffix}", csv_dir)
+            source_analysis = source / "analysis.json"
+            if source_analysis.exists():
+                shutil.copy2(source_analysis, result_dir / "analysis.json")
+            else:
+                self.convert(csv_source, result_dir / "analysis.json", prefix, request)
+            self.ensure_xlsx(csv_dir, xlsx_dir)
+            for sidecar in source.rglob("*.json"):
+                if sidecar.name in {"analysis.json", "nsysscope-package.json"}:
+                    continue
+                shutil.copy2(sidecar, metadata_dir / sidecar.name)
+            traces = [*source.rglob("*.sqlite")]
+            for trace in traces:
+                shutil.copy2(trace, trace_dir / trace.name)
+            package_manifest = {
+                "schemaVersion": "1.0",
+                "kind": "nsysscope-analysis-package",
+                "analysis": "analysis.json",
+                "csvDirectory": "csv",
+                "xlsxDirectory": "xlsx",
+                "trace": f"trace/{traces[0].name}" if traces else None,
+                "log": "logs/job.log",
+                "metadataDirectory": "metadata",
+                "prefix": prefix,
+                "tables": [f"{prefix}{suffix}" for suffix in CSV_SUFFIXES],
+                "importedFrom": str(archive_path),
+            }
+            (result_dir / "nsysscope-package.json").write_text(
+                json.dumps(package_manifest, ensure_ascii=False, indent=2) + "\n",
+            )
+
+    @classmethod
+    def find_import_root(cls, extracted: Path, requested: str) -> Path:
+        candidates = [extracted]
+        for path in extracted.rglob("*_stage_table.csv"):
+            table_dir = path.parent
+            if table_dir.name == "csv":
+                candidates.append(table_dir.parent)
+            candidates.append(table_dir)
+        for candidate in dict.fromkeys(candidates):
+            csv_dir = cls.csv_package_dir(candidate)
+            try:
+                cls.detect_prefix(csv_dir, requested)
+            except RuntimeError:
+                continue
+            return candidate
+        raise RuntimeError("ZIP package does not contain one complete six-table directory")
 
     def organize_result_package(
         self, result_dir: Path, package_dir: Path, prefix: str, sqlite_path: Path,

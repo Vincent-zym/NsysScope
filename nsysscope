@@ -3,14 +3,16 @@ set -euo pipefail
 
 PROJECT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 COMMAND="${1:-start}"
-VENV_DIR="${NSYSSCOPE_VENV_DIR:-$PROJECT_DIR/.venv}"
+RUNTIME_BASE="${XDG_RUNTIME_DIR:-/tmp}"
+CACHE_BASE="${XDG_CACHE_HOME:-${HOME}/.cache}/nsysscope"
+VENV_DIR="${NSYSSCOPE_VENV_DIR:-$CACHE_BASE/venv}"
 DATA_DIR=""
-SKILL_DIR="${NSYSSCOPE_SKILL_DIR:-/root/.codex/skills/sglang-nsys-static-analysis}"
+SKILL_DIR="${NSYSSCOPE_SKILL_DIR:-}"
+SKILL_MANAGER="$PROJECT_DIR/scripts/skill_manager.py"
 ALLOWED_ROOTS="${NSYSSCOPE_ALLOWED_ROOTS:-$(dirname "$PROJECT_DIR")}"
 ANALYZER_PID=""
 RUNTIME_DIR=""
 DATA_DIR_OWNED=false
-RUNTIME_BASE="${XDG_RUNTIME_DIR:-/tmp}"
 PERSIST_STATE="${NSYSSCOPE_PERSIST_STATE:-false}"
 PERSIST_DATA_DIR="${NSYSSCOPE_DATA_DIR:-$PROJECT_DIR/.data}"
 CODEX_READY=false
@@ -80,10 +82,16 @@ run_comate_cli() {
   fi
 }
 
+resolve_skill() {
+  if [[ -z "$SKILL_DIR" ]]; then
+    SKILL_DIR="$(python3 "$SKILL_MANAGER" resolve)"
+  fi
+}
+
 doctor() {
   local failed=0 provider_ready=0 comate_status comate_status_code
   say "检查运行环境"
-  for command_name in python3 nsys curl flock; do
+  for command_name in python3 curl flock; do
     if command -v "$command_name" >/dev/null 2>&1; then
       printf '  ✓ %-9s %s\n' "$command_name" "$(command -v "$command_name")"
     else
@@ -91,6 +99,11 @@ doctor() {
       failed=1
     fi
   done
+  if command -v nsys >/dev/null 2>&1; then
+    printf '  ✓ %-9s %s\n' "nsys" "$(command -v nsys)"
+  else
+    printf '  - nsys 未安装；仍可导入已有六表，不能分析 .nsys-rep\n'
+  fi
   if command -v codex >/dev/null 2>&1 && codex login status >/dev/null 2>&1; then
     printf '  ✓ Codex 已登录\n'
     CODEX_READY=true
@@ -121,7 +134,10 @@ doctor() {
   else
     printf '  - Comate Zulu CLI 未安装\n'
   fi
-  if [[ -f "$SKILL_DIR/SKILL.md" ]]; then
+  if ! resolve_skill; then
+    printf '  ✗ Skill     无法解析\n'
+    failed=1
+  elif [[ -f "$SKILL_DIR/SKILL.md" ]]; then
     printf '  ✓ Skill     %s\n' "$SKILL_DIR"
   else
     printf '  ✗ Skill     未找到 %s/SKILL.md\n' "$SKILL_DIR"
@@ -131,7 +147,7 @@ doctor() {
     fail "环境检查未通过"
   fi
   if [[ "$provider_ready" -eq 0 ]]; then
-    fail "Codex 和 Comate 均不可用，请至少登录一个 Provider"
+    printf '  - Codex 和 Comate 均不可用；仍可导入已有六表\n'
   fi
   say "环境检查通过"
 }
@@ -139,6 +155,7 @@ doctor() {
 prepare_python() {
   if [[ ! -x "$VENV_DIR/bin/python3" ]]; then
     say "首次运行：创建 Python 虚拟环境"
+    mkdir -p "$(dirname "$VENV_DIR")"
     python3 -m venv "$VENV_DIR"
   fi
   local requirements_hash
@@ -256,6 +273,11 @@ login_provider() {
   esac
 }
 
+skill_command() {
+  shift
+  exec python3 "$SKILL_MANAGER" "$@"
+}
+
 case "$COMMAND" in
   start)
     start
@@ -266,8 +288,11 @@ case "$COMMAND" in
   login)
     login_provider "$@"
     ;;
+  skill)
+    skill_command "$@"
+    ;;
   *)
-    printf 'Usage: %s [start|doctor|login codex|login comate [internal|saas]]\n' "$0" >&2
+    printf 'Usage: %s [start|doctor|login codex|login comate [internal|saas]|skill status|skill use PATH|skill sync|skill reset|skill validate [PATH]]\n' "$0" >&2
     exit 2
     ;;
 esac

@@ -48,6 +48,7 @@ class Settings:
     def from_env(cls) -> "Settings":
         project = Path(__file__).resolve().parents[1]
         default_root = Path.home().resolve()
+        bundled_skill = project / "bundled" / "skills" / "sglang-nsys-static-analysis"
         comate_bin = os.getenv("NSYSSCOPE_COMATE_BIN", "") or _discover_zulu()
         return cls(
             data_dir=Path(os.getenv("NSYSSCOPE_DATA_DIR", project / ".data")).expanduser().resolve(),
@@ -85,7 +86,7 @@ class Settings:
             nsys_bin=os.getenv("NSYSSCOPE_NSYS_BIN", "nsys"),
             skill_dir=Path(os.getenv(
                 "NSYSSCOPE_SKILL_DIR",
-                "/root/.codex/skills/sglang-nsys-static-analysis",
+                bundled_skill,
             )).resolve(),
             converter=Path(os.getenv(
                 "NSYSSCOPE_CONVERTER",

@@ -34,6 +34,8 @@ class JobCreate(BaseModel):
         if self.mode == "existing_package":
             if not self.existing_package_path:
                 raise ValueError("existing_package_path is required for existing_package mode")
+            if self.existing_package_path.lower().endswith(".zip") and not self.result_path:
+                raise ValueError("result_path is required when importing a ZIP package")
             return self
         required = {
             "report_path": self.report_path,

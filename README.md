@@ -3,6 +3,28 @@
 Interactive SGLang Nsight Systems analysis powered by the installed
 `sglang-nsys-static-analysis` skill.
 
+## Portable executable
+
+The lightweight release is a single self-extracting Linux file:
+
+```bash
+chmod +x nsysscope-linux-x86_64.run
+./nsysscope-linux-x86_64.run
+```
+
+It contains the prebuilt dashboard, Analyzer source and a validated fallback
+Skill. It does not contain Node.js, npm packages, task data, Provider
+credentials or NVIDIA Nsight Systems. On first start it creates a reusable
+Python environment under the user's cache directory. Import-only use needs
+Python 3; new `.nsys-rep` analysis additionally needs `nsys` and a logged-in
+Codex or Comate Provider.
+
+Build the portable file with:
+
+```bash
+python3 scripts/build_portable.py
+```
+
 ## One-command start
 
 ```bash
@@ -38,6 +60,28 @@ Run the prerequisite check by itself with:
 ```bash
 ./nsysscope doctor
 ```
+
+Missing `nsys` or Agent Providers no longer blocks startup. The dashboard
+remains available for importing an existing six-table package.
+
+## Replaceable analysis Skill
+
+NsysScope includes a small built-in Skill and can track an externally maintained
+Skill directory without copying it into the application:
+
+```bash
+./nsysscope skill status
+./nsysscope skill use /path/to/sglang-nsys-static-analysis
+./nsysscope skill sync
+./nsysscope skill validate
+./nsysscope skill reset
+```
+
+After `skill use`, edits to that external directory take effect on the next
+start. Every new analysis records the selected Skill path, source and SHA256 in
+`metadata/skill.json`. Resolution order is an explicit
+`NSYSSCOPE_SKILL_DIR`, the configured external path, the user's Codex-installed
+copy, then the bundled fallback.
 
 ## Agent providers
 
@@ -153,8 +197,25 @@ The limits can be adjusted with `NSYSSCOPE_AGENT_HEARTBEAT_SECONDS`,
 
 ## Existing results
 
-Use **导入结果目录（无需 Agent）** and enter the package directory. If it
+Use **导入结果目录（无需 Agent）** and enter the package directory or ZIP. If it
 already contains `analysis.json`, NsysScope opens it directly; if it only has
 the normalized six CSV files, NsysScope builds `analysis.json` automatically.
 Both the new `csv/` layout and legacy flat six-table directories are supported.
 Use **导入 JSON** only for a standalone browser-side preview.
+
+ZIP import asks for a new result directory, validates paths before extraction,
+and writes the normalized CSV, XLSX, analysis data, optional trace, metadata and
+bounded log only into that selected directory.
+
+The six CSV files are sufficient. Manifests, semantic maps, validation reports
+and statistics sidecars improve provenance but are optional for quick import.
+When sidecars are absent, categories are recovered from the core and auxiliary
+tables, remaining rows are treated as communication, and the imported package
+is marked as lacking external validation evidence.
+
+## Optional Codex plugin
+
+The validated plugin source lives at `plugins/nsysscope`. It contributes the
+same analysis Skill to Codex and includes a launcher adapter, while the
+standalone executable remains the primary UI and also supports Comate and
+Agent-free imports.

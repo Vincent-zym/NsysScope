@@ -7,6 +7,7 @@ import argparse
 import csv
 import json
 import re
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -69,6 +70,20 @@ def portable_artifact(root: Path, configured: Any, default_name: str) -> Path:
         if candidate.exists():
             return candidate
     raise FileNotFoundError(f"required analysis sidecar is missing: {default_name}")
+
+
+def optional_json_artifact(
+    root: Path, configured: Any, default_name: str,
+) -> dict[str, Any]:
+    try:
+        path = portable_artifact(root, configured, default_name)
+    except FileNotFoundError:
+        return {}
+    try:
+        value = json.loads(path.read_text())
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"invalid JSON sidecar {path}: {exc}") from exc
+    return value if isinstance(value, dict) else {}
 
 
 def repeating_unit_label(value: Any) -> str | None:
@@ -234,51 +249,127 @@ def build_operator_payload(
     }
 
 
+def classification_key(row: dict[str, str]) -> tuple[str, str, float | None, str]:
+    return (
+        row.get("功能模块", ""),
+        row.get("算子名称", ""),
+        number(row.get("算子耗时(us)")),
+        row.get("python_function", ""),
+    )
+
+
+def table_categories(
+    overview: list[dict[str, str]],
+    core_rows: list[dict[str, str]],
+    auxiliary_rows: list[dict[str, str]],
+) -> list[str]:
+    """Recover per-operator categories from the normalized six-table contract."""
+    core = Counter(classification_key(row) for row in core_rows)
+    auxiliary = Counter(classification_key(row) for row in auxiliary_rows)
+    categories: list[str] = []
+    for row in overview:
+        key = classification_key(row)
+        if core[key]:
+            core[key] -= 1
+            categories.append("core")
+        elif auxiliary[key]:
+            auxiliary[key] -= 1
+            categories.append("auxiliary")
+        else:
+            # The six-table contract has no per-operator communication table.
+            # Rows absent from both core and auxiliary tables are communication.
+            categories.append("communication")
+    unmatched = sum(core.values()) + sum(auxiliary.values())
+    if unmatched:
+        raise ValueError(
+            f"core/auxiliary tables contain {unmatched} rows that do not match the overview"
+        )
+    return categories
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("input_dir", type=Path)
     parser.add_argument("output", type=Path)
     parser.add_argument("--prefix", default="glm52")
+    parser.add_argument("--model", default="")
+    parser.add_argument("--stage", default="")
+    parser.add_argument("--hardware", default="")
     args = parser.parse_args()
 
     root, prefix = args.input_dir, args.prefix
     origin = read_csv(root / f"{prefix}_operator_origin_table.csv")
     overview = read_csv(root / f"{prefix}_opreator_table.csv")
+    core_rows = read_csv(root / f"{prefix}_core_compute_table.csv")
+    auxiliary_rows = read_csv(root / f"{prefix}_auxiliary_operator_table.csv")
     stages = read_csv(root / f"{prefix}_stage_table.csv")
     classes = read_csv(root / f"{prefix}_op_classification_table.csv")
-    manifest = json.loads((root / f"{prefix}_analysis_manifest.json").read_text())
-    stats_path = portable_artifact(
+    manifest_path = root / f"{prefix}_analysis_manifest.json"
+    manifest = json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
+    stats = optional_json_artifact(
         root,
         manifest.get("position_statistics_sidecar")
         or (manifest.get("stable_stats") or {}).get("sidecar"),
         "position_operator_stats.json",
     )
-    semantic_path = portable_artifact(
+    semantic = optional_json_artifact(
         root, manifest.get("semantic_map"), f"{prefix}_semantic_map.json",
     )
-    validation_path = portable_artifact(
+    validation = optional_json_artifact(
         root,
         manifest.get("validation_report")
         or (manifest.get("validation") or {}).get("report"),
         "validation_report.json",
     )
-    stats = json.loads(stats_path.read_text())
-    semantic = json.loads(semantic_path.read_text())
-    validation = json.loads(validation_path.read_text())
+    if not validation:
+        validation = {
+            "status": "not_provided",
+            "message": "Imported from the normalized six-table contract without sidecars.",
+        }
 
     total = next(row for row in origin if row["module"] == "__layer_total__")
     origin_ops = [row for row in origin if row["module"] != "__layer_total__"]
+    categories = table_categories(overview, core_rows, auxiliary_rows)
     operators = []
-    for raw, view in zip(origin_ops, overview, strict=True):
+    for raw, view, category in zip(origin_ops, overview, categories, strict=True):
         rule = match_rule(raw["module"], raw["operator_name"], semantic.get("rules", []))
+        rule = {**rule, "category": category}
         operators.append(build_operator_payload(raw, view, rule))
+    total_duration = number(total.get("duration_avg_us")) or number(total.get("duration_us"))
+    if not total_duration:
+        raise ValueError("origin table has no positive repeating-unit total duration")
+    classification_names = (
+        ("core", "核心计算"),
+        ("communication", "通信"),
+        ("auxiliary", "辅助算子"),
+    )
+    classifications = []
+    for category, label in classification_names:
+        selected = [operator for operator in operators if operator["category"] == category]
+        duration = sum(operator["durationUs"] or 0 for operator in selected)
+        classifications.append({
+            "name": label,
+            "count": len(selected),
+            "durationUs": duration,
+            "durationPct": duration / total_duration * 100,
+        })
+    if len(classes) != 3:
+        raise ValueError("classification table must contain exactly three rows")
+    try:
+        stable_samples = stable_sample_count(stats, manifest)
+    except KeyError:
+        stable_samples = 1
+    try:
+        devices = included_devices(stats, manifest)
+    except KeyError:
+        devices = sorted({int(row["device"]) for row in origin_ops})
 
     payload = {
         "schemaVersion": "1.0",
         "metadata": {
-            "model": model_label(manifest),
-            "stage": manifest.get("stage"),
-            "hardware": manifest.get("hardware"),
+            "model": model_label(manifest) or args.model or "Imported analysis",
+            "stage": manifest.get("stage") or args.stage or "unknown",
+            "hardware": manifest.get("hardware") or args.hardware or "Unknown",
             "report": manifest.get("input_report") or first_value(
                 manifest.get("inputs") or {}, "original_report", "nsys_rep", "sqlite",
             ),
@@ -290,10 +381,10 @@ def main() -> None:
             "generatedFrom": str(root),
         },
         "summary": {
-            "totalDurationUs": number(total["duration_avg_us"]),
+            "totalDurationUs": total_duration,
             "operatorCount": len(operators),
-            "stableSamples": stable_sample_count(stats, manifest),
-            "devices": included_devices(stats, manifest),
+            "stableSamples": stable_samples,
+            "devices": devices,
             "maxMfu": max((op["mfu"] or 0 for op in operators), default=0),
         },
         "stages": [{
@@ -302,12 +393,7 @@ def main() -> None:
             "durationPct": number(row["模块耗时占比(%)"]),
             "introduction": row["功能介绍"],
         } for row in stages],
-        "classifications": [{
-            "name": row["算子类型"],
-            "count": int(row["算子数量"]),
-            "durationUs": number(row["总耗时(us)"]),
-            "durationPct": number(row["耗时占比(%)"]),
-        } for row in classes],
+        "classifications": classifications,
         "operators": operators,
         "evidence": {
             "boundary": manifest.get("boundary_evidence") or (

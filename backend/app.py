@@ -91,13 +91,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     raise HTTPException(status_code=422, detail=str(exc)) from exc
         job_id = secrets.token_hex(8)
         try:
-            output_dir = (
-                settings.resolve_allowed(
+            if request.mode == "existing_package":
+                existing = settings.resolve_allowed(
                     request.existing_package_path or "", kind="existing package",
                 )
-                if request.mode == "existing_package"
-                else settings.prepare_result_dir(request.result_path or "")
-            )
+                output_dir = (
+                    settings.prepare_result_dir(request.result_path or "")
+                    if existing.is_file()
+                    else existing
+                )
+            else:
+                output_dir = settings.prepare_result_dir(request.result_path or "")
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         metadata_dir = output_dir / "metadata"

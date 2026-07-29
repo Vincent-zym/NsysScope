@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+PLUGIN_DIR="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+REPO_LAUNCHER="$(cd -- "$PLUGIN_DIR/../.." 2>/dev/null && pwd)/nsysscope"
+
+if [[ -n "${NSYSSCOPE_BIN:-}" ]] && [[ -x "$NSYSSCOPE_BIN" ]]; then
+  exec "$NSYSSCOPE_BIN" start
+fi
+if command -v nsysscope >/dev/null 2>&1; then
+  exec nsysscope start
+fi
+if [[ -x "$REPO_LAUNCHER" ]]; then
+  exec "$REPO_LAUNCHER" start
+fi
+
+printf 'NsysScope executable not found. Set NSYSSCOPE_BIN or install nsysscope in PATH.\\n' >&2
+exit 1

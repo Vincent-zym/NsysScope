@@ -512,8 +512,8 @@ function JobDialog({ open, onClose, onLoaded }) {
           </div>
         </details>
         <div className="form-grid">
-          <label className={importingPackage ? "span-2" : ""}>执行模式<select value={form.mode} onChange={set("mode")}><option value="codex_skill">Agent 静态分析</option><option value="existing_package">导入结果目录（无需 Agent）</option></select></label>
-          {!importingPackage && <label>阶段<select value={form.stage} onChange={set("stage")}><option value="prefill">Prefill</option><option value="decode">Decode</option></select></label>}
+          <label>执行模式<select value={form.mode} onChange={set("mode")}><option value="codex_skill">Agent 静态分析</option><option value="existing_package">导入结果目录（无需 Agent）</option></select></label>
+          <label>阶段<select value={form.stage} onChange={set("stage")}><option value="prefill">Prefill</option><option value="decode">Decode</option></select></label>
           {form.mode === "codex_skill" && <>
             <label>Agent Provider<select value={form.agent_provider} onChange={setProvider}>
               <option value="codex" disabled={health.providers && !health.providers.codex?.ready}>Codex CLI{health.providers && !health.providers.codex?.ready ? "（未就绪）" : ""}</option>
@@ -530,20 +530,20 @@ function JobDialog({ open, onClose, onLoaded }) {
             {provider && !provider.ready && <div className="provider-warning span-2">{provider.message}</div>}
             {modelCatalog.state === "error" && <div className="provider-warning span-2">模型列表读取失败，将使用 Provider 默认模型：{modelCatalog.message}</div>}
           </>}
-          {!importingPackage && <>
-            <label>模型<select required value={form.model_name} onChange={set("model_name")}>
-              <option value="GLM5.2">GLM5.2</option>
-              <option value="DeepSeekV4">DeepSeekV4</option>
-              <option value="KiMi3">KiMi3</option>
-            </select></label>
-            <label>硬件<select required value={form.hardware} onChange={set("hardware")}>
-              <option value="Nvidia B200">Nvidia B200</option>
-              <option value="Nvidia B300">Nvidia B300</option>
-            </select></label>
-          </>}
+          <label>模型<select required value={form.model_name} onChange={set("model_name")}>
+            <option value="GLM5.2">GLM5.2</option>
+            <option value="DeepSeekV4">DeepSeekV4</option>
+            <option value="KiMi3">KiMi3</option>
+          </select></label>
+          <label>硬件<select required value={form.hardware} onChange={set("hardware")}>
+            <option value="Nvidia B200">Nvidia B200</option>
+            <option value="Nvidia B300">Nvidia B300</option>
+          </select></label>
           {form.mode === "existing_package" ? <>
-            <label className="span-2">NsysScope 结果目录<input required value={form.existing_package_path} onChange={set("existing_package_path")} placeholder="/path/to/result-package" /></label>
-            <p className="package-hint span-2">目录内有 analysis.json 时直接展示；只有六表 CSV 时会自动转换。支持新版 csv/ 子目录和旧版平铺目录。</p>
+            <label className="span-2">六表 / NsysScope 结果目录<input required value={form.existing_package_path} onChange={set("existing_package_path")} placeholder="/path/to/result-package" /></label>
+            {form.existing_package_path.trim().toLowerCase().endsWith(".zip") &&
+              <label className="span-2">ZIP 解压结果保存目录<input required value={form.result_path} onChange={set("result_path")} placeholder="/path/to/new-result-package（必须为空或不存在）" /></label>}
+            <p className="package-hint span-2">目录内有 analysis.json 时直接展示；只有六张规范 CSV 也能自动转换，不要求额外 sidecar。支持 csv/ 子目录和旧版平铺目录。</p>
           </> : <>
             <label className="span-2">Nsight 报告<input required value={form.report_path} onChange={set("report_path")} placeholder="/path/to/report.nsys-rep" /></label>
             <label>Model config<input required value={form.config_path} onChange={set("config_path")} placeholder="/path/to/config.json" /></label>

@@ -62,6 +62,10 @@ Raw `.nsys-rep` parsing is intentionally not performed in the browser. Large
 reports remain on the analyzer host; the browser submits their paths and only
 receives normalized analysis data.
 
+Import-only mode can start without `nsys` or an Agent Provider. The six
+normalized CSV files are the minimum portable contract; optional sidecars add
+provenance but are not required to build the dashboard payload.
+
 ## Local run
 
 The supported local entry point is:
@@ -105,6 +109,13 @@ On success, provider staging files are removed and the package is normalized as
 `csv/`, `xlsx/`, `trace/`, `logs/`, `metadata/`, `analysis.json`, and
 `nsysscope-package.json`.
 
+The Skill is resolved in this order: explicit environment override, configured
+external directory, Codex-installed copy, bundled fallback. The external
+directory is referenced rather than copied into NsysScope, so updates take
+effect at the next start. Each Agent run stores `metadata/skill.json` with the
+exact path, source and content hash. Comate receives a temporary job-local copy;
+Codex receives the selected path in both its read workspace and binding prompt.
+
 `GET /api/providers/{provider}/models` exposes the model catalog used by the
 task form. Codex models are read from its local account cache and Comate models
 are queried from Zulu under the same platform, identity and proxy environment
@@ -123,3 +134,12 @@ unbounded growth.
 `GET /api/jobs/{id}/logs` uses a byte-offset cursor and bounded reads. It does
 not load the entire log into memory. The response can request a client reset if
 the underlying log was externally truncated.
+
+## Portable distribution
+
+`scripts/build_portable.py` creates a small self-extracting Linux executable
+containing only the runtime backend, checked-in browser bundle, converters and
+bundled Skill. It excludes development sources, Node dependencies, virtual
+environments, caches and task data. The extracted immutable runtime lives in
+the user's data directory and its reusable Python environment lives in the
+user's cache directory.
