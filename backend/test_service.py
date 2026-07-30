@@ -105,6 +105,7 @@ def test_auth_and_path_boundary(tmp_path: Path) -> None:
     assert dashboard.headers["cache-control"] == "no-store"
     assert "window.__NSYSSCOPE_LOCAL__ = true" in dashboard.text
     assert client.get("/api/health").status_code == 200
+    assert client.get("/analyzer-api/api/health").status_code == 200
     unauthorized = client.get("/api/jobs")
     assert unauthorized.status_code == 401
     rejected = client.post("/api/jobs", headers={"X-NsysScope-Token": "test-token"}, json={

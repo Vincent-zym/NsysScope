@@ -32,6 +32,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
 
     @app.middleware("http")
+    async def accept_hosted_api_prefix(request, call_next):
+        """Accept the hosted dashboard's /analyzer-api prefix locally too.
+
+        The hosted dashboard calls `/analyzer-api/...`, while the bundled
+        local dashboard normally calls `/api/...`.  Users can legitimately
+        paste either value into the advanced Analyzer API field; stripping
+        the hosted prefix here avoids a misleading FastAPI 404 on first use.
+        """
+        prefix = "/analyzer-api"
+        path = request.scope.get("path", "")
+        if path == prefix or path.startswith(prefix + "/"):
+            request.scope["path"] = path[len(prefix):] or "/"
+        return await call_next(request)
+
+    @app.middleware("http")
     async def disable_dashboard_entry_cache(request, call_next):
         response = await call_next(request)
         if request.url.path in {"/", "/index.html"}:
