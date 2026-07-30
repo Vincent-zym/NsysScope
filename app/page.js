@@ -714,7 +714,13 @@ export default function Dashboard() {
         {error && <div className="error">{error}</div>}
 
         <section className="metrics">
-          <Metric label="单层耗时" value={fmt(data.summary.totalDurationUs / 1000, 3)} suffix=" ms" note={`${data.summary.stableSamples} 个稳定样本`} accent />
+          <Metric
+            label={data.summary.durationLabel || "单层耗时"}
+            value={fmt((data.summary.normalizedLayerDurationUs || data.summary.totalDurationUs) / 1000, 3)}
+            suffix=" ms"
+            note={`${data.summary.stableSamples} 个稳定样本${(data.summary.unitLayerCount || 1) > 1 ? ` · ${data.summary.unitLayerCount} 层/周期` : ""}`}
+            accent
+          />
           <Metric label="算子数量" value={data.summary.operatorCount} suffix="" note={`${data.stages.length} 个功能阶段`} />
           <Metric label="最高耗时功能模块" value={fmt(topStage.durationUs)} suffix=" μs" note={`${topStage.name} · ${fmt(topStage.durationPct)}%`} />
           <Metric label="核心计算占比" value={fmt(compute?.durationPct)} suffix="%" note={`${compute?.count || 0} 个核心算子`} />

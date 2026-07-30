@@ -26,6 +26,10 @@ Also write:
 The trace is authoritative. Emit the smallest complete sequence that actually
 repeats; do not split one captured timeline into hypothetical modes.
 
+Do not treat a new model or kernel family as permission to guess. Use the
+bundled deterministic audits and fail validation when timing scope,
+classification, shape, peak or frontend parity is internally inconsistent.
+
 ## Embedded six-table contract
 
 This section is the self-contained runtime source of truth. External development
@@ -157,6 +161,11 @@ duration descending.
 
 - Prefer position-aware `duration_avg_us`; fall back to representative
   `duration_us` only when the manifest marks a single-sample fallback.
+- Distinguish a representative sample, a fixed network-layer position and a
+  structural repeating unit. Never display a fixed KDA/MLA/NSA layer as the
+  model's generic `单层耗时` when the architecture contains multiple layer
+  variants. For a composite unit, record its layer count and both total
+  repeating-unit duration and normalized average-per-layer duration.
 - Use the SQLite/NVTX repeating-unit wall-span (`__layer_total__`) as every
   percentage denominator. Never use the sum of kernel durations.
 - Overlapping streams may make module/category percentages sum above 100%;
@@ -166,10 +175,15 @@ duration descending.
   branch.
 - Compute GEMM MFU as
   `2*M*N*K / (duration_seconds * verified_dense_peak_flops)`.
-- Record all participating compute dtypes (`dtypes`, e.g. `["fp8","fp4"]`),
-  including activation, weight and accumulator constraints when applicable.
-  For mixed precision, use the lowest verified dense throughput among those
-  paths; never select the peak from the weight dtype alone.
+- Record operand formats in `dtypes`, accumulator behavior separately, and the
+  actual Tensor Core `compute_dtype` used to select the peak. Do not limit a
+  BF16 Tensor Core operation by the scalar FP32 peak merely because it
+  accumulates in FP32.
+- Use `references/hardware-peaks.json` for its verified B200/B300 per-GPU dense
+  peaks. A semantic map may override a peak only with an equally explicit
+  source. Never divide a system peak incorrectly or use a sparse peak.
+- When hardware, shape and compute mode are all verified, MFU is required for
+  each eligible GEMM. “New model” is not a reason to leave it blank.
 - Treat MFU above 100% as a validation failure requiring correction of shape,
   duration, dtype or peak—not as a presentable result.
 - Leave shape/MFU blank if M/N/K, datatype, active branch, duration or verified
@@ -207,6 +221,8 @@ shape operands, datatype, or MFU.
 - Read [references/output-spec.md](references/output-spec.md) before generating or
   validating edge cases and manifest invariants for the six-table package. The
   embedded contract above remains authoritative for filenames and columns.
+- Read [references/runtime-evidence-and-mfu.md](references/runtime-evidence-and-mfu.md)
+  before resolving launch/runtime/source conflicts or calculating MFU.
 - Use [references/semantic_map.example.json](references/semantic_map.example.json)
   only as a schema example; replace its placeholder hardware peaks and rules with
   evidence from the current task.
@@ -214,6 +230,21 @@ shape operands, datatype, or MFU.
 ## Workflow
 
 ### 1. Establish the model taxonomy
+
+Before using config or source defaults, run:
+
+```bash
+python scripts/audit_runtime_evidence.py \
+  --sqlite /path/to/report.sqlite \
+  --launch /path/to/launch.sh \
+  --source /path/to/source \
+  --output /path/to/runtime_evidence.json
+```
+
+Read this audit and copy its resolved runtime fields/conflicts into the analysis
+manifest. A launch flag is intent, not proof that the captured server retained
+that branch. A supplied source tree is unverified when its commit cannot be
+matched to captured `SGLANG_BUILD_COMMIT`.
 
 Read architecture/design notes first. Extract:
 
@@ -227,7 +258,8 @@ Resolve conflicts in this order:
 
 1. captured runtime evidence
 2. config/design notes
-3. source defaults
+3. launch intent
+4. source defaults
 
 Record conflicts instead of silently choosing.
 
@@ -264,6 +296,11 @@ For Transformer-like layers, verify the complete forward checklist through the
 final FFN/MoE merge. Do not stop at the attention tail. Exact network layer IDs
 require NVTX/runtime/config evidence or a verified full model-depth signature;
 otherwise leave them blank and document the limitation.
+
+If config/timeline shows an interleaved pattern such as
+`KDA,KDA,KDA,MLA`, the default repeating unit contains the entire pattern.
+Selecting one subtype is allowed only when the user explicitly requests that
+subtype; label it as that subtype rather than a generic model layer.
 
 ### 4. Map every kernel
 
@@ -432,8 +469,10 @@ Use the selected raw window as the exact template:
 4. Set `stable_start_ns` to the representative unit start unless the user
    provides another stable range.
 5. By default include every model-rank device present in SQLite.
-6. For each device, sort kernels by raw `start` and slide the full raw timeline
-   template after `stable_start_ns`.
+6. For each device and accepted CUDA-graph instance, match the full template at
+   equivalent graph positions. For a structural composite cycle, accept every
+   complete cycle occurrence whose layer-variant signature matches; for a
+   fixed network layer, accept only that fixed graph position.
 7. Accept a sample only when every operator name at every raw offset matches.
 8. Project each accepted raw match into the same module-group CSV order.
 9. Compute per-position min/max/avg/diff and each full-unit wall-span.
@@ -445,6 +484,8 @@ Write `position_operator_stats.json` with:
 - accepted full-template sample count
 - per-device sample counts
 - per-offset sample count/min/max/avg
+- scope kind (`fixed_layer_position` or `structural_cycle`) and accepted
+  occurrence count per graph instance
 
 If no match beyond the representative window exists, copy representative values
 into stable-stat columns and explicitly mark the result as a single-sample
@@ -515,8 +556,10 @@ Shape and MFU apply only to defensible core GEMMs:
 - derive decode `M` from the captured batch
 - derive `N/K` from config and the selected source branch
 - use `MFU = 2*M*N*K / (duration_seconds * verified_dense_peak_flops)`
-- for mixed precision, declare `dtypes` and use the slowest verified dense peak
-  among the participating paths
+- for mixed precision, declare operand `dtypes`, accumulator behavior and the
+  Tensor Core `compute_dtype`; use the dense peak for that actual compute mode
+- for grouped MoE GEMMs, state whether `M` is logical routed rows
+  (`tokens × topk`) or physical padded rows; label logical-work MFU explicitly
 
 Leave shape/MFU blank if any operand, branch, datatype, duration or dense peak is
 uncertain. Never substitute sparse peak numbers.
@@ -565,7 +608,9 @@ Before handoff, verify:
 - Validate that `Attention 核心计算` contains no cache, communication, RoPE,
   quantization, reconstruction or linear-output kernels.
 - every non-empty MFU is at most 100% and its manifest records shape, all
-  participating dtypes, selected effective dense peak and peak evidence
+  participating dtypes, compute mode, selected dense per-GPU peak and source
+- every eligible core GEMM with verified shape/hardware/compute mode has MFU;
+  a blank cell in that situation is a validation failure
 - all three classification rows exist, including zero-count classes
 - origin non-total row count is exactly `end_index - start_index + 1`
 - every non-total row has non-empty stable-stat columns unless the manifest marks
@@ -577,6 +622,25 @@ Before handoff, verify:
   sub-layer head and ends at the final sub-layer tail
 - the manifest records the current model's functional-module taxonomy source;
   no label is inherited solely from a previous model or eval
+- the runtime audit exists and every launch/runtime/source conflict is resolved
+  in favor of captured evidence or explicitly blocks source-derived claims
+- the selected unit contains every layer variant in the smallest repeating
+  pattern unless the user explicitly requested one subtype
+- the frontend `analysis.json`, when produced, preserves six-table category
+  membership, durations, stable sample count, devices and repeating-unit
+  evidence exactly
+- never call zero-kernel GPU idle time a `CPU gap`. Attribute CPU delay only
+  when CUDA Runtime launch timestamps prove the next work was submitted late;
+  otherwise label it GPU idle/queue/dependency gap
+
+Run the deterministic package validator before handoff:
+
+```bash
+python scripts/validate_analysis_package.py /path/to/csv-package \
+  --prefix model_prefix \
+  --analysis-json /path/to/analysis.json \
+  --output /path/to/validation_report.json
+```
 
 Use `duration_avg_us` for downstream tables when position-aware samples exist;
 otherwise use `duration_us` and flag the fallback. Percentages use the repeating

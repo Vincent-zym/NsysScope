@@ -12,20 +12,6 @@ from pathlib import Path
 from typing import Any
 
 
-COMMUNICATION_RE = re.compile(
-    r"nccl|allreduce|all_reduce|alltoall|all_to_all|reduce_scatter|"
-    r"allgather|all_gather|broadcast|sendrecv|send_recv",
-    re.I,
-)
-AUXILIARY_RE = re.compile(
-    r"quant|dequant|requant|layer[_]?norm|layernorm|rms[_]?norm|rmsnorm|"
-    r"generalLayerNorm|rope|rotary|topk|sort|dispatch|permute|unpermute|"
-    r"scatter|gather|allgather|cache|memcpy|memset|copy|cast|convert|"
-    r"transpose|reshape|index(?:ing)?|hadamard|activation|silu|gelu",
-    re.I,
-)
-
-
 def read_csv(path: Path) -> list[dict[str, str]]:
     with path.open(encoding="utf-8-sig", newline="") as handle:
         rows = []
@@ -128,12 +114,18 @@ def mfu_peak_label(manifest: dict[str, Any]) -> str | None:
 
 
 def stable_sample_count(stats: dict[str, Any], manifest: dict[str, Any]) -> int:
-    stable = manifest.get("stable_aggregation") or manifest.get("stable_stats") or {}
+    stable = (
+        manifest.get("stable_statistics")
+        or manifest.get("stable_aggregation")
+        or manifest.get("stable_stats")
+        or {}
+    )
     value = first_value(
         stats,
         "accepted_unit_count",
         "accepted_full_template_sample_count",
         "accepted_occurrence_count",
+        "accepted_sample_count",
     )
     if value is None and isinstance(stable, dict):
         value = first_value(
@@ -141,6 +133,7 @@ def stable_sample_count(stats: dict[str, Any], manifest: dict[str, Any]) -> int:
             "accepted_unit_count",
             "accepted_full_template_sample_count",
             "accepted_occurrence_count",
+            "accepted_sample_count",
         )
     if value is None:
         raise KeyError("stable sample count is missing from statistics and manifest")
@@ -148,10 +141,15 @@ def stable_sample_count(stats: dict[str, Any], manifest: dict[str, Any]) -> int:
 
 
 def included_devices(stats: dict[str, Any], manifest: dict[str, Any]) -> list[int]:
-    stable = manifest.get("stable_aggregation") or manifest.get("stable_stats") or {}
-    devices = stats.get("included_devices")
+    stable = (
+        manifest.get("stable_statistics")
+        or manifest.get("stable_aggregation")
+        or manifest.get("stable_stats")
+        or {}
+    )
+    devices = stats.get("included_devices") or stats.get("included_devices_ranks")
     if devices is None and isinstance(stable, dict):
-        devices = stable.get("included_devices")
+        devices = stable.get("included_devices") or stable.get("included_devices_ranks")
     if devices is None:
         counts = stats.get("per_device_sample_counts") or (
             stable.get("per_device_sample_counts") if isinstance(stable, dict) else None
@@ -215,15 +213,9 @@ def build_operator_payload(
     rule: dict[str, Any],
 ) -> dict[str, Any]:
     """Build one frontend row, keeping the overview table's human operator name."""
-    operator = raw["operator_name"]
-    leaf = compact_kernel_name(operator).split("<", 1)[0]
     category = rule.get("category", "auxiliary")
-    if category == "communication" or COMMUNICATION_RE.search(f"{raw['module']} {operator}"):
-        category = "communication"
-    elif AUXILIARY_RE.search(leaf):
-        # Never let a broad semantic-map rule display an obvious helper kernel
-        # as core compute.
-        category = "auxiliary"
+    if category not in {"core", "communication", "auxiliary"}:
+        raise ValueError(f"invalid six-table category: {category}")
     return {
         "index": int(raw["序号"]),
         "module": raw["module"],
@@ -298,25 +290,31 @@ def main() -> None:
     args = parser.parse_args()
 
     root, prefix = args.input_dir, args.prefix
+    metadata_root = (
+        root.parent / "metadata"
+        if root.name == "csv" and (root.parent / "metadata").is_dir()
+        else root
+    )
     origin = read_csv(root / f"{prefix}_operator_origin_table.csv")
     overview = read_csv(root / f"{prefix}_opreator_table.csv")
     core_rows = read_csv(root / f"{prefix}_core_compute_table.csv")
     auxiliary_rows = read_csv(root / f"{prefix}_auxiliary_operator_table.csv")
     stages = read_csv(root / f"{prefix}_stage_table.csv")
     classes = read_csv(root / f"{prefix}_op_classification_table.csv")
-    manifest_path = root / f"{prefix}_analysis_manifest.json"
+    manifest_path = metadata_root / f"{prefix}_analysis_manifest.json"
     manifest = json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
     stats = optional_json_artifact(
-        root,
+        metadata_root,
         manifest.get("position_statistics_sidecar")
+        or (manifest.get("stable_statistics") or {}).get("sidecar")
         or (manifest.get("stable_stats") or {}).get("sidecar"),
-        "position_operator_stats.json",
+        f"{prefix}_position_operator_stats.json",
     )
     semantic = optional_json_artifact(
-        root, manifest.get("semantic_map"), f"{prefix}_semantic_map.json",
+        metadata_root, manifest.get("semantic_map"), f"{prefix}_semantic_map.json",
     )
     validation = optional_json_artifact(
-        root,
+        metadata_root,
         manifest.get("validation_report")
         or (manifest.get("validation") or {}).get("report"),
         "validation_report.json",
@@ -355,6 +353,15 @@ def main() -> None:
         })
     if len(classes) != 3:
         raise ValueError("classification table must contain exactly three rows")
+    class_rows = {row["算子类型"]: row for row in classes}
+    for computed in classifications:
+        source = class_rows.get(computed["name"])
+        if source is None:
+            raise ValueError(f"classification table misses {computed['name']}")
+        if int(number(source.get("算子数量")) or -1) != computed["count"]:
+            raise ValueError(f"classification count mismatch for {computed['name']}")
+        if abs((number(source.get("总耗时(us)")) or -1) - computed["durationUs"]) > 0.01:
+            raise ValueError(f"classification duration mismatch for {computed['name']}")
     try:
         stable_samples = stable_sample_count(stats, manifest)
     except KeyError:
@@ -364,6 +371,24 @@ def main() -> None:
     except KeyError:
         devices = sorted({int(row["device"]) for row in origin_ops})
 
+    selected_unit = (
+        manifest.get("selected_unit")
+        or manifest.get("repeating_unit")
+        or manifest.get("repeating_unit_selection")
+    )
+    layer_count = first_value(
+        selected_unit if isinstance(selected_unit, dict) else {},
+        "layer_count", "unit_layer_count",
+        default=manifest.get("unit_layer_count"),
+    )
+    normalized_layer_duration = manifest.get("normalized_single_layer_duration_us")
+    if normalized_layer_duration is None and isinstance(layer_count, int) and layer_count > 0:
+        normalized_layer_duration = total_duration / layer_count
+    duration_label = (
+        "平均单层耗时"
+        if isinstance(layer_count, int) and layer_count > 1
+        else "单层耗时"
+    )
     payload = {
         "schemaVersion": "1.0",
         "metadata": {
@@ -374,14 +399,19 @@ def main() -> None:
                 manifest.get("inputs") or {}, "original_report", "nsys_rep", "sqlite",
             ),
             "repeatingUnit": repeating_unit_label(
-                manifest.get("repeating_unit")
-                or manifest.get("repeating_unit_selection")
+                selected_unit
             ),
-            "layerIdEvidence": manifest.get("layer_id_evidence"),
+            "layerIdEvidence": manifest.get("layer_id_evidence") or (
+                selected_unit.get("layer_id_evidence")
+                if isinstance(selected_unit, dict) else None
+            ),
             "generatedFrom": str(root),
         },
         "summary": {
             "totalDurationUs": total_duration,
+            "normalizedLayerDurationUs": normalized_layer_duration or total_duration,
+            "durationLabel": duration_label,
+            "unitLayerCount": layer_count or 1,
             "operatorCount": len(operators),
             "stableSamples": stable_samples,
             "devices": devices,
@@ -397,7 +427,7 @@ def main() -> None:
         "operators": operators,
         "evidence": {
             "boundary": manifest.get("boundary_evidence") or (
-                manifest.get("repeating_unit_selection") or {}
+                selected_unit if isinstance(selected_unit, dict) else {}
             ).get("boundary_evidence"),
             "uncertainMappings": [
                 *manifest.get("uncertain_mappings", []),
@@ -409,7 +439,7 @@ def main() -> None:
                 if manifest.get("shape_mfu_evidence") else None
             ),
             "mfuPeak": mfu_peak_label(manifest),
-            "mfuEvidence": manifest.get("shape_mfu_evidence"),
+            "mfuEvidence": manifest.get("mfu_evidence") or manifest.get("shape_mfu_evidence"),
             "completeSublayerCheck": manifest.get("complete_sublayer_check"),
             "validation": validation,
         },

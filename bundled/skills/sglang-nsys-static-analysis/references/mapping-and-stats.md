@@ -77,10 +77,13 @@ Treat the selected raw window as a full template. Statistical identity must
 include CSV position, raw index, module and operator name; never aggregate by
 operator name alone.
 
-For every included rank/device:
+First declare whether statistics target a fixed network-layer position or every
+occurrence of a structural layer-variant cycle. For every included rank/device:
 
 1. sort raw kernels by start time after `stable_start_ns`
-2. slide the full template across candidates
+2. match the full template inside complete CUDA-graph instances; accept all
+   equivalent structural-cycle positions, or only the fixed graph position when
+   fixed-layer statistics were requested
 3. accept only chunks whose operator-name sequence matches every position
 4. project raw offsets into module-group CSV order
 5. collect per-position duration and full-window wall-span
@@ -93,3 +96,6 @@ kernel duration.
 Write a stats sidecar containing scheme, stable start, unit length, devices,
 accepted sample count, per-device counts and per-position samples/min/max/avg.
 If no additional match exists, use a clearly marked single-sample fallback.
+
+For composite units also record layer count, ordered variants, occurrences per
+graph instance, cycle wall span and normalized average-per-layer wall span.

@@ -58,7 +58,10 @@ def validate_skill(path: Path) -> list[str]:
     for relative in (
         "scripts/build_static_analysis_tables.py",
         "scripts/extract_layer_operator_csv.py",
+        "scripts/audit_runtime_evidence.py",
+        "scripts/validate_analysis_package.py",
         "references/output-spec.md",
+        "references/hardware-peaks.json",
     ):
         if not (path / relative).is_file():
             errors.append(f"缺少运行文件：{relative}")

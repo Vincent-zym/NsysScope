@@ -108,16 +108,19 @@ Do not use `Attention 核心计算` as an umbrella for the whole attention path:
   projection.
 
 Only core GEMMs may receive shape/MFU. Require verified M/N/K, active branch,
-all participating datatypes, duration and dense theoretical peak:
+operand formats, accumulator behavior, Tensor Core compute mode, duration and
+dense per-GPU theoretical peak:
 
 ```text
 MFU = 2*M*N*K / (duration_seconds * dense_peak_flops)
 ```
 
-For mixed precision use the lowest verified dense peak among activation,
-weight and accumulation paths; weight dtype alone is insufficient. Reject MFU
-above 100% and fix the evidence. Leave unavailable values blank. Hardware peaks in
-`semantic_map.example.json` are placeholders, not authoritative specifications.
+Use `references/hardware-peaks.json` for its sourced B200/B300 profiles. Select
+the peak for the actual Tensor Core `compute_dtype`; FP32 accumulation inside a
+BF16 Tensor Core GEMM does not select the scalar FP32 peak. For grouped MoE,
+state whether M is logical routed rows or padded physical rows. Reject MFU above
+100% and fix the evidence. When shape, compute mode and a verified hardware
+profile exist, missing MFU is an error rather than an acceptable blank.
 
 Classify operators independently of their owning functional module. Core
 compute is a strict allow-list containing GEMM/BMM/matmul (including verified
@@ -148,3 +151,9 @@ operator from those excluded families.
 - no final unknown/misc/other modules
 - manifest records input/output paths, stage, hardware, semantic map,
   denominator, fallback/uncertainty, repeating-unit boundaries and sample scope
+- runtime audit records captured server args/environment separately from launch
+  intent and supplied source identity
+- hybrid layer patterns include every distinct layer variant unless a user
+  explicitly requested one subtype
+- frontend category membership/counts/durations and stable sample/device scope
+  exactly match the six tables and manifest

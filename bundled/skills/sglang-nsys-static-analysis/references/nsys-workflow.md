@@ -62,6 +62,11 @@ Verify window completeness against the active forward path. For Transformer-like
 layers check pre-attention norm, attention, post-attention merge, pre-FFN norm,
 MLP/MoE, and final post-FFN merge. Confirm the next kernel begins the next unit.
 
+Do not choose one convenient layer from an interleaved architecture. A
+`KDA,KDA,KDA,MLA` pattern is a four-layer structural unit unless the user
+explicitly requests one subtype. Record the layer count so downstream UI does
+not call the full cycle or one subtype a generic single-layer duration.
+
 ## Layer-ID evidence
 
 Use exact layer IDs only when supported by:

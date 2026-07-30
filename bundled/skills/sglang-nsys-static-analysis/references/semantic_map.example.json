@@ -1,11 +1,4 @@
 {
-  "hardware_tflops": {
-    "Nvidia B200": {
-      "fp4": 0,
-      "fp8": 0,
-      "bf16": 0
-    }
-  },
   "rules": [
     {
       "module_regex": "self_attn/output_proj",
@@ -15,6 +8,7 @@
       "core_kind": "gemm",
       "shape": {"M": 64, "N": 7168, "K": 7168},
       "dtypes": ["fp8", "fp4"],
+      "compute_dtype": "fp8",
       "functional_introduction": "完成 Attention 结果到隐藏维度的输出投影。",
       "introduction": "模型输出投影 GEMM；shape 必须由模型配置和实际阶段参数确认。"
     },

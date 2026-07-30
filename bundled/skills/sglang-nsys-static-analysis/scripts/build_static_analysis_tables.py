@@ -68,13 +68,15 @@ COMM_RE = re.compile(
     r"allgather|all_gather|broadcast|sendrecv|send_recv",
     re.I,
 )
-# These operator families are never core compute, even when they run inside an
-# Attention, projection, Indexer, or MoE functional stage.
-AUXILIARY_RE = re.compile(
-    r"quant|dequant|requant|layer[_]?norm|layernorm|rms[_]?norm|rmsnorm|"
-    r"generalLayerNorm|rope|rotary|topk|sort|dispatch|permute|unpermute|"
-    r"scatter|gather|allgather|cache|memcpy|memset|copy|cast|convert|"
-    r"transpose|reshape|index(?:ing)?|hadamard|activation|silu|gelu",
+# Match the actual leaf kernel family, not arbitrary template metadata.
+# A real attention kernel can contain implementation types such as TiledCopy or
+# CopyAtom in its encoded symbol without being a copy/helper operator.
+AUXILIARY_FAMILY_RE = re.compile(
+    r"(?:^|[_:$])(?:quant|dequant|requant|rope|rotary|topk|sort|dispatch|"
+    r"permute|unpermute|scatter|gather|allgather|memcpy|memset|copy|cast|"
+    r"convert|transpose|reshape|index|indexing|hadamard|activation|silu|gelu)"
+    r"(?:[_:$]|$)|layer[_]?norm|layernorm|rms[_]?norm|rmsnorm|"
+    r"generalLayerNorm|cache|elementwise|splitKreduce|finalizeKernel",
     re.I,
 )
 GEMM_RE = re.compile(
@@ -107,6 +109,12 @@ def parse_args() -> argparse.Namespace:
         help="Optional JSON containing ordered model-aware rules and hardware peaks.",
     )
     parser.add_argument("--hardware", help="Hardware key used by semantic-map hardware_tflops")
+    parser.add_argument(
+        "--hardware-profiles",
+        type=Path,
+        default=Path(__file__).resolve().parents[1] / "references/hardware-peaks.json",
+        help="Verified per-GPU dense hardware peak registry.",
+    )
     parser.add_argument("--stage", choices=["prefill", "decode"])
     parser.add_argument("--chunk-size", type=int)
     parser.add_argument("--batch-size", type=int)
@@ -238,8 +246,9 @@ def classify_category(
     requested = rule.get("category")
     if requested == "communication" or COMM_RE.search(text):
         return "communication"
-    # Explicit auxiliary signatures outrank a broad semantic-map module rule.
-    if AUXILIARY_RE.search(leaf):
+    # Only actual helper leaf families override a semantic rule. Never search
+    # arbitrary encoded template metadata such as CopyAtom/TiledCopy.
+    if AUXILIARY_FAMILY_RE.search(leaf):
         return "auxiliary"
     if requested == "auxiliary":
         return "auxiliary"
@@ -276,41 +285,110 @@ def shape_text(shape: tuple[int, int, int] | None) -> str:
     return f"(M={m},N={n},K={k})"
 
 
+def normalize_hardware(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", value.lower())
+
+
+def load_hardware_profiles(path: Path | None) -> dict[str, Any]:
+    if path is None or not path.exists():
+        return {}
+    payload = json.loads(path.read_text())
+    profiles = payload.get("profiles", {})
+    if not isinstance(profiles, dict):
+        raise ValueError("hardware profile registry has invalid profiles")
+    return payload
+
+
+def resolve_peak(
+    rule: dict[str, Any],
+    semantics: dict[str, Any],
+    hardware_profiles: dict[str, Any],
+    hardware: str | None,
+) -> tuple[float | None, str | None, str | None]:
+    explicit = number(rule.get("mfu_peak_tflops"))
+    if explicit and explicit > 0:
+        return explicit, str(rule.get("compute_dtype") or "explicit"), "semantic rule"
+    if not hardware:
+        return None, None, None
+    compute_dtype = str(
+        rule.get("compute_dtype")
+        or rule.get("mfu_dtype")
+        or ""
+    ).lower()
+    if not compute_dtype:
+        dtypes = rule.get("dtypes")
+        if isinstance(dtypes, list):
+            tensor_inputs = [
+                str(item).lower()
+                for item in dtypes
+                if str(item).lower() not in {"fp32_accum", "fp32-accum", "accum_fp32"}
+            ]
+            if len(set(tensor_inputs)) == 1:
+                compute_dtype = tensor_inputs[0]
+    if not compute_dtype:
+        return None, None, None
+
+    legacy = semantics.get("hardware_tflops", {})
+    if isinstance(legacy, dict):
+        device = legacy.get(hardware, {})
+        if isinstance(device, dict):
+            peak = number(device.get(compute_dtype))
+            if peak and peak > 0:
+                return peak, compute_dtype, "semantic-map hardware_tflops"
+
+    wanted = normalize_hardware(hardware)
+    for profile in (hardware_profiles.get("profiles") or {}).values():
+        if not isinstance(profile, dict):
+            continue
+        aliases = [profile.get("display_name"), *(profile.get("aliases") or [])]
+        if wanted not in {normalize_hardware(str(alias)) for alias in aliases if alias}:
+            continue
+        peak = number((profile.get("dense_tflops_per_gpu") or {}).get(compute_dtype))
+        if peak and peak > 0:
+            source = (hardware_profiles.get("source") or {}).get("url")
+            return peak, compute_dtype, str(source or "hardware profile registry")
+    return None, compute_dtype, None
+
+
 def compute_mfu(
     shape: tuple[int, int, int] | None,
     duration_us: float,
     rule: dict[str, Any],
     semantics: dict[str, Any],
+    hardware_profiles: dict[str, Any],
     hardware: str | None,
-) -> str:
+) -> tuple[str, dict[str, Any] | None]:
     if shape is None or duration_us <= 0 or not hardware:
-        return ""
-    peaks = semantics.get("hardware_tflops", {})
-    device_peaks = peaks.get(hardware, {}) if isinstance(peaks, dict) else {}
-    dtypes = rule.get("dtypes")
-    if not isinstance(dtypes, list):
-        dtype = str(rule.get("dtype", "")).lower()
-        dtypes = [dtype] if dtype else []
-    # Mixed-precision GEMM throughput is bounded by the slowest participating
-    # operand/accumulation path. Never select peak from weight dtype alone.
-    candidate_peaks = [number(device_peaks.get(str(dtype).lower())) for dtype in dtypes]
-    candidate_peaks = [value for value in candidate_peaks if value and value > 0]
-    peak = min(candidate_peaks) if len(candidate_peaks) == len(dtypes) and dtypes else None
+        return "", None
+    peak, compute_dtype, source = resolve_peak(
+        rule, semantics, hardware_profiles, hardware,
+    )
     if not peak or peak <= 0:
-        return ""
+        return "", None
     m, n, k = shape
     utilization = (2.0 * m * n * k) / (duration_us * peak * 1_000_000.0) * 100.0
     if utilization > 100.0:
         raise ValueError(
             f"MFU {utilization:.2f}% exceeds 100%; verify shape, duration, dtypes and dense peak"
         )
-    return f"{utilization:.2f}%"
+    evidence = {
+        "shape": {"M": m, "N": n, "K": k},
+        "duration_us": duration_us,
+        "compute_dtype": compute_dtype,
+        "operand_dtypes": rule.get("dtypes") or [],
+        "dense_peak_tflops_per_gpu": peak,
+        "peak_source": source,
+        "formula": "2*M*N*K/(duration_seconds*dense_peak_flops)",
+        "mfu_pct": round(utilization, 4),
+    }
+    return f"{utilization:.2f}%", evidence
 
 
 def main() -> None:
     args = parse_args()
     _, source_rows = read_csv(args.origin_csv)
     semantics = load_semantics(args.semantic_map)
+    hardware_profiles = load_hardware_profiles(args.hardware_profiles)
     rules = semantics.get("rules", [])
 
     total_candidates = [r for r in source_rows if r.get("module") == "__layer_total__"]
@@ -331,6 +409,7 @@ def main() -> None:
 
     enriched: list[dict[str, Any]] = []
     origin_rows: list[dict[str, Any]] = []
+    mfu_evidence: list[dict[str, Any]] = []
     for index, row in enumerate(source_rows, 1):
         rule = {} if row.get("module") == "__layer_total__" else match_rule(row, rules)
         normalized = {column: row.get(column, "") for column in ORIGIN_COLUMNS}
@@ -360,6 +439,16 @@ def main() -> None:
             or "依据模型模块、调用链和内核签名归类；需结合 manifest 复核。"
         )
         shape = parse_shape(rule.get("shape")) if category == "core" else None
+        mfu, evidence = compute_mfu(
+            shape, duration, rule, semantics, hardware_profiles, args.hardware,
+        )
+        if evidence is not None:
+            evidence["origin_index"] = int(row.get("序号") or index)
+            evidence["module"] = row.get("module", "")
+            evidence["operator_name"] = operator_table_name(
+                row.get("operator_name", ""), rule.get("operator_name"),
+            )
+            mfu_evidence.append(evidence)
         enriched.append({
             "module": row.get("module", ""),
             "功能模块": functional_module,
@@ -369,7 +458,7 @@ def main() -> None:
             "算子耗时(us)": duration,
             "算子耗时占比(%)": duration / total_duration * 100.0,
             "shape": shape_text(shape),
-            "mfu": compute_mfu(shape, duration, rule, semantics, args.hardware),
+            "mfu": mfu,
             "python_function": row.get("python_function", ""),
             "功能介绍": introduction,
             "stage_introduction": str(rule.get("functional_introduction") or introduction),
@@ -378,9 +467,13 @@ def main() -> None:
 
     module_duration: dict[str, float] = defaultdict(float)
     module_intro: dict[str, str] = {}
+    module_intro_priority: dict[str, int] = {}
     for row in enriched:
         module_duration[row["功能模块"]] += row["算子耗时(us)"]
-        module_intro.setdefault(row["功能模块"], row["stage_introduction"])
+        priority = {"core": 3, "communication": 2, "auxiliary": 1}[row["category"]]
+        if priority > module_intro_priority.get(row["功能模块"], -1):
+            module_intro[row["功能模块"]] = row["stage_introduction"]
+            module_intro_priority[row["功能模块"]] = priority
 
     operator_rows = []
     for index, row in enumerate(enriched, 1):
@@ -456,6 +549,7 @@ def main() -> None:
         "chunk_size": args.chunk_size,
         "batch_size": args.batch_size,
         "hardware": args.hardware,
+        "hardware_profiles": str(args.hardware_profiles) if args.hardware_profiles else None,
         "total_duration_us": round(total_duration, 3),
         "duration_basis": "duration_avg_us when available, otherwise duration_us",
         "percentage_denominator": "sqlite repeating-unit wall-span (__layer_total__)",
@@ -464,6 +558,8 @@ def main() -> None:
             "Rows not matched by semantic-map use conservative cross-model heuristics; "
             "review model-specific functional modules before final handoff."
         ),
+        "mfu_formula": "2*M*N*K/(duration_seconds*dense_peak_flops)",
+        "mfu_evidence": mfu_evidence,
         "outputs": list(outputs),
     }
     (args.output_dir / f"{args.prefix}_analysis_manifest.json").write_text(

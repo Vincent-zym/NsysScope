@@ -1,0 +1,35 @@
+{
+  "schema_version": "1.0",
+  "updated_at": "2026-07-30",
+  "source": {
+    "title": "NVIDIA HGX Platform specifications",
+    "url": "https://www.nvidia.com/en-eu/data-center/hgx/",
+    "notes": "HGX values are for 8 GPUs. FP4 lists sparse and dense explicitly. Other Tensor Core values are sparse and NVIDIA states dense is one half of the shown value. Values below are derived per-GPU dense peaks."
+  },
+  "profiles": {
+    "nvidia-b200": {
+      "display_name": "NVIDIA B200",
+      "aliases": ["Nvidia B200", "NVIDIA B200", "B200"],
+      "dense_tflops_per_gpu": {
+        "fp4": 9000.0,
+        "fp8": 4500.0,
+        "fp6": 4500.0,
+        "fp16": 2250.0,
+        "bf16": 2250.0,
+        "tf32": 1125.0
+      }
+    },
+    "nvidia-b300": {
+      "display_name": "NVIDIA B300 Blackwell Ultra",
+      "aliases": ["Nvidia B300", "NVIDIA B300", "B300", "Blackwell Ultra B300"],
+      "dense_tflops_per_gpu": {
+        "fp4": 13500.0,
+        "fp8": 4500.0,
+        "fp6": 4500.0,
+        "fp16": 2250.0,
+        "bf16": 2250.0,
+        "tf32": 1125.0
+      }
+    }
+  }
+}

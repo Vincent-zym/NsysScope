@@ -108,6 +108,21 @@ class Settings:
             raise ValueError("NSYSSCOPE_COMATE_PLATFORM must be internal or saas")
         self.data_dir.mkdir(parents=True, exist_ok=True)
         (self.data_dir / "jobs").mkdir(exist_ok=True)
+        required_skill_files = (
+            "SKILL.md",
+            "scripts/build_static_analysis_tables.py",
+            "scripts/audit_runtime_evidence.py",
+            "scripts/validate_analysis_package.py",
+            "references/hardware-peaks.json",
+        )
+        missing = [
+            relative for relative in required_skill_files
+            if not (self.skill_dir / relative).is_file()
+        ]
+        if missing:
+            raise ValueError(
+                f"analysis Skill is incomplete at {self.skill_dir}: {', '.join(missing)}"
+            )
 
     def resolve_allowed(self, value: str | Path, *, kind: str = "path") -> Path:
         path = Path(value).expanduser().resolve()

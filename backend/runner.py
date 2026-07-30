@@ -102,10 +102,17 @@ class JobRunner:
                         except RuntimeError:
                             prefix = None
                         if prefix:
+                            self.validate_package(
+                                csv_package, prefix, analysis_path=analysis_path,
+                            )
                             self.ensure_xlsx(csv_package, package / "xlsx")
                     else:
                         prefix = self.detect_prefix(csv_package, request.prefix)
+                        self.validate_package(csv_package, prefix)
                         self.convert(csv_package, package / "analysis.json", prefix, request)
+                        self.validate_package(
+                            csv_package, prefix, analysis_path=package / "analysis.json",
+                        )
                         self.ensure_xlsx(csv_package, package / "xlsx")
             else:
                 paths = self.resolve_inputs(request)
@@ -127,7 +134,11 @@ class JobRunner:
                 self.run_agent(job_id, job_dir, request, paths, sqlite_path)
                 self.state(job_id, job_dir, "converting", 88, "正在构建前端 analysis.json")
                 package = self.find_package(job_dir, request.prefix)
+                self.validate_package(package, request.prefix)
                 self.convert(package, job_dir / "analysis.json", request.prefix, request)
+                self.validate_package(
+                    package, request.prefix, analysis_path=job_dir / "analysis.json",
+                )
                 trace_path = self.organize_result_package(
                     job_dir, package, request.prefix, sqlite_path,
                 )
@@ -397,15 +408,26 @@ Write all artifacts only under:
 {job_dir}
 
 Requirements:
-1. Read model evidence first and derive a task-specific functional taxonomy.
-2. Select and prove the exact complete unit required by `user_acceptance_criteria`.
-3. Generate the normalized six CSV tables with prefix `{request.prefix}`.
-4. Write `{request.prefix}_analysis_manifest.json`, semantic map, stable-statistics sidecar,
+1. Run `scripts/audit_runtime_evidence.py` first. Captured server args/environment
+   override launch intent and source defaults; record every conflict.
+2. Read model evidence and derive a task-specific functional taxonomy.
+3. Select and prove the exact complete unit required by `user_acceptance_criteria`.
+   Without an explicit subtype request, include every distinct layer variant in
+   the smallest structural cycle; never present one convenient subtype as the
+   model's generic single layer.
+4. Generate the normalized six CSV tables with prefix `{request.prefix}`.
+5. Write `{request.prefix}_analysis_manifest.json`, semantic map, stable-statistics sidecar,
    and `validation_report.json`.
-5. Validate every required invariant, including the requested scope, and finish only when
-   validation passes. The manifest boundary evidence must explicitly show how the selected
-   unit satisfies the acceptance criteria.
-6. Never edit input reports, config, launch files, design notes, or model source.
+6. Compute MFU for every eligible GEMM when shape and a bundled verified hardware
+   profile exist. Record logical/physical shape, compute dtype, dense per-GPU
+   peak and source; "new model" is not a reason to leave MFU blank.
+7. Never infer CPU delay from zero-kernel GPU idle. Require CUDA Runtime launch
+   timestamp evidence or label the interval GPU idle/queue/dependency gap.
+8. Run `scripts/validate_analysis_package.py` and finish only when every required
+   invariant, including the requested scope, passes. The manifest boundary
+   evidence must explicitly show how the selected unit satisfies the acceptance
+   criteria.
+9. Never edit input reports, config, launch files, design notes, or model source.
 """
 
     def run_process(
@@ -809,8 +831,36 @@ Requirements:
     @staticmethod
     def validate_analysis(path: Path) -> None:
         payload = json.loads(path.read_text())
-        if payload.get("schemaVersion") != "1.0" or not payload.get("operators"):
+        operators = payload.get("operators")
+        if payload.get("schemaVersion") != "1.0" or not isinstance(operators, list) or not operators:
             raise RuntimeError("analysis.json schema or operators are invalid")
+        categories = {"core", "communication", "auxiliary"}
+        if any(operator.get("category") not in categories for operator in operators):
+            raise RuntimeError("analysis.json contains an invalid operator category")
+        summary = payload.get("summary") or {}
+        if summary.get("operatorCount") != len(operators):
+            raise RuntimeError("analysis.json operatorCount disagrees with operators")
+        if not summary.get("devices") or int(summary.get("stableSamples", 0)) < 1:
+            raise RuntimeError("analysis.json stable sample/device scope is missing")
+
+    def validate_package(
+        self, package: Path, prefix: str, *, analysis_path: Path | None = None,
+    ) -> None:
+        validator = self.settings.skill_dir / "scripts" / "validate_analysis_package.py"
+        if not validator.is_file():
+            raise RuntimeError(f"analysis Skill is missing package validator: {validator}")
+        command = [
+            shutil.which("python3") or "python3",
+            str(validator),
+            str(package),
+            "--prefix", prefix,
+        ]
+        if analysis_path is not None:
+            command.extend(["--analysis-json", str(analysis_path)])
+        completed = subprocess.run(command, text=True, capture_output=True)
+        if completed.returncode:
+            detail = (completed.stdout + completed.stderr).strip()
+            raise RuntimeError(f"analysis package validation failed: {detail}")
 
     @staticmethod
     def find_package(job_dir: Path, prefix: str) -> Path:

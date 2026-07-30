@@ -282,7 +282,7 @@ def test_frontend_payload_repairs_legacy_semantic_operator_alias() -> None:
     assert operator["fullName"] == raw["operator_name"]
 
 
-def test_frontend_payload_rejects_auxiliary_kernel_from_core_category() -> None:
+def test_frontend_payload_preserves_validated_six_table_category() -> None:
     base = {
         "序号": "7",
         "module": "self_attn/indexer",
@@ -307,13 +307,14 @@ def test_frontend_payload_rejects_auxiliary_kernel_from_core_category() -> None:
     for kernel in (
         "per_token_group_quant_8bit_kernel",
         "void flashinfer::norm::generalLayerNorm<float>(float*)",
+        "kernel_cutlass_kda_decode_mtp_kernel_TiledCopy_CopyAtom",
     ):
         operator = build_operator_payload(
             {**base, "operator_name": kernel},
             {**view, "算子名称": kernel},
             {"category": "core"},
         )
-        assert operator["category"] == "auxiliary"
+        assert operator["category"] == "core"
 
 
 def test_log_pagination_and_conversion_retry(tmp_path: Path) -> None:
