@@ -2,12 +2,13 @@
 
 ## Contents
 
-1. Files and source of truth
+1. Required artifacts
 2. Columns
-3. Semantic map and MFU
-4. Validation invariants
+3. Taxonomy and semantic mapping
+4. MFU and operator categories
+5. Validation invariants
 
-## Files and source of truth
+## Required artifacts
 
 Always create:
 
@@ -18,9 +19,11 @@ Always create:
 - `<prefix>_op_classification_table.csv`
 - `<prefix>_stage_table.csv`
 - `<prefix>_analysis_manifest.json`
+- `<prefix>_architecture_taxonomy.json`
 
 Use `duration_avg_us` when stable samples exist; otherwise use `duration_us` and
-record the fallback. All percentages use the repeating-unit wall-span.
+record the fallback. All percentages use the repeating-unit wall-span. Preserve
+the structural position and variant in every composite-unit row.
 
 ## Columns
 
@@ -28,29 +31,30 @@ Origin:
 
 ```text
 序号,module,operator_name,duration_us,start_ns,end_ns,device,stream,layer_id,
-duration_min_us,duration_max_us,duration_diff_us,duration_avg_us,
-duration_avg_pct_of_total,python_function,function_introduction,mapping_reason
+unit_position,unit_id,unit_variant,duration_min_us,duration_max_us,
+duration_diff_us,duration_avg_us,duration_avg_pct_of_total,python_function,
+function_introduction,mapping_reason
 ```
 
 Operator overview:
 
 ```text
-序号,功能模块,算子名称,算子耗时(us),算子耗时占比(%),shape,mfu,
-模块耗时(us),模块耗时占比(%),python_function,功能介绍
+序号,单元位置,单元ID,单元类型,功能模块,算子名称,算子耗时(us),
+算子耗时占比(%),shape,mfu,模块耗时(us),模块耗时占比(%),python_function,功能介绍
 ```
 
 Core compute:
 
 ```text
-序号,功能模块,module,算子名称,算子耗时(us),算子耗时占比(%),
-shape,mfu,python_function,功能介绍
+序号,单元位置,单元ID,单元类型,功能模块,module,算子名称,算子耗时(us),
+算子耗时占比(%),shape,mfu,python_function,功能介绍
 ```
 
 Auxiliary:
 
 ```text
-序号,功能模块,算子名称,算子耗时(us),算子耗时占比(%),
-python_function,功能介绍
+序号,单元位置,单元ID,单元类型,功能模块,算子名称,算子耗时(us),
+算子耗时占比(%),python_function,功能介绍
 ```
 
 Classification:
@@ -64,48 +68,53 @@ Always emit `核心计算`, `通信`, and `辅助算子`, including zero-count c
 Stage:
 
 ```text
-序号,功能模块,模块耗时(us),模块耗时占比(%),功能介绍
+序号,单元位置,单元ID,单元类型,功能模块,模块耗时(us),模块耗时占比(%),
+代表区间并集(us),代表墙钟跨度(us),耗时口径,功能介绍
 ```
 
-Origin keeps full demangled names. Other tables use compact CUDA kernel names:
-remove return type, outer namespace and runtime arguments, retain short
-distinguishing template parameters, and abbreviate only oversized template
-payloads as `<…>`. A semantic-map `operator_name` override must itself be a
-compact kernel symbol, never a functional description. Put descriptions such as
-`Q-B 投影` or `输入量化` in `功能介绍`.
+`模块耗时(us)` is the sum of position-aware average kernel durations.
+`代表区间并集(us)` removes overlap among the module's representative intervals.
+`代表墙钟跨度(us)` is its first-start to last-end span and includes internal
+gaps. None is automatically a critical-path attribution.
 
-## Semantic map and MFU
+Origin keeps full demangled names. Other tables use compact CUDA leaf symbols.
+Put semantic descriptions in `功能介绍`, never in `算子名称`.
 
-Build ordered model-aware rules with optional `module_regex`,
-`operator_regex`, `functional_module`, `operator_name`, `category`,
-`core_kind`, `shape`, `dtypes`, and `introduction`. Every rule with
-`category: core` must declare `core_kind: gemm` or `core_kind: attention`.
+## Taxonomy and semantic mapping
 
-`module` is the fine-grained architecture label. `功能模块` is a broader
-architecture stage inferred from the real forward path; never copy it
-mechanically. Merge all NSA Indexer internals into `NSA Indexer` unless finer
-granularity was explicitly requested. Apply that review to the whole layer:
-merge QKV preparation and cohesive shared-expert internals. Derive router,
-TopK and dispatch naming from the current model taxonomy; `MoE Gate/TopK` is
-appropriate for the GLM5.2 eval and user terminology, but is not a global
-constant. A typical Transformer/MoE repeating unit normally has about 5–12
-functional modules; justify model-specific exceptions in the manifest.
+Create and validate `<prefix>_architecture_taxonomy.json` before semantic
+mapping. Follow [architecture-taxonomy.md](architecture-taxonomy.md).
 
-Use stable functional names rather than implementation terminology. The
-attention execution stage is `Attention 核心计算` even when its backend is NSA,
-sparse attention or FlashMLA. Expert GEMM execution is `MoE 核心计算`, not
-`MoE Routed Experts`; record routed/shared/backend details in finer fields.
-Treat these as naming guidance for comparable Transformer/MoE paths, not as a
-fixed vocabulary for unrelated architectures.
+Build ordered model-aware rules with optional:
 
-Do not use `Attention 核心计算` as an umbrella for the whole attention path:
+```text
+module_regex,operator_regex,functional_module,operator_name,category,core_kind,
+shape,dtypes,unit_position,unit_id,unit_variant,introduction
+```
 
-- `Attention 计算准备`: absorbed Q projection, RoPE, KV-cache packing/update,
-  collectives and backend input preparation.
-- `Attention 核心计算`: only attention scores, normalization and value
-  aggregation.
-- `Attention 输出投影`: value reconstruction, output quantization and O
-  projection.
+Every `category: core` rule declares `core_kind: gemm` or
+`core_kind: attention`.
+
+Keep these concepts distinct:
+
+- `unit_variant`: architecture-defined subtype inside a heterogeneous cycle
+- `unit_id`: concrete occurrence such as a network layer
+- `module`: fine-grained model-description path
+- `功能模块`: broader current-model functional stage
+- category: core, communication or auxiliary operator class
+
+Aggregate functional modules by:
+
+```text
+(unit_position, unit_id, unit_variant, functional_module)
+```
+
+Never aggregate only by functional-module name in a composite unit. Use
+module-count heuristics per variant, not as a global cap for a heterogeneous
+cycle. Do not merge state-space/linear attention with full/latent attention just
+because both can be described as Attention.
+
+## MFU and operator categories
 
 Only core GEMMs may receive shape/MFU. Require verified M/N/K, active branch,
 operand formats, accumulator behavior, Tensor Core compute mode, duration and
@@ -115,45 +124,34 @@ dense per-GPU theoretical peak:
 MFU = 2*M*N*K / (duration_seconds * dense_peak_flops)
 ```
 
-Use `references/hardware-peaks.json` for its sourced B200/B300 profiles. Select
-the peak for the actual Tensor Core `compute_dtype`; FP32 accumulation inside a
-BF16 Tensor Core GEMM does not select the scalar FP32 peak. For grouped MoE,
-state whether M is logical routed rows or padded physical rows. Reject MFU above
-100% and fix the evidence. When shape, compute mode and a verified hardware
-profile exist, missing MFU is an error rather than an acceptable blank.
+Use `references/hardware-peaks.json`. Reject MFU above 100%. When shape, compute
+mode and verified hardware profile exist, missing MFU is an error.
 
-Classify operators independently of their owning functional module. Core
-compute is a strict allow-list containing GEMM/BMM/matmul (including verified
-fused/grouped expert GEMMs) and actual Attention
-score/normalization/value-aggregation kernels. Communication is separate.
-Everything else is auxiliary. In particular, quant/dequant, LayerNorm/RMSNorm,
-RoPE, cache management, TopK/router/dispatch, gather/scatter, permutations,
-copies/casts, activations and metadata/index transforms remain auxiliary even
-inside Attention, projection, Indexer or MoE stages. Reject a core table
-containing `per_token_group_quant_8bit_kernel`, `generalLayerNorm`, or another
-operator from those excluded families.
+Classify each operator independently. Core compute is a strict allow-list:
+
+- GEMM/BMM/matmul, including verified fused/grouped expert GEMMs
+- actual attention/state-update score, normalization and value aggregation
+
+Communication is separate. Quantization, normalization, RoPE, cache management,
+TopK/router/dispatch, gather/scatter, permutations, copies/casts, activations
+and metadata transforms are auxiliary even inside a core-owning stage.
 
 ## Validation invariants
 
 - exact filenames and headers
 - valid CSV quoting for demangled templates
-- origin row coverage equals selected kernels plus one total row
-- every non-total row occurs once in overview and exactly one category
-- every core row is justified as `gemm` or `attention`; core category is never
-  inherited from the broader `功能模块`
-- excluded auxiliary families never appear in the core-compute table
-- core/auxiliary rows sorted by duration descending
-- stage rows sorted by aggregate duration descending
-- `duration_diff_us = duration_max_us - duration_min_us`
-- total average percentage is `100.000%`
-- module/category percentages use wall-span and are not normalized
+- origin coverage equals selected kernels plus one total row
+- every non-total row occurs once in overview and one category
+- core category is never inherited from its broader functional module
+- total duration is repeating-unit wall-span, not summed kernels
 - full Python call chains and evidence-backed mapping reasons
 - no final unknown/misc/other modules
-- manifest records input/output paths, stage, hardware, semantic map,
-  denominator, fallback/uncertainty, repeating-unit boundaries and sample scope
-- runtime audit records captured server args/environment separately from launch
-  intent and supplied source identity
-- hybrid layer patterns include every distinct layer variant unless a user
-  explicitly requested one subtype
-- frontend category membership/counts/durations and stable sample/device scope
-  exactly match the six tables and manifest
+- runtime/source/config conflicts are recorded
+- every distinct variant and position is present in origin, overview and stage
+- every variant emits its ordered and distinctive functional modules
+- heterogeneous cycle duration is not called generic single-layer duration
+- fused kernels use indivisible attribution unless a trace proves separate work
+- frontend unit/variant/category/sample/device data matches package evidence
+
+Legacy six-table packages without taxonomy remain importable, but new composite
+analysis must satisfy this contract.

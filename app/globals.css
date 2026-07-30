@@ -41,6 +41,16 @@ button { color: inherit; }
 .run-meta b { color: #d5deea; letter-spacing: .02em; font-size: 12px; }
 .run-meta span:first-child b { color: var(--green); }
 .error { padding: 10px 14px; border: 1px solid #803b46; color: #ff9ba8; background: #30151a; border-radius: 8px; margin-bottom: 15px; }
+.unit-selector { display: flex; align-items: stretch; gap: 8px; margin-bottom: 16px; padding: 11px; border: 1px solid var(--line); border-radius: 13px; background: linear-gradient(120deg,rgba(20,27,39,.95),rgba(12,16,23,.95)); overflow-x: auto; }
+.unit-selector > div { min-width: 230px; display: flex; flex-direction: column; justify-content: center; padding: 4px 10px; margin-right: auto; }
+.unit-selector > div span { color: #8290a6; font: 10px/1.4 ui-monospace, monospace; letter-spacing: .15em; }
+.unit-selector > div b { margin-top: 3px; font-size: 16px; }
+.unit-selector > div small { color: #8290a6; margin-top: 3px; white-space: nowrap; }
+.unit-selector > button { min-width: 150px; display: flex; flex-direction: column; align-items: flex-start; justify-content: center; border: 1px solid #2b3545; border-radius: 9px; padding: 9px 12px; background: #111720; cursor: pointer; }
+.unit-selector > button:hover { border-color: #455a7b; background: #151e2b; }
+.unit-selector > button.active { border-color: #6188f4; background: linear-gradient(135deg,rgba(49,77,145,.46),rgba(23,32,52,.92)); box-shadow: inset 0 0 0 1px rgba(97,136,244,.13); }
+.unit-selector > button b { font-size: 13px; white-space: nowrap; }
+.unit-selector > button small { color: #8795aa; font: 11px ui-monospace, monospace; margin-top: 4px; white-space: nowrap; }
 .metrics { display: grid; grid-template-columns: repeat(5, 1fr); gap: 1px; border: 1px solid var(--line); background: var(--line); border-radius: 13px; overflow: hidden; margin-bottom: 16px; }
 .metric { padding: 20px 21px; background: var(--panel); }
 .metric > span { color: #b1bdcc; font-size: 15px; font-weight: 600; }
@@ -58,6 +68,7 @@ button { color: inherit; }
 .stage-row:hover, .stage-row.active { background: rgba(255,255,255,.035); }
 .stage-label { display: flex; flex-direction: column; align-items: flex-start; min-width: 0; }
 .stage-label span { font-size: 16px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+.stage-label small { color: #77869b; font: 11px ui-monospace, monospace; margin-top: 2px; }
 .stage-label b { font: 650 16px ui-monospace, monospace; color: #aebbd0; margin-top: 4px; }
 .bar-track { height: 8px; background: #202632; border-radius: 20px; overflow: hidden; }
 .bar-track i { display: block; height: 100%; border-radius: inherit; box-shadow: 0 0 10px rgba(91,140,255,.25); }
@@ -93,6 +104,7 @@ button { color: inherit; }
 .advice-list article p { margin: 5px 0 0; color: #99a7ba; font-size: 13px; line-height: 1.55; }
 .timeline-panel { margin-bottom: 16px; }
 .timeline { padding: 22px 20px 20px; overflow-x: auto; }
+.timeline-empty { padding: 60px 24px; color: #718096; text-align: center; }
 .axis { margin-left: 92px; min-width: 820px; display: flex; justify-content: space-between; color: #8190a6; font: 11px ui-monospace, monospace; border-bottom: 1px solid #28313f; padding-bottom: 7px; }
 .lane { min-width: 920px; display: grid; grid-template-columns: 82px 1fr; gap: 10px; align-items: center; margin-top: 11px; }
 .lane label { color: #96a3b6; font: 12px ui-monospace, monospace; text-align: right; }
@@ -248,6 +260,7 @@ tbody tr.selected { background: rgba(92,129,220,.12); box-shadow: inset 3px 0 #6
   .operator-workbench .table-wrap { max-height: 720px; }
   .evidence-panel { position: static; height: auto; max-height: none; }
   .metrics { grid-template-columns: repeat(2,1fr); }
+  .unit-selector > div { display: none; }
   .run-meta, .report-chip { display: none; }
   .stage-row { grid-template-columns: 190px 1fr 70px; }
   .timeline-stage-buttons { grid-template-columns: repeat(3,minmax(160px,1fr)); }
@@ -258,6 +271,7 @@ tbody tr.selected { background: rgba(92,129,220,.12); box-shadow: inset 3px 0 #6
   .shell { width: calc(100% - 24px); padding-top: 20px; }
   .title-row { display: block; }
   .metrics { grid-template-columns: 1fr; }
+  .unit-selector { border-radius: 10px; }
   .stage-row { grid-template-columns: 150px 1fr 60px; gap: 9px; }
   .stage-label b, .stage-row em { font-size: 14px; }
   .panel-head small { display: none; }

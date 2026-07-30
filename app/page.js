@@ -53,6 +53,13 @@ function operatorDisplayName(operator) {
   return operator.kernelName || compactKernelName(operator.fullName) || operator.name || "未知算子";
 }
 
+const stageKey = (stage) => stage?.key || stage?.stageKey || stage?.name || "";
+const operatorStageKey = (operator) => operator?.stageKey || operator?.stage || "";
+const unitKey = (unit) => String(unit?.id || unit?.unitId || unit?.position || unit?.unitPosition || "");
+const operatorUnitKey = (operator) => String(
+  operator?.unitId || operator?.unitPosition || "",
+);
+
 function calculateOverlapPct(operators) {
   const intervals = operators
     .map((op) => [Number(op.startNs), Number(op.endNs)])
@@ -86,44 +93,49 @@ function Metric({ label, value, suffix, note, accent }) {
 }
 
 function StageBars({ stages, selected, onSelect, colors }) {
-  const max = Math.max(...stages.map((x) => x.durationUs));
+  const max = Math.max(...stages.map((x) => x.durationUs), 1);
   return (
     <div className="stage-list">
-      {stages.map((stage) => (
+      {stages.map((stage) => {
+        const key = stageKey(stage);
+        return (
         <button
-          key={stage.name}
-          className={`stage-row ${selected === stage.name ? "active" : ""}`}
-          onClick={() => onSelect(stage.name)}
+          key={key}
+          className={`stage-row ${selected === key ? "active" : ""}`}
+          onClick={() => onSelect(key)}
         >
           <div className="stage-label">
             <span>{stage.name}</span>
+            {stage.unitVariant && <small>{stage.unitPosition}. {stage.unitVariant}</small>}
             <b>{fmt(stage.durationUs)} μs</b>
           </div>
           <div className="bar-track">
             <i style={{
               width: `${stage.durationUs / max * 100}%`,
-              background: colors[stage.name],
+              background: colors[key],
             }} />
           </div>
           <em>{fmt(stage.durationPct)}%</em>
         </button>
-      ))}
+        );
+      })}
     </div>
   );
 }
 
 function Timeline({ operators, stages, selectedStage, selectedOp, colors, onPick, onStage }) {
+  if (!operators.length) return <div className="timeline-empty">当前结构单元没有可展示的算子。</div>;
   const start = Math.min(...operators.map((op) => op.startNs));
   const end = Math.max(...operators.map((op) => op.endNs));
   const span = Math.max(end - start, 1);
   const streams = [...new Set(operators.map((op) => op.stream))].sort((a, b) => a - b);
-  const stageByName = Object.fromEntries(stages.map((stage) => [stage.name, stage]));
-  const orderedStageNames = [...new Set(
-    [...operators].sort((a, b) => a.startNs - b.startNs).map((op) => op.stage),
+  const stageByKey = Object.fromEntries(stages.map((stage) => [stageKey(stage), stage]));
+  const orderedStageKeys = [...new Set(
+    [...operators].sort((a, b) => a.startNs - b.startNs).map(operatorStageKey),
   )];
   const orderedStages = [
-    ...orderedStageNames.map((name) => stageByName[name]).filter(Boolean),
-    ...stages.filter((stage) => !orderedStageNames.includes(stage.name)),
+    ...orderedStageKeys.map((key) => stageByKey[key]).filter(Boolean),
+    ...stages.filter((stage) => !orderedStageKeys.includes(stageKey(stage))),
   ];
   return (
     <div className="timeline">
@@ -140,12 +152,12 @@ function Timeline({ operators, stages, selectedStage, selectedOp, colors, onPick
               const operatorSelected = selectedOp?.index === op.index;
               const dim = selectedOp
                 ? !operatorSelected
-                : selectedStage && op.stage !== selectedStage;
+                : selectedStage && operatorStageKey(op) !== selectedStage;
               return <button
                 key={op.index}
-                title={`${operatorDisplayName(op)} · ${fmt(op.durationUs)} μs`}
+                title={`${op.unitVariant ? `${op.unitVariant} · ` : ""}${operatorDisplayName(op)} · ${fmt(op.durationUs)} μs`}
                 className={`kernel ${dim ? "dim" : ""} ${operatorSelected ? "selected" : ""}`}
-                style={{ left: `${left}%`, width: `${width}%`, background: colors[op.stage] }}
+                style={{ left: `${left}%`, width: `${width}%`, background: colors[operatorStageKey(op)] }}
                 onClick={() => onPick(op)}
               />;
             })}
@@ -167,14 +179,18 @@ function Timeline({ operators, stages, selectedStage, selectedOp, colors, onPick
           </button>
           {orderedStages.map((stage, index) => (
             <button
-              key={stage.name}
+              key={stageKey(stage)}
               className={
-                selectedStage === stage.name || selectedOp?.stage === stage.name ? "active" : ""
+                selectedStage === stageKey(stage) ||
+                operatorStageKey(selectedOp) === stageKey(stage) ? "active" : ""
               }
-              onClick={() => onStage(stage.name)}
+              onClick={() => onStage(stageKey(stage))}
             >
-              <i style={{ background: colors[stage.name] }}>{index + 1}</i>
-              <span><b>{stage.name}</b><small>{fmt(stage.durationUs)} us · {fmt(stage.durationPct)}%</small></span>
+              <i style={{ background: colors[stageKey(stage)] }}>{index + 1}</i>
+              <span>
+                <b>{stage.name}</b>
+                <small>{stage.unitVariant ? `${stage.unitPosition}. ${stage.unitVariant} · ` : ""}{fmt(stage.durationUs)} us</small>
+              </span>
             </button>
           ))}
         </div>
@@ -606,6 +622,7 @@ function JobDialog({ open, onClose, onLoaded }) {
 
 export default function Dashboard() {
   const [data, setData] = useState(null);
+  const [selectedUnit, setSelectedUnit] = useState(null);
   const [selectedStage, setSelectedStage] = useState(null);
   const [selectedOp, setSelectedOp] = useState(null);
   const [query, setQuery] = useState("");
@@ -623,22 +640,53 @@ export default function Dashboard() {
   }, []);
 
   const colors = useMemo(() => data ? Object.fromEntries(
-    data.stages.map((stage, index) => [stage.name, COLORS[index % COLORS.length]])
+    data.stages.map((stage, index) => [stageKey(stage), COLORS[index % COLORS.length]])
   ) : {}, [data]);
+
+  const visibleOperators = useMemo(() => {
+    if (!data) return [];
+    return selectedUnit
+      ? data.operators.filter((op) => operatorUnitKey(op) === selectedUnit)
+      : data.operators;
+  }, [data, selectedUnit]);
+
+  const visibleStages = useMemo(() => {
+    if (!data) return [];
+    return selectedUnit
+      ? data.stages.filter((stage) => unitKey(stage) === selectedUnit)
+      : data.stages;
+  }, [data, selectedUnit]);
+
+  const visibleClassifications = useMemo(() => {
+    if (!data || !selectedUnit) return data?.classifications || [];
+    const names = {
+      core: "核心计算",
+      communication: "通信",
+      auxiliary: "辅助算子",
+    };
+    return Object.entries(names).map(([categoryName, name]) => {
+      const rows = visibleOperators.filter((op) => op.category === categoryName);
+      return {
+        name,
+        count: rows.length,
+        durationUs: rows.reduce((sum, op) => sum + (op.durationUs || 0), 0),
+      };
+    });
+  }, [data, selectedUnit, visibleOperators]);
 
   const filtered = useMemo(() => {
     if (!data) return [];
-    const operators = data.operators.filter((op) => {
-      const stageOk = !selectedStage || op.stage === selectedStage;
+    const operators = visibleOperators.filter((op) => {
+      const stageOk = !selectedStage || operatorStageKey(op) === selectedStage;
       const categoryOk = category === "all" || op.category === category;
       const q = query.trim().toLowerCase();
-      const queryOk = !q || `${operatorDisplayName(op)} ${op.name} ${op.module} ${op.stage}`.toLowerCase().includes(q);
+      const queryOk = !q || `${operatorDisplayName(op)} ${op.name} ${op.module} ${op.stage} ${op.unitVariant || ""} ${op.unitId || ""}`.toLowerCase().includes(q);
       return stageOk && categoryOk && queryOk;
     });
     return operators.sort(category === "all"
       ? (a, b) => a.startNs - b.startNs || a.index - b.index
       : (a, b) => b.durationUs - a.durationUs || a.startNs - b.startNs);
-  }, [data, selectedStage, category, query]);
+  }, [data, visibleOperators, selectedStage, category, query]);
 
   async function loadFile(event) {
     const file = event.target.files?.[0];
@@ -649,6 +697,7 @@ export default function Dashboard() {
         throw new Error("schema");
       }
       setData(parsed);
+      setSelectedUnit(null);
       setSelectedStage(null);
       setSelectedOp(null);
       setError("");
@@ -659,6 +708,7 @@ export default function Dashboard() {
 
   const loadAnalysis = useCallback((payload) => {
     setData(payload);
+    setSelectedUnit(null);
     setSelectedStage(null);
     setSelectedOp(null);
     setError("");
@@ -666,12 +716,19 @@ export default function Dashboard() {
 
   if (!data) return <main className="loading"><div className="pulse" />正在载入分析数据…</main>;
 
-  const topStage = data.stages[0];
-  const compute = data.classifications.find((x) => x.name === "核心计算");
-  const overlapPct = calculateOverlapPct(data.operators);
+  const topStage = [...visibleStages].sort((a, b) => b.durationUs - a.durationUs)[0];
+  const compute = visibleClassifications.find((x) => x.name === "核心计算");
+  const classificationTotal = visibleClassifications.reduce((sum, row) => sum + row.durationUs, 0);
+  const computePct = classificationTotal ? compute?.durationUs / classificationTotal * 100 : 0;
+  const selectedUnitData = data.units?.find((unit) => unitKey(unit) === selectedUnit);
+  const primaryDurationUs = selectedUnitData?.representativeWallSpanUs ||
+    data.summary.primaryDurationUs ||
+    data.summary.normalizedLayerDurationUs ||
+    data.summary.totalDurationUs;
+  const overlapPct = calculateOverlapPct(visibleOperators);
   const displayModel = String(data.metadata.model || "Unknown model")
     .split(" / ", 1)[0].split(" (", 1)[0].slice(0, 80);
-  const highlightedStage = selectedOp?.stage || selectedStage;
+  const highlightedStage = operatorStageKey(selectedOp) || selectedStage;
 
   const selectStage = (stageName) => {
     setSelectedOp(null);
@@ -684,6 +741,18 @@ export default function Dashboard() {
     setSelectedStage(null);
     setSelectedOp(operator);
   };
+
+  const selectUnit = (value) => {
+    setSelectedUnit((current) => current === value ? null : value);
+    setSelectedStage(null);
+    setSelectedOp(null);
+  };
+
+  const unitNote = selectedUnitData
+    ? `位置 ${selectedUnitData.position} · Layer ${selectedUnitData.layerId ?? "—"} · 代表墙钟跨度`
+    : data.summary.heterogeneous
+      ? `${data.summary.unitLayerCount || data.units?.length || 1} 个异构单元/周期 · ${(data.summary.distinctUnitVariants || []).join(" / ")}`
+      : `${data.summary.stableSamples} 个稳定样本`;
 
   return (
     <main>
@@ -713,37 +782,54 @@ export default function Dashboard() {
         </div>
         {error && <div className="error">{error}</div>}
 
+        {data.units?.length > 1 && <section className="unit-selector">
+          <div><span>STRUCTURAL UNITS</span><b>结构周期</b><small>先选 KDA / MLA 等真实单元，再查看各自模块</small></div>
+          <button className={!selectedUnit ? "active" : ""} onClick={() => selectUnit(null)}>
+            <b>完整周期</b><small>{data.units.length} 个结构单元</small>
+          </button>
+          {data.units.map((unit) => (
+            <button
+              key={unitKey(unit)}
+              className={selectedUnit === unitKey(unit) ? "active" : ""}
+              onClick={() => selectUnit(unitKey(unit))}
+            >
+              <b>{unit.position}. {unit.variant || unit.id}</b>
+              <small>Layer {unit.layerId ?? "—"} · {fmt(unit.representativeWallSpanUs)} μs</small>
+            </button>
+          ))}
+        </section>}
+
         <section className="metrics">
           <Metric
-            label={data.summary.durationLabel || "单层耗时"}
-            value={fmt((data.summary.normalizedLayerDurationUs || data.summary.totalDurationUs) / 1000, 3)}
+            label={selectedUnitData ? `${selectedUnitData.variant || selectedUnitData.id} 单元耗时` : (data.summary.durationLabel || "单层耗时")}
+            value={fmt(primaryDurationUs / 1000, 3)}
             suffix=" ms"
-            note={`${data.summary.stableSamples} 个稳定样本${(data.summary.unitLayerCount || 1) > 1 ? ` · ${data.summary.unitLayerCount} 层/周期` : ""}`}
+            note={unitNote}
             accent
           />
-          <Metric label="算子数量" value={data.summary.operatorCount} suffix="" note={`${data.stages.length} 个功能阶段`} />
-          <Metric label="最高耗时功能模块" value={fmt(topStage.durationUs)} suffix=" μs" note={`${topStage.name} · ${fmt(topStage.durationPct)}%`} />
-          <Metric label="核心计算占比" value={fmt(compute?.durationPct)} suffix="%" note={`${compute?.count || 0} 个核心算子`} />
+          <Metric label="算子数量" value={visibleOperators.length} suffix="" note={`${visibleStages.length} 个功能阶段`} />
+          <Metric label="最高耗时功能模块" value={fmt(topStage?.durationUs)} suffix=" μs" note={topStage ? `${topStage.name} · ${topStage.unitVariant || "通用"}` : "—"} />
+          <Metric label="核心计算占比" value={fmt(computePct)} suffix="%" note={`${compute?.count || 0} 个核心算子`} />
           <Metric label="Overlap 率" value={fmt(overlapPct)} suffix="%" note="基于算子时间区间并集" />
         </section>
 
         <section className="analysis-grid">
           <article className="panel stage-panel">
             <div className="panel-head"><div><span>BREAKDOWN</span><h2>功能模块耗时</h2></div><small>点击模块联动筛选</small></div>
-            <StageBars stages={data.stages} selected={highlightedStage} onSelect={selectStage} colors={colors} />
+            <StageBars stages={visibleStages} selected={highlightedStage} onSelect={selectStage} colors={colors} />
           </article>
 
           <article className="panel classification-panel">
             <div className="panel-head"><div><span>COMPOSITION</span><h2>计算 · 通信 · 辅助算子占比</h2></div><small>按三类累计耗时归一化</small></div>
-            <ClassificationDonut classifications={data.classifications} />
+            <ClassificationDonut classifications={visibleClassifications} />
           </article>
         </section>
 
         <section className="panel timeline-panel">
           <div className="panel-head"><div><span>CUDA TIMELINE</span><h2>多 Stream 时间线</h2></div><small>按真实 Stream 展示 · 点击算子查看证据</small></div>
           <Timeline
-            operators={data.operators}
-            stages={data.stages}
+            operators={visibleOperators}
+            stages={visibleStages}
             selectedStage={selectedStage}
             selectedOp={selectedOp}
             colors={colors}
@@ -781,7 +867,7 @@ export default function Dashboard() {
                   {filtered.map((op) => (
                     <tr key={op.index} className={selectedOp?.index === op.index ? "selected" : ""} onClick={() => selectOperator(op)}>
                       <td className="mono muted center">{op.index}</td>
-                      <td><div className="op-title"><i style={{ background: colors[op.stage] }} /><div><b title={operatorDisplayName(op)}>{operatorDisplayName(op)}</b><span>{op.stage}</span></div></div></td>
+                      <td><div className="op-title"><i style={{ background: colors[operatorStageKey(op)] }} /><div><b title={operatorDisplayName(op)}>{operatorDisplayName(op)}</b><span>{op.unitVariant ? `${op.unitVariant} · ` : ""}{op.stage}</span></div></div></td>
                       <td><span className={`category ${op.category}`}>{CATEGORY[op.category]?.label}</span></td>
                       <td className="mono numeric">{fmt(op.durationUs)}</td>
                       <td className="mono numeric">{fmt(op.durationPct)}</td>
@@ -797,8 +883,8 @@ export default function Dashboard() {
             <div className="panel-head"><div><span>EVIDENCE</span><h2>算子证据</h2></div><small>{selectedOp ? `#${selectedOp.index}` : "选择算子"}</small></div>
             {selectedOp ? <div className="evidence-body">
               <div className="evidence-title">
-                <i style={{ background: colors[selectedOp.stage] }}>{selectedOp.index}</i>
-                <div><b>{operatorDisplayName(selectedOp)}</b><span>{selectedOp.stage}</span></div>
+                <i style={{ background: colors[operatorStageKey(selectedOp)] }}>{selectedOp.index}</i>
+                <div><b>{operatorDisplayName(selectedOp)}</b><span>{selectedOp.unitVariant ? `${selectedOp.unitVariant} · ` : ""}{selectedOp.stage}</span></div>
                 <em className={`category ${selectedOp.category}`}>{CATEGORY[selectedOp.category]?.label}</em>
               </div>
               <div className="evidence-summary">
@@ -807,6 +893,7 @@ export default function Dashboard() {
                 <div><span>MFU</span><b>{selectedOp.mfu != null ? `${fmt(selectedOp.mfu)}%` : "N/A"}</b></div>
                 <div><span>Shape</span><b>{selectedOp.shape || "N/A"}</b></div>
                 <div><span>设备 / Stream</span><b>GPU {selectedOp.device} / Stream {selectedOp.stream}</b></div>
+                <div><span>结构单元</span><b>{selectedOp.unitPosition || "—"}. {selectedOp.unitVariant || selectedOp.unitId || "N/A"}</b></div>
                 <div><span>技术模块</span><b>{selectedOp.module || "N/A"}</b></div>
               </div>
               <section className="evidence-section">

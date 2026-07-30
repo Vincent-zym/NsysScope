@@ -3,6 +3,9 @@
     {
       "module_regex": "self_attn/output_proj",
       "operator_regex": "gemm",
+      "unit_position": 1,
+      "unit_id": "layer.4",
+      "unit_variant": "Variant-A",
       "functional_module": "Attention 输出投影",
       "category": "core",
       "core_kind": "gemm",
@@ -14,6 +17,9 @@
     },
     {
       "module_regex": "router|topk|gate",
+      "unit_position": 1,
+      "unit_id": "layer.4",
+      "unit_variant": "Variant-A",
       "functional_module": "MoE Gate/TopK 路由",
       "category": "auxiliary",
       "functional_introduction": "完成专家打分、TopK 选择及 token 分发。",

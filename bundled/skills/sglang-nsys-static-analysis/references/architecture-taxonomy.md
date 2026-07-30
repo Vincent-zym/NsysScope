@@ -1,0 +1,142 @@
+# Architecture taxonomy contract
+
+## Contents
+
+1. Purpose
+2. Required evidence
+3. JSON contract
+4. Mapping and aggregation
+5. Fusion and overlap
+6. Validation failures
+
+## Purpose
+
+Create `<prefix>_architecture_taxonomy.json` before mapping kernels. This file is
+the task-local model architecture contract. It prevents labels from a previous
+model from becoming the naming authority for a new architecture.
+
+Treat a repeating unit as an ordered sequence of structural units. A structural
+unit may be a decoder layer, encoder block, state-space block, attention variant,
+pipeline stage or another model-described component. Do not assume every model
+has homogeneous Transformer layers.
+
+## Required evidence
+
+List the current task's design notes, config, active source branch and captured
+runtime evidence. Use this precedence:
+
+1. captured runtime and trace
+2. model design/config
+3. verified source branch
+4. launch intent
+
+Every variant needs a source anchor, ordered functional modules and
+discriminators. Discriminators may be config layer lists, source branch
+predicates, NVTX labels or trace kernel motifs. Kernel-name similarity alone is
+not sufficient when better evidence exists.
+
+## JSON contract
+
+```json
+{
+  "schema_version": "1.0",
+  "model": "ExampleModel",
+  "evidence": [
+    {"kind": "config", "path": "/path/config.json"},
+    {"kind": "source", "path": "/path/model.py:100-240"}
+  ],
+  "repeating_unit": {
+    "kind": "composite",
+    "positions": [
+      {
+        "position": 1,
+        "unit_id": "layer.4",
+        "unit_variant": "Variant-A",
+        "layer_id": 4,
+        "discriminator": "config list + trace motif"
+      }
+    ]
+  },
+  "variants": [
+    {
+      "name": "Variant-A",
+      "source_evidence": "ModelLayer selects VariantA when ...",
+      "discriminators": ["config.variant_a_layers", "variant_a_kernel"],
+      "ordered_functional_modules": [
+        "Input aggregation",
+        "Variant-A core",
+        "Output merge"
+      ],
+      "distinctive_functional_modules": ["Variant-A core"]
+    }
+  ],
+  "fusion_groups": [
+    {
+      "name": "Fused front",
+      "logical_owners": ["router", "shared branch", "routed branch"],
+      "attribution_policy": "indivisible"
+    }
+  ]
+}
+```
+
+Positions must be contiguous from 1. Resolve each selected kernel to exactly one
+position by `layer_id`, a narrow `module_regex`, or explicit semantic-map fields.
+Use `unit_id` for the concrete occurrence and `unit_variant` for the
+architecture-defined subtype.
+
+## Mapping and aggregation
+
+Annotate every non-total origin row with:
+
+```text
+unit_position,unit_id,unit_variant
+```
+
+Annotate every human-facing operator and stage row with:
+
+```text
+单元位置,单元ID,单元类型
+```
+
+Aggregate a functional module by:
+
+```text
+(unit_position, unit_id, unit_variant, functional_module)
+```
+
+Never aggregate only by `functional_module` in a heterogeneous or composite
+unit. A cycle-wide rollup is a separate view, not a replacement for
+position/variant results.
+
+For a homogeneous repeated pattern, preserve individual positions when layer
+position changes routing load, shapes, communication or branches. Add a variant
+average only as a secondary summary.
+
+## Fusion and overlap
+
+Do not split the measured time of one fused CUDA kernel among its logical
+owners. Assign it to one architecture-level fusion group, list all logical
+owners, and set `attribution_policy: indivisible`.
+
+Report these module metrics separately:
+
+- stable position-aware kernel-duration sum
+- representative interval union
+- representative first-start-to-last-end wall span
+
+The first is GPU work, the second removes same-module overlap, and the third
+includes internal gaps. None is automatically critical-path contribution.
+
+## Validation failures
+
+Fail the package when:
+
+- model evidence is absent;
+- a declared variant lacks source evidence, ordered modules or discriminators;
+- a composite position cannot be resolved for every selected kernel;
+- final tables omit a declared variant or position;
+- a variant-specific required module is absent;
+- heterogeneous results are presented as generic single-layer duration;
+- a fused kernel is fractionally attributed without trace-level split evidence;
+- a previous model's labels are retained without current-model justification.

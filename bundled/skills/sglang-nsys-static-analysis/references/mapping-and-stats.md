@@ -16,10 +16,17 @@ and deployment wiring.
 
 Map each selected kernel using:
 
-1. described submodule boundary
-2. active source call/branch
-3. timestamp span and stream occurrence
-4. adjacent kernels and signature
+1. architecture-taxonomy position and variant
+2. described submodule boundary
+3. active source call/branch
+4. timestamp span and stream occurrence
+5. adjacent kernels and signature
+
+Annotate every row with `unit_position`, `unit_id` and `unit_variant`. Keep the
+same functional-module label in two variants only when its semantics are truly
+shared; the aggregation key still includes the structural position and variant.
+Never use a generic parent such as `Attention` to erase distinct KDA, MLA,
+state-space, recurrent, dense or sparse execution paths.
 
 Prefer stable high-level labels such as `self_attn`, `mlp/router`,
 `mlp/experts`, `attention/pre_norm`, `attention/post_merge` and
@@ -99,3 +106,6 @@ If no additional match exists, use a clearly marked single-sample fallback.
 
 For composite units also record layer count, ordered variants, occurrences per
 graph instance, cycle wall span and normalized average-per-layer wall span.
+Record per-position wall spans as well. A normalized cycle average is a
+supplementary metric and must not be presented as the duration of a specific
+variant.

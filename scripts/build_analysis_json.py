@@ -216,10 +216,23 @@ def build_operator_payload(
     category = rule.get("category", "auxiliary")
     if category not in {"core", "communication", "auxiliary"}:
         raise ValueError(f"invalid six-table category: {category}")
+    unit_position = view.get("单元位置") or raw.get("unit_position") or None
+    unit_id = view.get("单元ID") or raw.get("unit_id") or None
+    unit_variant = view.get("单元类型") or raw.get("unit_variant") or None
+    stage = view["功能模块"]
+    stage_key = "::".join(
+        str(value) for value in (unit_position, unit_id, unit_variant, stage)
+        if value not in (None, "")
+    )
     return {
         "index": int(raw["序号"]),
         "module": raw["module"],
-        "stage": view["功能模块"],
+        "stage": stage,
+        "stageKey": stage_key or stage,
+        "unitPosition": int(unit_position) if str(unit_position or "").isdigit() else None,
+        "unitId": unit_id,
+        "unitVariant": unit_variant,
+        "layerId": int(raw["layer_id"]) if str(raw.get("layer_id", "")).isdigit() else None,
         "name": view["算子名称"],
         "kernelName": compact_kernel_name(raw["operator_name"], view["算子名称"]),
         "fullName": raw["operator_name"],
@@ -241,8 +254,13 @@ def build_operator_payload(
     }
 
 
-def classification_key(row: dict[str, str]) -> tuple[str, str, float | None, str]:
+def classification_key(
+    row: dict[str, str],
+) -> tuple[str, str, str, str, str, float | None, str]:
     return (
+        row.get("单元位置", ""),
+        row.get("单元ID", ""),
+        row.get("单元类型", ""),
         row.get("功能模块", ""),
         row.get("算子名称", ""),
         number(row.get("算子耗时(us)")),
@@ -381,14 +399,89 @@ def main() -> None:
         "layer_count", "unit_layer_count",
         default=manifest.get("unit_layer_count"),
     )
+    composition = (
+        selected_unit.get("composition", [])
+        if isinstance(selected_unit, dict)
+        else []
+    )
+    distinct_variants = (
+        selected_unit.get("distinct_layer_variants")
+        if isinstance(selected_unit, dict)
+        else None
+    )
+    if not distinct_variants:
+        distinct_variants = sorted({
+            operator["unitVariant"]
+            for operator in operators
+            if operator.get("unitVariant")
+        })
+    heterogeneous = len(distinct_variants or []) > 1
     normalized_layer_duration = manifest.get("normalized_single_layer_duration_us")
     if normalized_layer_duration is None and isinstance(layer_count, int) and layer_count > 0:
         normalized_layer_duration = total_duration / layer_count
-    duration_label = (
-        "平均单层耗时"
-        if isinstance(layer_count, int) and layer_count > 1
-        else "单层耗时"
-    )
+    if heterogeneous:
+        duration_label = "结构周期耗时"
+        primary_duration = total_duration
+    elif isinstance(layer_count, int) and layer_count > 1:
+        duration_label = "平均结构单元耗时"
+        primary_duration = normalized_layer_duration or total_duration
+    else:
+        duration_label = "结构单元耗时"
+        primary_duration = total_duration
+
+    stage_payload = []
+    for row in stages:
+        unit_position = row.get("单元位置") or None
+        unit_id = row.get("单元ID") or None
+        unit_variant = row.get("单元类型") or None
+        name = row["功能模块"]
+        stage_key = "::".join(
+            str(value) for value in (unit_position, unit_id, unit_variant, name)
+            if value not in (None, "")
+        )
+        stage_payload.append({
+            "key": stage_key or name,
+            "name": name,
+            "unitPosition": int(unit_position) if str(unit_position or "").isdigit() else None,
+            "unitId": unit_id,
+            "unitVariant": unit_variant,
+            "durationUs": number(row["模块耗时(us)"]),
+            "durationPct": number(row["模块耗时占比(%)"]),
+            "busyUnionUs": number(row.get("代表区间并集(us)")),
+            "wallSpanUs": number(row.get("代表墙钟跨度(us)")),
+            "durationBasis": row.get("耗时口径") or "算子平均耗时之和",
+            "introduction": row["功能介绍"],
+        })
+
+    unit_groups: dict[tuple[int | None, str | None, str | None], list[dict[str, Any]]] = {}
+    for operator in operators:
+        group_key = (
+            operator.get("unitPosition"),
+            operator.get("unitId"),
+            operator.get("unitVariant"),
+        )
+        unit_groups.setdefault(group_key, []).append(operator)
+    units = []
+    for (position, unit_id, variant), rows in sorted(
+        unit_groups.items(), key=lambda item: (item[0][0] is None, item[0][0] or 0),
+    ):
+        starts = [row["startNs"] for row in rows]
+        ends = [row["endNs"] for row in rows]
+        units.append({
+            "position": position,
+            "id": unit_id,
+            "variant": variant,
+            "layerId": next((row["layerId"] for row in rows if row.get("layerId") is not None), None),
+            "operatorCount": len(rows),
+            "kernelTimeSumUs": sum(row["durationUs"] or 0 for row in rows),
+            "representativeWallSpanUs": (max(ends) - min(starts)) / 1000 if starts and ends else None,
+            "stageCount": sum(
+                1 for stage_row in stage_payload
+                if stage_row["unitPosition"] == position
+                and stage_row["unitId"] == unit_id
+                and stage_row["unitVariant"] == variant
+            ),
+        })
     payload = {
         "schemaVersion": "1.0",
         "metadata": {
@@ -409,20 +502,20 @@ def main() -> None:
         },
         "summary": {
             "totalDurationUs": total_duration,
+            "primaryDurationUs": primary_duration,
             "normalizedLayerDurationUs": normalized_layer_duration or total_duration,
+            "cycleAveragePerUnitUs": normalized_layer_duration,
             "durationLabel": duration_label,
             "unitLayerCount": layer_count or 1,
+            "heterogeneous": heterogeneous,
+            "distinctUnitVariants": distinct_variants or [],
             "operatorCount": len(operators),
             "stableSamples": stable_samples,
             "devices": devices,
             "maxMfu": max((op["mfu"] or 0 for op in operators), default=0),
         },
-        "stages": [{
-            "name": row["功能模块"],
-            "durationUs": number(row["模块耗时(us)"]),
-            "durationPct": number(row["模块耗时占比(%)"]),
-            "introduction": row["功能介绍"],
-        } for row in stages],
+        "units": units,
+        "stages": stage_payload,
         "classifications": classifications,
         "operators": operators,
         "evidence": {

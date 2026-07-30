@@ -1,4 +1,4 @@
 interface:
   display_name: "SGLang Nsys Static Analysis"
-  short_description: "Generate normalized six-table SGLang Nsys analysis"
-  default_prompt: "Use $sglang-nsys-static-analysis to analyze this SGLang Nsight Systems report and produce the normalized six-table CSV package."
+  short_description: "Generate architecture-aware six-table SGLang Nsys analysis"
+  default_prompt: "Use $sglang-nsys-static-analysis to derive and validate the current model architecture taxonomy, map this SGLang Nsight Systems report by structural unit and variant, and produce the normalized six-table CSV package."

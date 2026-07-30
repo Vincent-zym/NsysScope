@@ -33,6 +33,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("package", type=Path)
     parser.add_argument("--prefix", required=True)
     parser.add_argument("--analysis-json", type=Path)
+    parser.add_argument("--taxonomy", type=Path)
     parser.add_argument("--output", type=Path)
     return parser.parse_args()
 
@@ -52,13 +53,34 @@ def number(value: Any) -> float | None:
         return None
 
 
-def key(row: dict[str, str]) -> tuple[str, str, float | None, str]:
+def key(row: dict[str, str]) -> tuple[str, str, str, str, str, float | None, str]:
     return (
+        row.get("单元位置", ""),
+        row.get("单元ID", ""),
+        row.get("单元类型", ""),
         row.get("功能模块", ""),
         row.get("算子名称", ""),
         number(row.get("算子耗时(us)")),
         row.get("python_function", ""),
     )
+
+
+def portable_json(
+    metadata_root: Path, configured: Any, default_name: str,
+) -> dict[str, Any]:
+    local = metadata_root / default_name
+    if local.exists():
+        path = local
+    elif configured:
+        path = Path(str(configured))
+        if not path.is_absolute():
+            path = metadata_root / path
+        if not path.exists():
+            return {}
+    else:
+        return {}
+    value = json.loads(path.read_text())
+    return value if isinstance(value, dict) else {}
 
 
 def main() -> None:
@@ -76,6 +98,7 @@ def main() -> None:
     core = read_csv(root / f"{args.prefix}_core_compute_table.csv")
     auxiliary = read_csv(root / f"{args.prefix}_auxiliary_operator_table.csv")
     classes = read_csv(root / f"{args.prefix}_op_classification_table.csv")
+    stages = read_csv(root / f"{args.prefix}_stage_table.csv")
     origin_ops = [row for row in origin if row.get("module") != "__layer_total__"]
     if len(origin_ops) != len(overview):
         errors.append(f"origin/overview row mismatch: {len(origin_ops)} != {len(overview)}")
@@ -137,6 +160,11 @@ def main() -> None:
     )
     manifest_path = metadata_root / f"{args.prefix}_analysis_manifest.json"
     manifest = json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
+    taxonomy = portable_json(
+        metadata_root,
+        args.taxonomy or manifest.get("architecture_taxonomy"),
+        f"{args.prefix}_architecture_taxonomy.json",
+    )
     selected = (
         manifest.get("selected_unit")
         or manifest.get("repeating_unit")
@@ -154,6 +182,111 @@ def main() -> None:
         missing_variants = set(variants) - represented
         if missing_variants:
             errors.append(f"composite repeating unit omits variants: {sorted(missing_variants)}")
+        required_origin = {"unit_position", "unit_id", "unit_variant"}
+        required_view = {"单元位置", "单元ID", "单元类型"}
+        if origin_ops and not required_origin.issubset(origin_ops[0]):
+            errors.append("heterogeneous repeating unit needs unit fields in origin table")
+        if overview and not required_view.issubset(overview[0]):
+            errors.append("heterogeneous repeating unit needs unit fields in overview table")
+        if stages and not required_view.issubset(stages[0]):
+            errors.append("heterogeneous repeating unit needs unit fields in stage table")
+        if any(
+            not all(row.get(field) for field in required_origin)
+            for row in origin_ops
+        ):
+            errors.append("heterogeneous repeating unit has unscoped origin rows")
+        table_variants = {row.get("单元类型") for row in overview if row.get("单元类型")}
+        if table_variants != set(variants):
+            errors.append(
+                f"overview variants {sorted(table_variants)} do not match manifest {sorted(variants)}"
+            )
+        stage_variants = {row.get("单元类型") for row in stages if row.get("单元类型")}
+        if stage_variants != set(variants):
+            errors.append(
+                f"stage variants {sorted(stage_variants)} do not match manifest {sorted(variants)}"
+            )
+        positions = {
+            str(item.get("position")): item
+            for item in composition
+            if isinstance(item, dict) and item.get("position") is not None
+        }
+        if not positions:
+            positions = {
+                str(index): item
+                for index, item in enumerate(composition, 1)
+                if isinstance(item, dict)
+            }
+        for position, item in positions.items():
+            rows = [row for row in overview if row.get("单元位置") == position]
+            if not rows:
+                errors.append(f"composite position {position} has no overview rows")
+                continue
+            expected_variant = item.get("unit_variant") or item.get("variant")
+            if expected_variant and {row.get("单元类型") for row in rows} != {expected_variant}:
+                errors.append(f"composite position {position} changes its variant")
+
+    if taxonomy:
+        taxonomy_positions = {
+            str(item.get("position")): item
+            for item in (taxonomy.get("repeating_unit") or {}).get("positions", [])
+            if isinstance(item, dict) and item.get("position") is not None
+        }
+        emitted_positions = {
+            row.get("单元位置") for row in overview if row.get("单元位置")
+        }
+        if emitted_positions != set(taxonomy_positions):
+            errors.append(
+                "overview positions do not exactly match architecture taxonomy: "
+                f"{sorted(emitted_positions)} != {sorted(taxonomy_positions)}"
+            )
+        for position, definition in taxonomy_positions.items():
+            expected_id = str(definition.get("unit_id") or "")
+            expected_variant = str(definition.get("unit_variant") or "")
+            origin_rows = [
+                row for row in origin_ops if row.get("unit_position") == position
+            ]
+            overview_rows = [
+                row for row in overview if row.get("单元位置") == position
+            ]
+            stage_rows = [
+                row for row in stages if row.get("单元位置") == position
+            ]
+            if not origin_rows or not overview_rows or not stage_rows:
+                errors.append(
+                    f"taxonomy position {position} must appear in origin, overview and stage tables"
+                )
+                continue
+            if {
+                (row.get("unit_id"), row.get("unit_variant"))
+                for row in origin_rows
+            } != {(expected_id, expected_variant)}:
+                errors.append(f"origin identity changes at taxonomy position {position}")
+            if {
+                (row.get("单元ID"), row.get("单元类型"))
+                for row in [*overview_rows, *stage_rows]
+            } != {(expected_id, expected_variant)}:
+                errors.append(f"human-facing identity changes at taxonomy position {position}")
+
+        taxonomy_variants = {
+            item.get("name"): item
+            for item in taxonomy.get("variants", [])
+            if isinstance(item, dict) and item.get("name")
+        }
+        for variant, definition in taxonomy_variants.items():
+            present_modules = {
+                row.get("功能模块")
+                for row in stages
+                if row.get("单元类型") == variant
+            }
+            expected_modules = set(definition.get("ordered_functional_modules") or [])
+            missing_modules = expected_modules - present_modules
+            if missing_modules:
+                errors.append(
+                    f"variant {variant} misses functional modules: {sorted(missing_modules)}"
+                )
+            distinctive = set(definition.get("distinctive_functional_modules") or [])
+            if len(taxonomy_variants) > 1 and distinctive and not distinctive & present_modules:
+                errors.append(f"variant {variant} has no distinguishing module in stage output")
 
     analysis = None
     if args.analysis_json and args.analysis_json.exists():
@@ -180,9 +313,21 @@ def main() -> None:
         )
         if expected_samples is not None and analysis.get("summary", {}).get("stableSamples") != int(expected_samples):
             errors.append("analysis.json stableSamples disagrees with manifest")
+        if isinstance(variants, list) and len(variants) > 1:
+            frontend_variants = {
+                row.get("unitVariant")
+                for row in analysis.get("operators", [])
+                if row.get("unitVariant")
+            }
+            if frontend_variants != set(variants):
+                errors.append("analysis.json loses heterogeneous unit variants")
+            if analysis.get("summary", {}).get("durationLabel") in {
+                "单层耗时", "平均单层耗时",
+            }:
+                errors.append("heterogeneous cycle must not be presented as single-layer duration")
 
     report = {
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "status": "failed" if errors else "passed",
         "errors": errors,
         "operator_count": len(overview),

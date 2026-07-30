@@ -95,6 +95,14 @@ Both providers receive the same prompt and task materials, activate the same
 and pass the same deterministic validation before the dashboard accepts the
 result.
 
+For every new composite or heterogeneous model, the Skill first creates a
+current-model architecture taxonomy. Each operator and functional stage carries
+its structural position, concrete unit ID and architecture variant. Aggregation
+uses `(position, unit, variant, functional module)`, so mixed patterns such as
+`KDA,KDA,KDA,MLA` cannot collapse into a generic Attention average. The
+dashboard exposes the complete cycle and every structural unit as separate
+views.
+
 Provider readiness is shown in the **新建分析** dialog. Log in when needed:
 
 ```bash

@@ -317,6 +317,77 @@ def test_frontend_payload_preserves_validated_six_table_category() -> None:
         assert operator["category"] == "core"
 
 
+def test_frontend_payload_preserves_structural_unit_identity() -> None:
+    raw = {
+        "序号": "44",
+        "module": "layers.7/attention/mla_core",
+        "operator_name": "mla_decode_kernel",
+        "duration_min_us": "170",
+        "duration_max_us": "190",
+        "duration_diff_us": "20",
+        "start_ns": "1000",
+        "end_ns": "181000",
+        "device": "0",
+        "stream": "7",
+        "layer_id": "7",
+        "unit_position": "4",
+        "unit_id": "layer.7",
+        "unit_variant": "MLA+LatentMoE",
+        "python_function": "KimiK3MLAAttention.forward",
+        "mapping_reason": "current-model source and trace",
+    }
+    view = {
+        "单元位置": "4",
+        "单元ID": "layer.7",
+        "单元类型": "MLA+LatentMoE",
+        "功能模块": "MLA Decode 核心",
+        "算子名称": "mla_decode_kernel",
+        "算子耗时(us)": "180",
+        "算子耗时占比(%)": "8.7",
+        "shape": "",
+        "mfu": "",
+        "功能介绍": "MLA decode attention core",
+    }
+
+    operator = build_operator_payload(raw, view, {"category": "core"})
+
+    assert operator["unitPosition"] == 4
+    assert operator["unitId"] == "layer.7"
+    assert operator["unitVariant"] == "MLA+LatentMoE"
+    assert operator["layerId"] == 7
+    assert operator["stageKey"] == (
+        "4::layer.7::MLA+LatentMoE::MLA Decode 核心"
+    )
+
+
+def test_validate_analysis_rejects_collapsed_heterogeneous_cycle(tmp_path: Path) -> None:
+    path = tmp_path / "analysis.json"
+    path.write_text(json.dumps({
+        "schemaVersion": "1.0",
+        "summary": {
+            "operatorCount": 1,
+            "devices": [0],
+            "stableSamples": 1,
+            "heterogeneous": True,
+            "distinctUnitVariants": ["KDA", "MLA"],
+            "durationLabel": "平均单层耗时",
+        },
+        "operators": [{
+            "category": "core",
+            "unitPosition": 1,
+            "unitId": "layer.4",
+            "unitVariant": "KDA",
+        }],
+    }))
+
+    try:
+        JobRunner.validate_analysis(path)
+    except RuntimeError as exc:
+        assert "loses heterogeneous unit variants" in str(exc)
+    else:
+        raise AssertionError("collapsed heterogeneous analysis should be rejected")
+
+
 def test_log_pagination_and_conversion_retry(tmp_path: Path) -> None:
     if not PACKAGE.exists():
         return

@@ -410,12 +410,19 @@ Write all artifacts only under:
 Requirements:
 1. Run `scripts/audit_runtime_evidence.py` first. Captured server args/environment
    override launch intent and source defaults; record every conflict.
-2. Read model evidence and derive a task-specific functional taxonomy.
+2. Read model evidence and write `{request.prefix}_architecture_taxonomy.json`
+   before mapping kernels. Validate it with
+   `scripts/validate_architecture_taxonomy.py`. It must define every structural
+   position/variant, ordered functional modules, discriminators, shared paths
+   and indivisible fusion groups from this model's evidence.
 3. Select and prove the exact complete unit required by `user_acceptance_criteria`.
    Without an explicit subtype request, include every distinct layer variant in
    the smallest structural cycle; never present one convenient subtype as the
    model's generic single layer.
-4. Generate the normalized six CSV tables with prefix `{request.prefix}`.
+4. Annotate every selected kernel with unit_position, unit_id and unit_variant.
+   Aggregate stages by position × id × variant × functional module, never by
+   functional-module label alone. Generate the normalized six CSV tables with
+   prefix `{request.prefix}`.
 5. Write `{request.prefix}_analysis_manifest.json`, semantic map, stable-statistics sidecar,
    and `validation_report.json`.
 6. Compute MFU for every eligible GEMM when shape and a bundled verified hardware
@@ -423,7 +430,7 @@ Requirements:
    peak and source; "new model" is not a reason to leave MFU blank.
 7. Never infer CPU delay from zero-kernel GPU idle. Require CUDA Runtime launch
    timestamp evidence or label the interval GPU idle/queue/dependency gap.
-8. Run `scripts/validate_analysis_package.py` and finish only when every required
+8. Run `scripts/validate_analysis_package.py` with the taxonomy and finish only when every required
    invariant, including the requested scope, passes. The manifest boundary
    evidence must explicitly show how the selected unit satisfies the acceptance
    criteria.
@@ -842,6 +849,41 @@ Requirements:
             raise RuntimeError("analysis.json operatorCount disagrees with operators")
         if not summary.get("devices") or int(summary.get("stableSamples", 0)) < 1:
             raise RuntimeError("analysis.json stable sample/device scope is missing")
+        if summary.get("heterogeneous"):
+            variants = set(summary.get("distinctUnitVariants") or [])
+            operator_variants = {
+                operator.get("unitVariant")
+                for operator in operators
+                if operator.get("unitVariant")
+            }
+            if len(variants) < 2 or operator_variants != variants:
+                raise RuntimeError("analysis.json loses heterogeneous unit variants")
+            if any(
+                operator.get("unitPosition") is None or not operator.get("unitId")
+                for operator in operators
+            ):
+                raise RuntimeError("heterogeneous analysis has unscoped operators")
+            if summary.get("durationLabel") in {"单层耗时", "平均单层耗时"}:
+                raise RuntimeError("heterogeneous cycle is mislabeled as single-layer duration")
+            stages = payload.get("stages") or []
+            stage_variants = {
+                stage.get("unitVariant")
+                for stage in stages
+                if stage.get("unitVariant")
+            }
+            if stage_variants != variants or any(
+                stage.get("unitPosition") is None or not stage.get("unitId")
+                for stage in stages
+            ):
+                raise RuntimeError("heterogeneous stage view loses structural-unit identity")
+            units = payload.get("units") or []
+            if len(units) < 2 or {
+                unit.get("variant") for unit in units if unit.get("variant")
+            } != variants:
+                raise RuntimeError("heterogeneous analysis needs an explicit structural-unit index")
+            unit_positions = [unit.get("position") for unit in units]
+            if unit_positions != list(range(1, len(units) + 1)):
+                raise RuntimeError("structural-unit positions must be contiguous and ordered")
 
     def validate_package(
         self, package: Path, prefix: str, *, analysis_path: Path | None = None,

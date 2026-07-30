@@ -55,12 +55,16 @@ Identify candidate boundaries using, in descending confidence:
 The repeating unit is the smallest complete sequence that repeats. It may be a
 single layer or a composite such as alternating CSA/HCA or
 `[C128,C4,C4,C4,C4]`. Emit one window and one origin timeline for the full unit.
-Keep common module labels; record sub-layer types in the manifest rather than
-prefixing every label.
+Keep a common module label only when its semantics are truly shared. Record
+every structural position and subtype in row-level unit fields, not only in the
+manifest. Give variant-specific paths distinct architecture-defined labels;
+do not hide materially different cores behind generic Attention names.
 
-Verify window completeness against the active forward path. For Transformer-like
-layers check pre-attention norm, attention, post-attention merge, pre-FFN norm,
-MLP/MoE, and final post-FFN merge. Confirm the next kernel begins the next unit.
+Verify window completeness against the active, architecture-defined forward
+path. For Transformer-like layers this may include pre-attention norm,
+attention, post-attention merge, pre-FFN norm, MLP/MoE and final merge; for
+state-space, hybrid, encoder-decoder or other blocks use their own declared
+ordered modules. Confirm the next kernel begins the next unit.
 
 Do not choose one convenient layer from an interleaved architecture. A
 `KDA,KDA,KDA,MLA` pattern is a four-layer structural unit unless the user

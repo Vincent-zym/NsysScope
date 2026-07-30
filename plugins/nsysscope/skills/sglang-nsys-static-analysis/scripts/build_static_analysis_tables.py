@@ -19,25 +19,33 @@ from typing import Any
 
 ORIGIN_COLUMNS = [
     "序号", "module", "operator_name", "duration_us", "start_ns", "end_ns",
-    "device", "stream", "layer_id", "duration_min_us", "duration_max_us",
+    "device", "stream", "layer_id", "unit_position", "unit_id", "unit_variant",
+    "duration_min_us", "duration_max_us",
     "duration_diff_us", "duration_avg_us", "duration_avg_pct_of_total",
     "python_function", "function_introduction", "mapping_reason",
 ]
 OPERATOR_COLUMNS = [
-    "序号", "功能模块", "算子名称", "算子耗时(us)", "算子耗时占比(%)",
+    "序号", "单元位置", "单元ID", "单元类型", "功能模块", "算子名称",
+    "算子耗时(us)", "算子耗时占比(%)",
     "shape", "mfu", "模块耗时(us)", "模块耗时占比(%)", "python_function",
     "功能介绍",
 ]
 CORE_COLUMNS = [
-    "序号", "功能模块", "module", "算子名称", "算子耗时(us)",
+    "序号", "单元位置", "单元ID", "单元类型", "功能模块", "module",
+    "算子名称", "算子耗时(us)",
     "算子耗时占比(%)", "shape", "mfu", "python_function", "功能介绍",
 ]
 AUX_COLUMNS = [
-    "序号", "功能模块", "算子名称", "算子耗时(us)", "算子耗时占比(%)",
+    "序号", "单元位置", "单元ID", "单元类型", "功能模块", "算子名称",
+    "算子耗时(us)", "算子耗时占比(%)",
     "python_function", "功能介绍",
 ]
 CLASS_COLUMNS = ["序号", "算子类型", "算子数量", "总耗时(us)", "耗时占比(%)"]
-STAGE_COLUMNS = ["序号", "功能模块", "模块耗时(us)", "模块耗时占比(%)", "功能介绍"]
+STAGE_COLUMNS = [
+    "序号", "单元位置", "单元ID", "单元类型", "功能模块",
+    "模块耗时(us)", "模块耗时占比(%)", "代表区间并集(us)",
+    "代表墙钟跨度(us)", "耗时口径", "功能介绍",
+]
 
 CATEGORY_NAMES = {
     "core": "核心计算",
@@ -108,6 +116,11 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         help="Optional JSON containing ordered model-aware rules and hardware peaks.",
     )
+    parser.add_argument(
+        "--taxonomy",
+        type=Path,
+        help="Validated architecture taxonomy describing the repeating-unit positions and variants.",
+    )
     parser.add_argument("--hardware", help="Hardware key used by semantic-map hardware_tflops")
     parser.add_argument(
         "--hardware-profiles",
@@ -154,6 +167,163 @@ def load_semantics(path: Path | None) -> dict[str, Any]:
         if rule.get("core_kind") not in (None, "gemm", "attention"):
             raise ValueError(f"semantic rule {index} has invalid core_kind")
     return data
+
+
+def load_taxonomy(path: Path | None) -> dict[str, Any]:
+    if path is None:
+        return {}
+    data = json.loads(path.read_text())
+    if not isinstance(data, dict):
+        raise ValueError("architecture taxonomy must be a JSON object")
+    if data.get("schema_version") != "1.0":
+        raise ValueError("architecture taxonomy schema_version must be 1.0")
+    repeating = data.get("repeating_unit")
+    variants = data.get("variants")
+    evidence = data.get("evidence")
+    if not isinstance(repeating, dict) or not isinstance(repeating.get("positions"), list):
+        raise ValueError("architecture taxonomy needs repeating_unit.positions")
+    if not isinstance(variants, list) or not variants:
+        raise ValueError("architecture taxonomy needs a non-empty variants list")
+    if not isinstance(evidence, list) or not evidence:
+        raise ValueError("architecture taxonomy needs model-specific evidence")
+
+    variant_names = {
+        item.get("name") for item in variants
+        if isinstance(item, dict) and isinstance(item.get("name"), str)
+    }
+    if len(variant_names) != len(variants):
+        raise ValueError("architecture taxonomy variant names must be non-empty and unique")
+    positions = repeating["positions"]
+    seen_positions: set[int] = set()
+    seen_unit_ids: set[str] = set()
+    for item in positions:
+        if not isinstance(item, dict):
+            raise ValueError("each repeating-unit position must be an object")
+        position = item.get("position")
+        variant = item.get("unit_variant")
+        if not isinstance(position, int) or position <= 0 or position in seen_positions:
+            raise ValueError("repeating-unit positions must be unique positive integers")
+        if variant not in variant_names:
+            raise ValueError(f"position {position} references undeclared variant {variant!r}")
+        if not item.get("unit_id"):
+            raise ValueError(f"position {position} needs unit_id")
+        if str(item["unit_id"]) in seen_unit_ids:
+            raise ValueError(f"position {position} repeats unit_id {item['unit_id']!r}")
+        seen_positions.add(position)
+        seen_unit_ids.add(str(item["unit_id"]))
+    if seen_positions != set(range(1, len(positions) + 1)):
+        raise ValueError("repeating-unit positions must be contiguous from 1")
+
+    for item in variants:
+        modules = item.get("ordered_functional_modules")
+        if not item.get("source_evidence"):
+            raise ValueError(f"variant {item.get('name')!r} needs source_evidence")
+        if (
+            not isinstance(modules, list)
+            or not modules
+            or any(not isinstance(module, str) or not module.strip() for module in modules)
+            or len(set(modules)) != len(modules)
+        ):
+            raise ValueError(
+                f"variant {item.get('name')!r} needs unique ordered_functional_modules"
+            )
+        if len(variant_names) > 1:
+            if not isinstance(item.get("discriminators"), list) or not item["discriminators"]:
+                raise ValueError(
+                    f"variant {item.get('name')!r} needs model/trace discriminators"
+                )
+    declared_modules = {
+        module
+        for item in variants
+        for module in item.get("ordered_functional_modules", [])
+    }
+    for group in data.get("fusion_groups", []):
+        if (
+            not isinstance(group, dict)
+            or len(group.get("logical_owners") or []) < 2
+            or group.get("attribution_policy") != "indivisible"
+            or group.get("name") not in declared_modules
+        ):
+            raise ValueError(
+                "fusion_groups need a declared module name, at least two logical_owners "
+                "and attribution_policy=indivisible"
+            )
+    return data
+
+
+def taxonomy_position_for_row(
+    row: dict[str, str], taxonomy: dict[str, Any],
+) -> dict[str, Any]:
+    positions = (taxonomy.get("repeating_unit") or {}).get("positions") or []
+    layer_id = str(row.get("layer_id", "")).strip()
+    module = row.get("module", "")
+    matches = []
+    for item in positions:
+        layer_match = item.get("layer_id")
+        module_regex = item.get("module_regex")
+        if layer_match not in (None, "") and str(layer_match) == layer_id:
+            matches.append(item)
+        elif module_regex and re.search(str(module_regex), module, re.I):
+            matches.append(item)
+    if len(matches) > 1:
+        raise ValueError(f"row matches multiple taxonomy positions: {module}")
+    return matches[0] if matches else {}
+
+
+def resolve_unit_fields(
+    row: dict[str, str], rule: dict[str, Any], taxonomy: dict[str, Any],
+) -> tuple[str, str, str]:
+    position = taxonomy_position_for_row(row, taxonomy)
+    unit_position = str(
+        row.get("unit_position")
+        or rule.get("unit_position")
+        or position.get("position")
+        or ""
+    )
+    unit_id = str(
+        row.get("unit_id")
+        or rule.get("unit_id")
+        or position.get("unit_id")
+        or ""
+    )
+    unit_variant = str(
+        row.get("unit_variant")
+        or rule.get("unit_variant")
+        or position.get("unit_variant")
+        or ""
+    )
+    if taxonomy and row.get("module") != "__layer_total__":
+        if not all((unit_position, unit_id, unit_variant)):
+            raise ValueError(
+                f"taxonomy could not resolve unit position/id/variant for {row.get('module')}"
+            )
+    return unit_position, unit_id, unit_variant
+
+
+def interval_metrics(rows: list[dict[str, Any]]) -> tuple[float, float]:
+    intervals = sorted(
+        (
+            int(row["start_ns"]),
+            int(row["end_ns"]),
+        )
+        for row in rows
+        if str(row.get("start_ns", "")).isdigit()
+        and str(row.get("end_ns", "")).isdigit()
+        and int(row["end_ns"]) > int(row["start_ns"])
+    )
+    if not intervals:
+        return 0.0, 0.0
+    union_ns = 0
+    current_start, current_end = intervals[0]
+    for start, end in intervals[1:]:
+        if start <= current_end:
+            current_end = max(current_end, end)
+        else:
+            union_ns += current_end - current_start
+            current_start, current_end = start, end
+    union_ns += current_end - current_start
+    wall_ns = max(end for _, end in intervals) - min(start for start, _ in intervals)
+    return union_ns / 1000.0, wall_ns / 1000.0
 
 
 def number(value: Any) -> float | None:
@@ -388,6 +558,7 @@ def main() -> None:
     args = parse_args()
     _, source_rows = read_csv(args.origin_csv)
     semantics = load_semantics(args.semantic_map)
+    taxonomy = load_taxonomy(args.taxonomy)
     hardware_profiles = load_hardware_profiles(args.hardware_profiles)
     rules = semantics.get("rules", [])
 
@@ -412,8 +583,14 @@ def main() -> None:
     mfu_evidence: list[dict[str, Any]] = []
     for index, row in enumerate(source_rows, 1):
         rule = {} if row.get("module") == "__layer_total__" else match_rule(row, rules)
+        unit_position, unit_id, unit_variant = resolve_unit_fields(
+            row, rule, taxonomy,
+        )
         normalized = {column: row.get(column, "") for column in ORIGIN_COLUMNS}
         normalized["序号"] = index
+        normalized["unit_position"] = unit_position
+        normalized["unit_id"] = unit_id
+        normalized["unit_variant"] = unit_variant
         if not normalized["function_introduction"]:
             if row.get("module") == "__layer_total__":
                 normalized["function_introduction"] = "完整重复单元时间窗"
@@ -451,6 +628,9 @@ def main() -> None:
             mfu_evidence.append(evidence)
         enriched.append({
             "module": row.get("module", ""),
+            "单元位置": unit_position,
+            "单元ID": unit_id,
+            "单元类型": unit_variant,
             "功能模块": functional_module,
             "算子名称": operator_table_name(
                 row.get("operator_name", ""), rule.get("operator_name"),
@@ -463,21 +643,34 @@ def main() -> None:
             "功能介绍": introduction,
             "stage_introduction": str(rule.get("functional_introduction") or introduction),
             "category": category,
+            "start_ns": row.get("start_ns", ""),
+            "end_ns": row.get("end_ns", ""),
         })
 
-    module_duration: dict[str, float] = defaultdict(float)
-    module_intro: dict[str, str] = {}
-    module_intro_priority: dict[str, int] = {}
+    def stage_key(row: dict[str, Any]) -> tuple[str, str, str, str]:
+        return (
+            str(row["单元位置"]),
+            str(row["单元ID"]),
+            str(row["单元类型"]),
+            str(row["功能模块"]),
+        )
+
+    module_duration: dict[tuple[str, str, str, str], float] = defaultdict(float)
+    module_rows: dict[tuple[str, str, str, str], list[dict[str, Any]]] = defaultdict(list)
+    module_intro: dict[tuple[str, str, str, str], str] = {}
+    module_intro_priority: dict[tuple[str, str, str, str], int] = {}
     for row in enriched:
-        module_duration[row["功能模块"]] += row["算子耗时(us)"]
+        key = stage_key(row)
+        module_duration[key] += row["算子耗时(us)"]
+        module_rows[key].append(row)
         priority = {"core": 3, "communication": 2, "auxiliary": 1}[row["category"]]
-        if priority > module_intro_priority.get(row["功能模块"], -1):
-            module_intro[row["功能模块"]] = row["stage_introduction"]
-            module_intro_priority[row["功能模块"]] = priority
+        if priority > module_intro_priority.get(key, -1):
+            module_intro[key] = row["stage_introduction"]
+            module_intro_priority[key] = priority
 
     operator_rows = []
     for index, row in enumerate(enriched, 1):
-        module_total = module_duration[row["功能模块"]]
+        module_total = module_duration[stage_key(row)]
         operator_rows.append({
             "序号": index,
             **row,
@@ -521,14 +714,27 @@ def main() -> None:
             "耗时占比(%)": fmt(duration / total_duration * 100.0),
         })
 
-    stage_source = sorted(module_duration.items(), key=lambda item: item[1], reverse=True)
+    stage_source = sorted(
+        module_duration.items(),
+        key=lambda item: (
+            int(item[0][0]) if item[0][0].isdigit() else 0,
+            -item[1],
+            item[0][3],
+        ),
+    )
     stage_rows = [{
         "序号": index,
-        "功能模块": module,
+        "单元位置": key[0],
+        "单元ID": key[1],
+        "单元类型": key[2],
+        "功能模块": key[3],
         "模块耗时(us)": fmt(duration),
         "模块耗时占比(%)": fmt(duration / total_duration * 100.0),
-        "功能介绍": module_intro[module],
-    } for index, (module, duration) in enumerate(stage_source, 1)]
+        "代表区间并集(us)": fmt(interval_metrics(module_rows[key])[0]),
+        "代表墙钟跨度(us)": fmt(interval_metrics(module_rows[key])[1]),
+        "耗时口径": "稳定样本逐算子平均耗时之和；区间指标来自代表样本且不拆分融合算子",
+        "功能介绍": module_intro[key],
+    } for index, (key, duration) in enumerate(stage_source, 1)]
 
     outputs = {
         f"{args.prefix}_operator_origin_table.csv": (ORIGIN_COLUMNS, origin_rows),
@@ -554,12 +760,20 @@ def main() -> None:
         "duration_basis": "duration_avg_us when available, otherwise duration_us",
         "percentage_denominator": "sqlite repeating-unit wall-span (__layer_total__)",
         "semantic_map": str(args.semantic_map) if args.semantic_map else None,
+        "architecture_taxonomy": str(args.taxonomy) if args.taxonomy else None,
+        "taxonomy_schema_version": taxonomy.get("schema_version") if taxonomy else None,
         "fallback_warning": (
             "Rows not matched by semantic-map use conservative cross-model heuristics; "
             "review model-specific functional modules before final handoff."
         ),
         "mfu_formula": "2*M*N*K/(duration_seconds*dense_peak_flops)",
         "mfu_evidence": mfu_evidence,
+        "module_duration_basis": {
+            "模块耗时(us)": "sum of position-aware average kernel durations",
+            "代表区间并集(us)": "representative-sample interval union",
+            "代表墙钟跨度(us)": "representative-sample first-start to last-end",
+            "fusion_policy": "indivisible fused kernels are never split among logical owners",
+        },
         "outputs": list(outputs),
     }
     (args.output_dir / f"{args.prefix}_analysis_manifest.json").write_text(
