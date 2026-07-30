@@ -240,8 +240,16 @@ start() {
   fi
   printf '  运行日志:  %s/analyzer.log（停止后自动清理）\n' "$RUNTIME_DIR"
   printf '\n'
-  printf '  如果通过 SSH 使用，请在本地电脑执行：\n'
-  printf '  ssh -N -L %s:127.0.0.1:%s <用户名>@<服务器地址>\n' "$ui_port" "$ui_port"
+  local ssh_local_port=""
+  if [[ -n "${SSH_TTY:-}" || -n "${SSH_CONNECTION:-}" || -n "${_P9K_SSH_TTY:-}" ]]; then
+    ssh_local_port="${NSYSSCOPE_SSH_LOCAL_PORT:-$((ui_port + 10000))}"
+    printf '  SSH 转发（远端 %s，本地 %s），请在本地电脑执行：\n' "$ui_port" "$ssh_local_port"
+    printf '  ssh -N -L %s:127.0.0.1:%s <用户名>@<服务器地址>\n' "$ssh_local_port" "$ui_port"
+    printf '  浏览器地址: http://127.0.0.1:%s\n' "$ssh_local_port"
+  else
+    printf '  如果通过 SSH 使用，请在本地电脑执行：\n'
+    printf '  ssh -N -L %s:127.0.0.1:%s <用户名>@<服务器地址>\n' "$ui_port" "$ui_port"
+  fi
   printf '\n'
   say "按 Ctrl-C 停止全部服务"
 

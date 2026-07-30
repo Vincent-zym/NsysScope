@@ -52,8 +52,11 @@ http://127.0.0.1:3000
 ```
 
 For an SSH-connected server, keep `./nsysscope start` running and execute the
-printed one-port SSH forwarding command on the local computer. The browser no
-longer needs an Analyzer URL or API token.
+printed one-port SSH forwarding command on the local computer. The remote
+Analyzer port and local browser port are intentionally separate; by default
+the local port is `remote + 10000`, avoiding conflicts with local services on
+port 3000. Override it with `NSYSSCOPE_SSH_LOCAL_PORT` when needed. The browser
+no longer needs an Analyzer URL or API token.
 
 Loopback pages also detect the local Analyzer from the hostname, ignore stale
 remote API settings and retry transient startup failures automatically. The
