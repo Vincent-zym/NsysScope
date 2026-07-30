@@ -55,6 +55,11 @@ For an SSH-connected server, keep `./nsysscope start` running and execute the
 printed one-port SSH forwarding command on the local computer. The browser no
 longer needs an Analyzer URL or API token.
 
+Loopback pages also detect the local Analyzer from the hostname, ignore stale
+remote API settings and retry transient startup failures automatically. The
+dashboard entry page is not cached, so a newly started runtime cannot reuse an
+older hosted-mode connection configuration.
+
 Run the prerequisite check by itself with:
 
 ```bash

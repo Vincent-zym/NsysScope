@@ -314,7 +314,9 @@ function JobDialog({ open, onClose, onLoaded }) {
 
   useEffect(() => {
     if (!open) return;
-    const isLocal = Boolean(window.__NSYSSCOPE_LOCAL__);
+    const isLoopback = new Set(["localhost", "127.0.0.1", "::1", "[::1]"])
+      .has(window.location.hostname);
+    const isLocal = Boolean(window.__NSYSSCOPE_LOCAL__) || isLoopback;
     const defaultApi = isLocal ? "." : "/analyzer-api";
     // A local one-command launch must always talk to the Analyzer that served
     // this page. Reusing an old remote/manual URL makes Provider discovery
@@ -327,19 +329,51 @@ function JobDialog({ open, onClose, onLoaded }) {
 
   useEffect(() => {
     if (!open || !api) return;
-    const controller = new AbortController();
-    const timer = setTimeout(async () => {
-      setHealth({
-        state: "checking", message: "正在连接本地 Analyzer…", providers: null,
+    let stopped = false;
+    let retryTimer;
+    let controller;
+    let failures = 0;
+
+    async function requestHealth(base) {
+      const response = await fetch(`${base.replace(/\/$/, "")}/api/health`, {
+        headers: { "X-NsysScope-Token": token },
+        signal: controller.signal,
+        cache: "no-store",
       });
+      const text = await response.text();
+      let payload;
       try {
-        const response = await fetch(`${api.replace(/\/$/, "")}/api/health`, {
-          headers: { "X-NsysScope-Token": token },
-          signal: controller.signal,
-          cache: "no-store",
+        payload = JSON.parse(text);
+      } catch {
+        payload = { detail: text.trim() };
+      }
+      if (!response.ok) {
+        const error = new Error(payload.detail || `HTTP ${response.status}`);
+        error.status = response.status;
+        throw error;
+      }
+      return payload;
+    }
+
+    async function checkHealth() {
+      controller = new AbortController();
+      if (failures === 0) {
+        setHealth({
+          state: "checking", message: "正在连接本地 Analyzer…", providers: null,
         });
-        const payload = await response.json();
-        if (!response.ok) throw new Error(payload.detail || `HTTP ${response.status}`);
+      }
+      try {
+        let payload;
+        try {
+          payload = await requestHealth(api);
+        } catch (cause) {
+          if (cause.status !== 404 || api === ".") throw cause;
+          payload = await requestHealth(".");
+          if (!stopped) {
+            setApi(".");
+          }
+        }
+        if (stopped) return;
         const providers = payload.providers || {
           codex: {
             enabled: Boolean(payload.codex_enabled),
@@ -365,14 +399,23 @@ function JobDialog({ open, onClose, onLoaded }) {
           providers,
         });
       } catch (cause) {
-        if (cause.name !== "AbortError") {
-          setHealth({ state: "offline", message: cause.message, providers: null });
-        }
+        if (stopped || cause.name === "AbortError") return;
+        failures += 1;
+        const retryDelay = Math.min(5000, 500 * (2 ** Math.min(failures - 1, 4)));
+        setHealth({
+          state: "offline",
+          message: `${cause.message || "连接失败"}；正在自动重试…`,
+          providers: null,
+        });
+        retryTimer = setTimeout(checkHealth, retryDelay);
       }
-    }, 250);
+    }
+
+    retryTimer = setTimeout(checkHealth, 250);
     return () => {
-      clearTimeout(timer);
-      controller.abort();
+      stopped = true;
+      clearTimeout(retryTimer);
+      controller?.abort();
     };
   }, [api, open, token]);
 
@@ -527,7 +570,16 @@ function JobDialog({ open, onClose, onLoaded }) {
       {!job ? <form onSubmit={submit}>
         <div className={`analyzer-connection ${health.state}`}>
           <i />
-          <div><b>{health.state === "ready" ? "本地执行器就绪" : "本地执行器需要配置"}</b><span>{health.message}</span></div>
+          <div>
+            <b>{health.state === "ready"
+              ? "本地执行器就绪"
+              : health.state === "warning"
+                ? "本地执行器已连接"
+                : health.state === "checking"
+                  ? "正在连接本地执行器"
+                  : "本地执行器正在重连"}</b>
+            <span>{health.message}</span>
+          </div>
         </div>
         <details className="advanced-connection">
           <summary>高级连接设置</summary>

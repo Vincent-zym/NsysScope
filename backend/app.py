@@ -31,6 +31,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         allow_headers=["Content-Type", "X-NsysScope-Token"],
     )
 
+    @app.middleware("http")
+    async def disable_dashboard_entry_cache(request, call_next):
+        response = await call_next(request)
+        if request.url.path in {"/", "/index.html"}:
+            response.headers["Cache-Control"] = "no-store"
+        return response
+
     def authorize(x_nsysscope_token: str = Header(default="")) -> None:
         if settings.api_token and not hmac.compare_digest(x_nsysscope_token, settings.api_token):
             raise HTTPException(status_code=401, detail="invalid API token")
