@@ -103,6 +103,11 @@ uses `(position, unit, variant, functional module)`, so mixed patterns such as
 dashboard exposes the complete cycle and every structural unit as separate
 views.
 
+Every newly generated CSV ends with a total row. Operator/category/stage totals
+represent accumulated GPU work and may exceed wall time under overlap. The
+operator overview also preserves the origin `module` column immediately before
+the compact operator name.
+
 Provider readiness is shown in the **新建分析** dialog. Log in when needed:
 
 ```bash

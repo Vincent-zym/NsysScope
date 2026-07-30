@@ -25,7 +25,8 @@ ORIGIN_COLUMNS = [
     "python_function", "function_introduction", "mapping_reason",
 ]
 OPERATOR_COLUMNS = [
-    "序号", "单元位置", "单元ID", "单元类型", "功能模块", "算子名称",
+    "序号", "单元位置", "单元ID", "单元类型", "功能模块", "module",
+    "算子名称",
     "算子耗时(us)", "算子耗时占比(%)",
     "shape", "mfu", "模块耗时(us)", "模块耗时占比(%)", "python_function",
     "功能介绍",
@@ -578,10 +579,33 @@ def main() -> None:
     if not total_duration or total_duration <= 0:
         raise ValueError("cannot derive positive layer/repeating-unit duration")
 
+    total_source = dict(total_candidates[-1]) if total_candidates else {}
+    total_source.update({
+        "module": "__layer_total__",
+        "operator_name": total_source.get("operator_name") or "__layer_total__",
+        "duration_us": total_source.get("duration_us") or fmt(total_duration),
+        "duration_avg_us": total_source.get("duration_avg_us") or fmt(total_duration),
+        "duration_avg_pct_of_total": "100.000",
+        "start_ns": total_source.get("start_ns") or min(
+            (row.get("start_ns", "") for row in kernel_rows),
+            key=lambda value: int(value) if str(value).isdigit() else 2**63,
+            default="",
+        ),
+        "end_ns": total_source.get("end_ns") or max(
+            (row.get("end_ns", "") for row in kernel_rows),
+            key=lambda value: int(value) if str(value).isdigit() else -1,
+            default="",
+        ),
+        "unit_position": "",
+        "unit_id": "",
+        "unit_variant": "",
+    })
+    ordered_source_rows = [*kernel_rows, total_source]
+
     enriched: list[dict[str, Any]] = []
     origin_rows: list[dict[str, Any]] = []
     mfu_evidence: list[dict[str, Any]] = []
-    for index, row in enumerate(source_rows, 1):
+    for index, row in enumerate(ordered_source_rows, 1):
         rule = {} if row.get("module") == "__layer_total__" else match_rule(row, rules)
         unit_position, unit_id, unit_variant = resolve_unit_fields(
             row, rule, taxonomy,
@@ -679,6 +703,19 @@ def main() -> None:
             "模块耗时(us)": fmt(module_total),
             "模块耗时占比(%)": fmt(module_total / total_duration * 100.0),
         })
+    accumulated_duration = sum(row["算子耗时(us)"] for row in enriched)
+    accumulated_pct = accumulated_duration / total_duration * 100.0
+    operator_rows.append({
+        "序号": "总计",
+        "功能模块": "总计",
+        "module": "__total__",
+        "算子名称": "总计",
+        "算子耗时(us)": fmt(accumulated_duration),
+        "算子耗时占比(%)": fmt(accumulated_pct),
+        "模块耗时(us)": fmt(accumulated_duration),
+        "模块耗时占比(%)": fmt(accumulated_pct),
+        "功能介绍": "全部算子稳定样本平均耗时之和；因并行重叠可能超过重复单元墙钟耗时。",
+    })
 
     core_source = sorted(
         (r for r in enriched if r["category"] == "core"),
@@ -690,6 +727,16 @@ def main() -> None:
         "算子耗时(us)": fmt(row["算子耗时(us)"]),
         "算子耗时占比(%)": fmt(row["算子耗时占比(%)"]),
     } for index, row in enumerate(core_source, 1)]
+    core_duration = sum(row["算子耗时(us)"] for row in core_source)
+    core_rows.append({
+        "序号": "总计",
+        "功能模块": "总计",
+        "module": "__total__",
+        "算子名称": "总计",
+        "算子耗时(us)": fmt(core_duration),
+        "算子耗时占比(%)": fmt(core_duration / total_duration * 100.0),
+        "功能介绍": "核心计算算子稳定样本平均耗时之和。",
+    })
 
     aux_source = sorted(
         (r for r in enriched if r["category"] == "auxiliary"),
@@ -701,6 +748,15 @@ def main() -> None:
         "算子耗时(us)": fmt(row["算子耗时(us)"]),
         "算子耗时占比(%)": fmt(row["算子耗时占比(%)"]),
     } for index, row in enumerate(aux_source, 1)]
+    auxiliary_duration = sum(row["算子耗时(us)"] for row in aux_source)
+    aux_rows.append({
+        "序号": "总计",
+        "功能模块": "总计",
+        "算子名称": "总计",
+        "算子耗时(us)": fmt(auxiliary_duration),
+        "算子耗时占比(%)": fmt(auxiliary_duration / total_duration * 100.0),
+        "功能介绍": "辅助算子稳定样本平均耗时之和。",
+    })
 
     class_rows = []
     for index, category in enumerate(("core", "communication", "auxiliary"), 1):
@@ -713,6 +769,13 @@ def main() -> None:
             "总耗时(us)": fmt(duration),
             "耗时占比(%)": fmt(duration / total_duration * 100.0),
         })
+    class_rows.append({
+        "序号": "总计",
+        "算子类型": "总计",
+        "算子数量": len(enriched),
+        "总耗时(us)": fmt(accumulated_duration),
+        "耗时占比(%)": fmt(accumulated_pct),
+    })
 
     stage_source = sorted(
         module_duration.items(),
@@ -735,6 +798,17 @@ def main() -> None:
         "耗时口径": "稳定样本逐算子平均耗时之和；区间指标来自代表样本且不拆分融合算子",
         "功能介绍": module_intro[key],
     } for index, (key, duration) in enumerate(stage_source, 1)]
+    representative_union, representative_wall = interval_metrics(enriched)
+    stage_rows.append({
+        "序号": "总计",
+        "功能模块": "总计",
+        "模块耗时(us)": fmt(accumulated_duration),
+        "模块耗时占比(%)": fmt(accumulated_pct),
+        "代表区间并集(us)": fmt(representative_union),
+        "代表墙钟跨度(us)": fmt(representative_wall),
+        "耗时口径": "全部功能模块的稳定样本算子平均耗时之和；区间指标覆盖完整代表样本",
+        "功能介绍": "全部结构位置和功能模块总计。",
+    })
 
     outputs = {
         f"{args.prefix}_operator_origin_table.csv": (ORIGIN_COLUMNS, origin_rows),
@@ -762,6 +836,14 @@ def main() -> None:
         "semantic_map": str(args.semantic_map) if args.semantic_map else None,
         "architecture_taxonomy": str(args.taxonomy) if args.taxonomy else None,
         "taxonomy_schema_version": taxonomy.get("schema_version") if taxonomy else None,
+        "table_contract_version": "1.2",
+        "total_rows": {
+            "required": True,
+            "marker": "序号=总计；原始表使用 module=__layer_total__",
+            "operator_tables": "sum of stable per-operator average durations",
+            "origin_table": "repeating-unit wall-span",
+            "percentages_may_exceed_100_due_to_overlap": True,
+        },
         "fallback_warning": (
             "Rows not matched by semantic-map use conservative cross-model heuristics; "
             "review model-specific functional modules before final handoff."

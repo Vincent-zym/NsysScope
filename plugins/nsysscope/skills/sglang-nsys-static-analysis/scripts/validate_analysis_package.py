@@ -46,6 +46,15 @@ def read_csv(path: Path) -> list[dict[str, str]]:
         ]
 
 
+def read_fields(path: Path) -> list[str]:
+    with path.open(encoding="utf-8-sig", newline="") as handle:
+        return [str(field).strip() for field in (csv.DictReader(handle).fieldnames or [])]
+
+
+def is_total_row(row: dict[str, str]) -> bool:
+    return row.get("序号") == "总计"
+
+
 def number(value: Any) -> float | None:
     try:
         return None if value in (None, "") else float(str(value).rstrip("%"))
@@ -93,15 +102,33 @@ def main() -> None:
     if errors:
         raise SystemExit("; ".join(errors))
 
-    origin = read_csv(root / f"{args.prefix}_operator_origin_table.csv")
-    overview = read_csv(root / f"{args.prefix}_opreator_table.csv")
-    core = read_csv(root / f"{args.prefix}_core_compute_table.csv")
-    auxiliary = read_csv(root / f"{args.prefix}_auxiliary_operator_table.csv")
-    classes = read_csv(root / f"{args.prefix}_op_classification_table.csv")
-    stages = read_csv(root / f"{args.prefix}_stage_table.csv")
+    paths = {
+        "origin": root / f"{args.prefix}_operator_origin_table.csv",
+        "overview": root / f"{args.prefix}_opreator_table.csv",
+        "core": root / f"{args.prefix}_core_compute_table.csv",
+        "auxiliary": root / f"{args.prefix}_auxiliary_operator_table.csv",
+        "classes": root / f"{args.prefix}_op_classification_table.csv",
+        "stages": root / f"{args.prefix}_stage_table.csv",
+    }
+    origin = read_csv(paths["origin"])
+    overview_all = read_csv(paths["overview"])
+    core_all = read_csv(paths["core"])
+    auxiliary_all = read_csv(paths["auxiliary"])
+    classes_all = read_csv(paths["classes"])
+    stages_all = read_csv(paths["stages"])
+    overview = [row for row in overview_all if not is_total_row(row)]
+    core = [row for row in core_all if not is_total_row(row)]
+    auxiliary = [row for row in auxiliary_all if not is_total_row(row)]
+    classes = [row for row in classes_all if not is_total_row(row)]
+    stages = [row for row in stages_all if not is_total_row(row)]
     origin_ops = [row for row in origin if row.get("module") != "__layer_total__"]
     if len(origin_ops) != len(overview):
         errors.append(f"origin/overview row mismatch: {len(origin_ops)} != {len(overview)}")
+    for raw, view in zip(origin_ops, overview):
+        if view.get("module") and view["module"] != raw.get("module"):
+            errors.append(
+                f"overview module disagrees with origin at row {raw.get('序号')}"
+            )
 
     core_counter = Counter(key(row) for row in core)
     auxiliary_counter = Counter(key(row) for row in auxiliary)
@@ -160,6 +187,83 @@ def main() -> None:
     )
     manifest_path = metadata_root / f"{args.prefix}_analysis_manifest.json"
     manifest = json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
+    total_rows_required = bool(
+        (manifest.get("total_rows") or {}).get("required")
+        or str(manifest.get("table_contract_version") or "") >= "1.2"
+    )
+    total_rows = {
+        "origin": [row for row in origin if row.get("module") == "__layer_total__"],
+        "overview": [row for row in overview_all if is_total_row(row)],
+        "core": [row for row in core_all if is_total_row(row)],
+        "auxiliary": [row for row in auxiliary_all if is_total_row(row)],
+        "classes": [row for row in classes_all if is_total_row(row)],
+        "stages": [row for row in stages_all if is_total_row(row)],
+    }
+    if total_rows_required:
+        for name, rows in total_rows.items():
+            if len(rows) != 1:
+                errors.append(f"{name} table needs exactly one total row")
+        final_markers = {
+            "origin": bool(origin) and origin[-1].get("module") == "__layer_total__",
+            "overview": bool(overview_all) and is_total_row(overview_all[-1]),
+            "core": bool(core_all) and is_total_row(core_all[-1]),
+            "auxiliary": bool(auxiliary_all) and is_total_row(auxiliary_all[-1]),
+            "classes": bool(classes_all) and is_total_row(classes_all[-1]),
+            "stages": bool(stages_all) and is_total_row(stages_all[-1]),
+        }
+        for name, is_final in final_markers.items():
+            if not is_final:
+                errors.append(f"{name} total row must be the final row")
+
+        overview_fields = read_fields(paths["overview"])
+        try:
+            operator_index = overview_fields.index("算子名称")
+        except ValueError:
+            operator_index = -1
+        if operator_index <= 0 or overview_fields[operator_index - 1] != "module":
+            errors.append("overview module must immediately precede 算子名称")
+
+        accumulated_duration = sum(
+            number(row.get("算子耗时(us)")) or 0 for row in overview
+        )
+        core_duration = totals["core"]["duration"]
+        auxiliary_duration = totals["auxiliary"]["duration"]
+        total_duration = (
+            number(total_rows["origin"][0].get("duration_avg_us"))
+            or number(total_rows["origin"][0].get("duration_us"))
+            if total_rows["origin"] else None
+        )
+
+        def check_total(
+            name: str, field: str, expected: float, *, count_field: str | None = None,
+            expected_count: int | None = None,
+        ) -> None:
+            rows = total_rows[name]
+            if len(rows) != 1:
+                return
+            actual = number(rows[0].get(field))
+            if actual is None or not math.isclose(actual, expected, abs_tol=0.01):
+                errors.append(f"{name} total {field} disagrees with data rows")
+            if count_field and int(number(rows[0].get(count_field)) or -1) != expected_count:
+                errors.append(f"{name} total {count_field} disagrees with data rows")
+
+        check_total("overview", "算子耗时(us)", accumulated_duration)
+        check_total("overview", "模块耗时(us)", accumulated_duration)
+        check_total("core", "算子耗时(us)", core_duration)
+        check_total("auxiliary", "算子耗时(us)", auxiliary_duration)
+        check_total(
+            "classes", "总耗时(us)", accumulated_duration,
+            count_field="算子数量", expected_count=len(overview),
+        )
+        check_total("stages", "模块耗时(us)", accumulated_duration)
+        if total_duration is None or total_duration <= 0:
+            errors.append("origin total row needs a positive repeating-unit duration")
+        elif not math.isclose(
+            number(total_rows["origin"][0].get("duration_avg_pct_of_total")) or -1,
+            100.0,
+            abs_tol=0.01,
+        ):
+            errors.append("origin total row percentage must be 100")
     taxonomy = portable_json(
         metadata_root,
         args.taxonomy or manifest.get("architecture_taxonomy"),

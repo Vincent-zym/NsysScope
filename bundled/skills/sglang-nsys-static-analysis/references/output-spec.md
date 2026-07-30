@@ -4,9 +4,10 @@
 
 1. Required artifacts
 2. Columns
-3. Taxonomy and semantic mapping
-4. MFU and operator categories
-5. Validation invariants
+3. Total rows
+4. Taxonomy and semantic mapping
+5. MFU and operator categories
+6. Validation invariants
 
 ## Required artifacts
 
@@ -39,9 +40,12 @@ function_introduction,mapping_reason
 Operator overview:
 
 ```text
-序号,单元位置,单元ID,单元类型,功能模块,算子名称,算子耗时(us),
+序号,单元位置,单元ID,单元类型,功能模块,module,算子名称,算子耗时(us),
 算子耗时占比(%),shape,mfu,模块耗时(us),模块耗时占比(%),python_function,功能介绍
 ```
+
+The overview `module` column is mandatory and immediately precedes `算子名称`.
+It is copied from the origin table without semantic relabeling.
 
 Core compute:
 
@@ -79,6 +83,24 @@ gaps. None is automatically a critical-path attribution.
 
 Origin keeps full demangled names. Other tables use compact CUDA leaf symbols.
 Put semantic descriptions in `功能介绍`, never in `算子名称`.
+
+## Total rows
+
+Every CSV ends with exactly one total row:
+
+- origin: the final `module=__layer_total__` row reports repeating-unit wall
+  span and `duration_avg_pct_of_total=100`;
+- overview: `序号=总计` reports the sum of all operator average durations in
+  both operator/module total fields;
+- core and auxiliary: `序号=总计` reports the corresponding category sum;
+- classification: the fourth row is `总计`, with total operator count and the
+  sum of all three category durations;
+- stage: `序号=总计` reports the sum of all position-aware functional modules,
+  plus full representative-sample interval union and wall span.
+
+Operator, category and stage totals are accumulated GPU work. They may exceed
+the repeating-unit wall span or 100% when streams overlap. Do not replace them
+with wall time merely to force 100%.
 
 ## Taxonomy and semantic mapping
 
@@ -139,6 +161,8 @@ and metadata transforms are auxiliary even inside a core-owning stage.
 ## Validation invariants
 
 - exact filenames and headers
+- every table has exactly one correctly calculated final total row
+- overview has origin `module` immediately before `算子名称`
 - valid CSV quoting for demangled templates
 - origin coverage equals selected kernels plus one total row
 - every non-total row occurs once in overview and one category

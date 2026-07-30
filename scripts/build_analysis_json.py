@@ -36,6 +36,10 @@ def number(value: Any) -> float | None:
         return None
 
 
+def is_total_row(row: dict[str, str]) -> bool:
+    return row.get("序号") == "总计"
+
+
 def first_value(mapping: dict[str, Any], *keys: str, default: Any = None) -> Any:
     """Return the first present, non-null value without treating 0/False as missing."""
     for key in keys:
@@ -314,11 +318,26 @@ def main() -> None:
         else root
     )
     origin = read_csv(root / f"{prefix}_operator_origin_table.csv")
-    overview = read_csv(root / f"{prefix}_opreator_table.csv")
-    core_rows = read_csv(root / f"{prefix}_core_compute_table.csv")
-    auxiliary_rows = read_csv(root / f"{prefix}_auxiliary_operator_table.csv")
-    stages = read_csv(root / f"{prefix}_stage_table.csv")
-    classes = read_csv(root / f"{prefix}_op_classification_table.csv")
+    overview = [
+        row for row in read_csv(root / f"{prefix}_opreator_table.csv")
+        if not is_total_row(row)
+    ]
+    core_rows = [
+        row for row in read_csv(root / f"{prefix}_core_compute_table.csv")
+        if not is_total_row(row)
+    ]
+    auxiliary_rows = [
+        row for row in read_csv(root / f"{prefix}_auxiliary_operator_table.csv")
+        if not is_total_row(row)
+    ]
+    stages = [
+        row for row in read_csv(root / f"{prefix}_stage_table.csv")
+        if not is_total_row(row)
+    ]
+    classes = [
+        row for row in read_csv(root / f"{prefix}_op_classification_table.csv")
+        if not is_total_row(row)
+    ]
     manifest_path = metadata_root / f"{prefix}_analysis_manifest.json"
     manifest = json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
     stats = optional_json_artifact(
@@ -348,6 +367,10 @@ def main() -> None:
     categories = table_categories(overview, core_rows, auxiliary_rows)
     operators = []
     for raw, view, category in zip(origin_ops, overview, categories, strict=True):
+        if view.get("module") and view["module"] != raw["module"]:
+            raise ValueError(
+                f"overview module disagrees with origin at row {raw.get('序号')}"
+            )
         rule = match_rule(raw["module"], raw["operator_name"], semantic.get("rules", []))
         rule = {**rule, "category": category}
         operators.append(build_operator_payload(raw, view, rule))

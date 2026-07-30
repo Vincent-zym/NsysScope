@@ -423,18 +423,21 @@ Requirements:
    Aggregate stages by position × id × variant × functional module, never by
    functional-module label alone. Generate the normalized six CSV tables with
    prefix `{request.prefix}`.
-5. Write `{request.prefix}_analysis_manifest.json`, semantic map, stable-statistics sidecar,
+5. End every CSV with its required total row. In the operator overview, copy
+   the origin `module` column immediately before `算子名称`. Accumulated
+   operator/category/stage totals may exceed wall time or 100% under overlap.
+6. Write `{request.prefix}_analysis_manifest.json`, semantic map, stable-statistics sidecar,
    and `validation_report.json`.
-6. Compute MFU for every eligible GEMM when shape and a bundled verified hardware
+7. Compute MFU for every eligible GEMM when shape and a bundled verified hardware
    profile exist. Record logical/physical shape, compute dtype, dense per-GPU
    peak and source; "new model" is not a reason to leave MFU blank.
-7. Never infer CPU delay from zero-kernel GPU idle. Require CUDA Runtime launch
+8. Never infer CPU delay from zero-kernel GPU idle. Require CUDA Runtime launch
    timestamp evidence or label the interval GPU idle/queue/dependency gap.
-8. Run `scripts/validate_analysis_package.py` with the taxonomy and finish only when every required
+9. Run `scripts/validate_analysis_package.py` with the taxonomy and finish only when every required
    invariant, including the requested scope, passes. The manifest boundary
    evidence must explicitly show how the selected unit satisfies the acceptance
    criteria.
-9. Never edit input reports, config, launch files, design notes, or model source.
+10. Never edit input reports, config, launch files, design notes, or model source.
 """
 
     def run_process(

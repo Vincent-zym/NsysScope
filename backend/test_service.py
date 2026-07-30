@@ -21,6 +21,7 @@ from backend.store import JobStore
 from scripts.build_analysis_json import (
     build_operator_payload,
     included_devices,
+    is_total_row,
     stable_sample_count,
 )
 
@@ -247,6 +248,11 @@ def test_converter_accepts_current_stats_schema() -> None:
     }
     assert stable_sample_count(stats, {}) == 1188
     assert included_devices(stats, {}) == [0, 1]
+
+
+def test_converter_recognizes_generated_total_rows() -> None:
+    assert is_total_row({"序号": "总计", "算子名称": "总计"})
+    assert not is_total_row({"序号": "113", "算子名称": "add3_kernel"})
 
 
 def test_frontend_payload_repairs_legacy_semantic_operator_alias() -> None:

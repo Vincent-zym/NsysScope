@@ -247,6 +247,8 @@ python scripts/validate_analysis_package.py \
 Fail when:
 
 - any selected kernel is missing or duplicated;
+- any CSV lacks its correctly calculated final total row;
+- the operator overview omits origin `module` immediately before `算子名称`;
 - category rules are inconsistent;
 - a composite row lacks position/id/variant;
 - a declared variant or position disappears from final tables;
@@ -266,5 +268,8 @@ Fail when:
 - Keep full demangled symbols only in origin data.
 - Use compact CUDA leaf symbols in human-facing tables.
 - Put semantic meanings in introductions, not operator-name cells.
+- End every CSV with one total row. Use accumulated operator work for
+  operator/category/stage totals and repeating-unit wall span for the origin
+  total; allow accumulated percentages above 100% under overlap.
 - Preserve legacy package import, but require the taxonomy contract for every
   new composite/heterogeneous analysis.
