@@ -24,9 +24,6 @@ cd "$BUILD_DIR"
 npm ci --ignore-scripts
 npm run build:site
 
-# Keep only the generated Sites artifact in the source tree; all dependencies
-# and temporary build files are removed by the EXIT trap.
-if [[ -d "$PROJECT_DIR/dist" ]]; then
-  find "$PROJECT_DIR/dist" -depth -delete
-fi
-cp -a "$BUILD_DIR/dist" "$PROJECT_DIR/dist"
+# The local command is a validation/build check.  Sites builds from the
+# pushed source, so do not copy dist back into the checkout either; the EXIT
+# trap removes the generated artifact together with node_modules.
