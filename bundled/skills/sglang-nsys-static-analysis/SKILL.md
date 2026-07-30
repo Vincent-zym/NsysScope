@@ -107,13 +107,25 @@ unit_position, unit_id, unit_variant, layer_id/module discriminator
 For every variant, record source evidence, trace/config discriminators and its
 ordered functional modules.
 
+Keep the two semantic levels distinct: `module` is the fine-grained
+source/execution attribution, while `功能模块` is the architecture rollup.
+Default to 5–8 ordered functional modules per variant. Merge adjacent
+projection/norm/cache/gate steps into attention preparation, backend internals
+into the variant core, projection/collective/residual work into attention
+output, router/top-k/pack/quantize/dispatch into MoE input and routing, expert
+math into MoE experts, and expert finalize/reconstruction/communication into
+MoE output. More than eight stages requires a current-model
+`granularity_exception` in the taxonomy and must represent independently
+actionable architecture boundaries, not implementation substeps.
+
 For a pattern such as `KDA,KDA,KDA,MLA`, preserve all four positions and both
 variants. Do not present `cycle_duration / 4` as the duration of either subtype.
 Report the cycle, every position and variant summaries separately.
 
 If one CUDA kernel fuses several logical modules, assign it to one named fusion
-group, list its logical owners and use `attribution_policy: indivisible`. Never
-invent a fractional timing split.
+group, associate that group with one declared coarse `functional_module`, list
+its logical owners and use `attribution_policy: indivisible`. Never invent a
+fractional timing split.
 
 ### 3. Export and inspect the trace
 
@@ -168,6 +180,10 @@ lines. Do not emit `unknown`, `misc` or `other`.
 
 Keep module occurrences contiguous and one-stream-only. Split occurrences when
 related work uses separate streams.
+
+Do not map fine-grained `module` labels one-to-one onto `功能模块`. A useful
+functional module normally contains several related fine modules; keep the
+fine detail in the `module` column and mapping evidence.
 
 ### 6. Compute position-aware statistics
 

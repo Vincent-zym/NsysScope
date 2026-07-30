@@ -228,6 +228,19 @@ def load_taxonomy(path: Path | None) -> dict[str, Any]:
             raise ValueError(
                 f"variant {item.get('name')!r} needs unique ordered_functional_modules"
             )
+        policy = data.get("functional_module_policy") or {}
+        target_max = policy.get("target_max", 8) if isinstance(policy, dict) else 8
+        if not isinstance(target_max, int) or target_max <= 0 or target_max > 8:
+            raise ValueError(
+                "functional_module_policy.target_max must be a positive integer <= 8"
+            )
+        if len(modules) > target_max and not str(
+            item.get("granularity_exception") or ""
+        ).strip():
+            raise ValueError(
+                f"variant {item.get('name')!r} has {len(modules)} functional "
+                f"modules; more than {target_max} requires granularity_exception"
+            )
         if len(variant_names) > 1:
             if not isinstance(item.get("discriminators"), list) or not item["discriminators"]:
                 raise ValueError(
@@ -239,15 +252,19 @@ def load_taxonomy(path: Path | None) -> dict[str, Any]:
         for module in item.get("ordered_functional_modules", [])
     }
     for group in data.get("fusion_groups", []):
+        functional_module = (
+            group.get("functional_module") or group.get("name")
+            if isinstance(group, dict) else None
+        )
         if (
             not isinstance(group, dict)
             or len(group.get("logical_owners") or []) < 2
             or group.get("attribution_policy") != "indivisible"
-            or group.get("name") not in declared_modules
+            or functional_module not in declared_modules
         ):
             raise ValueError(
-                "fusion_groups need a declared module name, at least two logical_owners "
-                "and attribution_policy=indivisible"
+                "fusion_groups need a name, a declared functional_module, at least "
+                "two logical_owners and attribution_policy=indivisible"
             )
     return data
 

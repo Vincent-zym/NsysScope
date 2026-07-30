@@ -72,6 +72,24 @@ def validate(data: dict[str, Any]) -> list[str]:
         errors.append("positions must be contiguous from 1")
 
     heterogeneous = len(declared) > 1
+    policy = data.get("functional_module_policy") or {}
+    if not isinstance(policy, dict):
+        errors.append("functional_module_policy must be an object")
+        policy = {}
+    target_min = policy.get("target_min", 5)
+    target_max = policy.get("target_max", 8)
+    if (
+        not isinstance(target_min, int)
+        or not isinstance(target_max, int)
+        or target_min <= 0
+        or target_max < target_min
+        or target_max > 8
+    ):
+        errors.append(
+            "functional_module_policy target_min/target_max must be positive "
+            "integers with target_max >= target_min and target_max <= 8"
+        )
+        target_max = 8
     for index, item in enumerate(variants, 1):
         if not isinstance(item, dict):
             continue
@@ -86,6 +104,13 @@ def validate(data: dict[str, Any]) -> list[str]:
         ):
             errors.append(
                 f"variant[{index}] ordered_functional_modules must be unique non-empty strings"
+            )
+        elif len(modules) > target_max and not str(
+            item.get("granularity_exception") or ""
+        ).strip():
+            errors.append(
+                f"variant[{index}] has {len(modules)} functional modules; more than "
+                f"{target_max} requires a current-model granularity_exception"
             )
         discriminators = item.get("discriminators")
         if heterogeneous and (
@@ -110,9 +135,11 @@ def validate(data: dict[str, Any]) -> list[str]:
             errors.append(
                 f"fusion_group[{index}] attribution_policy must be indivisible"
             )
-        if group.get("name") and group.get("name") not in declared_modules:
+        functional_module = group.get("functional_module") or group.get("name")
+        if functional_module and functional_module not in declared_modules:
             errors.append(
-                f"fusion_group[{index}] name must be an ordered functional module"
+                f"fusion_group[{index}] functional_module must be an ordered "
+                "functional module"
             )
     return errors
 

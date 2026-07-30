@@ -414,7 +414,12 @@ Requirements:
    before mapping kernels. Validate it with
    `scripts/validate_architecture_taxonomy.py`. It must define every structural
    position/variant, ordered functional modules, discriminators, shared paths
-   and indivisible fusion groups from this model's evidence.
+   and indivisible fusion groups from this model's evidence. Keep `module` as
+   fine-grained attribution, but default each variant's `功能模块` rollup to 5–8
+   architecture stages. Merge implementation substeps into their enclosing
+   input/core/output/routing/expert/merge phase. More than eight stages requires
+   a current-model `granularity_exception`; never copy `module` one-to-one into
+   `功能模块`.
 3. Select and prove the exact complete unit required by `user_acceptance_criteria`.
    Without an explicit subtype request, include every distinct layer variant in
    the smallest structural cycle; never present one convenient subtype as the

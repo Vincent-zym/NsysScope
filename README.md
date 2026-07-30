@@ -101,7 +101,9 @@ its structural position, concrete unit ID and architecture variant. Aggregation
 uses `(position, unit, variant, functional module)`, so mixed patterns such as
 `KDA,KDA,KDA,MLA` cannot collapse into a generic Attention average. The
 dashboard exposes the complete cycle and every structural unit as separate
-views.
+views. Fine-grained source attribution stays in `module`; the functional view
+defaults to 5–8 architecture stages per variant so projections, norms, gates,
+cache operations and dispatch details do not overwhelm the comparison layer.
 
 Every newly generated CSV ends with a total row. Operator/category/stage totals
 represent accumulated GPU work and may exceed wall time under overlap. The

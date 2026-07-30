@@ -125,6 +125,13 @@ Keep these concepts distinct:
 - `功能模块`: broader current-model functional stage
 - category: core, communication or auxiliary operator class
 
+Keep `功能模块` coarse enough to support comparison: normally 5–8 ordered
+stages per architecture variant. It must not be a renamed one-to-one copy of
+`module`. Preserve projections, norms, gates, cache operations, router packing
+and other implementation detail in `module`; merge them into the enclosing
+architecture phase in `功能模块`. More than eight stages requires the taxonomy's
+current-model `granularity_exception`.
+
 Aggregate functional modules by:
 
 ```text

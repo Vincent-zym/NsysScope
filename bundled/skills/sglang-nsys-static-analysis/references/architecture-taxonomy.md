@@ -5,9 +5,10 @@
 1. Purpose
 2. Required evidence
 3. JSON contract
-4. Mapping and aggregation
-5. Fusion and overlap
-6. Validation failures
+4. Functional-module granularity
+5. Mapping and aggregation
+6. Fusion and overlap
+7. Validation failures
 
 ## Purpose
 
@@ -57,6 +58,11 @@ not sufficient when better evidence exists.
       }
     ]
   },
+  "functional_module_policy": {
+    "target_min": 5,
+    "target_max": 8,
+    "detail_column": "module"
+  },
   "variants": [
     {
       "name": "Variant-A",
@@ -73,6 +79,7 @@ not sufficient when better evidence exists.
   "fusion_groups": [
     {
       "name": "Fused front",
+      "functional_module": "Input aggregation",
       "logical_owners": ["router", "shared branch", "routed branch"],
       "attribution_policy": "indivisible"
     }
@@ -84,6 +91,41 @@ Positions must be contiguous from 1. Resolve each selected kernel to exactly one
 position by `layer_id`, a narrow `module_regex`, or explicit semantic-map fields.
 Use `unit_id` for the concrete occurrence and `unit_variant` for the
 architecture-defined subtype.
+
+## Functional-module granularity
+
+`module` and `功能模块` serve different purposes:
+
+- `module` is the fine-grained execution/source attribution path;
+- `功能模块` is a coarse architecture stage used for comparison and rollup.
+
+Do not promote every projection, normalization, cache update, gate, dispatch
+step or epilogue into its own functional module. A variant should normally have
+5–8 ordered functional modules. More than 8 is rejected unless that variant
+contains a non-empty `granularity_exception` explaining the current-model
+evidence and why the extra boundaries are independently actionable.
+
+Merge adjacent fine modules into one functional module when they form one
+producer-consumer phase and have no independently meaningful branch output,
+architecture boundary or optimization decision. Use these defaults:
+
+- input norm, projections, gates, RoPE and cache preparation belong to
+  `Attention 输入与投影` unless the model exposes a separately actionable path;
+- attention/state-space backend, its internal postprocessing and architecture
+  collectives belong to one variant-specific core stage;
+- output projection, tensor-parallel communication and residual merge belong to
+  `Attention 输出与通信`;
+- router logits, top-k, packing, quantization and dispatch belong to
+  `MoE 输入与路由`;
+- shared and routed expert math belong to `MoE Experts 计算` unless the trace
+  proves separately scheduled branches that the requested analysis must compare;
+- combine, reconstruction, normalization and expert-side collectives belong to
+  `MoE 输出与通信`;
+- the final residual/branch merge is `层输出合并`.
+
+These labels are defaults, not a fixed Transformer ontology. Derive equivalent
+coarse stages from the current model. Preserve fine distinctions in `module`,
+operator names, mapping reasons and fusion-group metadata.
 
 ## Mapping and aggregation
 
@@ -116,8 +158,10 @@ average only as a secondary summary.
 ## Fusion and overlap
 
 Do not split the measured time of one fused CUDA kernel among its logical
-owners. Assign it to one architecture-level fusion group, list all logical
-owners, and set `attribution_policy: indivisible`.
+owners. Assign it to one named fusion group, point `functional_module` at one
+declared coarse stage, list all logical owners, and set
+`attribution_policy: indivisible`. The fusion-group name may remain more
+specific than the coarse functional module.
 
 Report these module metrics separately:
 
@@ -137,6 +181,10 @@ Fail the package when:
 - a composite position cannot be resolved for every selected kernel;
 - final tables omit a declared variant or position;
 - a variant-specific required module is absent;
+- a variant declares more than eight functional modules without a
+  current-model `granularity_exception`;
+- `功能模块` is effectively a one-to-one copy of the fine-grained `module`
+  taxonomy;
 - heterogeneous results are presented as generic single-layer duration;
 - a fused kernel is fractionally attributed without trace-level split evidence;
 - a previous model's labels are retained without current-model justification.
