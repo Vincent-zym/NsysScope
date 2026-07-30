@@ -118,6 +118,14 @@ MoE output. More than eight stages requires a current-model
 `granularity_exception` in the taxonomy and must represent independently
 actionable architecture boundaries, not implementation substeps.
 
+Keep a variant-specific core stage semantically narrow. If the trace exposes a
+single fused attention/state-space core kernel, map only that kernel (or the
+verified core kernels) to the core stage. Do not absorb input projections,
+cache preparation, output postprocessing, LSE/value reconstruction, gates or
+collectives into `MLA 核心计算` merely because they are adjacent in the
+forward call. Put those operations in explicit preparation/output-rebuild or
+communication stages while preserving their fine-grained `module` labels.
+
 For a pattern such as `KDA,KDA,KDA,MLA`, preserve all four positions and both
 variants. Do not present `cycle_duration / 4` as the duration of either subtype.
 Report the cycle, every position and variant summaries separately.
@@ -245,7 +253,12 @@ MFU = 2*M*N*K / (duration_seconds * verified_dense_peak_flops)
 
 Use `references/hardware-peaks.json`. Record accumulator behavior separately
 from compute dtype. For grouped MoE, identify logical versus padded routed rows.
-Reject MFU above 100%. Leave shape/MFU blank when evidence is insufficient.
+Use the physical padded row count only when the trace exposes it; otherwise
+label the result as logical-row MFU and do not silently substitute a padding
+estimate. Low MFU for small decode projections is a valid measured result and
+must not be inflated by changing shapes or peaks. Attention core kernels that
+are not GEMMs should leave shape/MFU blank. Reject MFU above 100%. Leave
+shape/MFU blank when evidence is insufficient.
 
 ### 9. Validate
 
