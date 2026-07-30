@@ -157,6 +157,14 @@ Never aggregate only by `functional_module` in a heterogeneous or composite
 unit. A cycle-wide rollup is a separate view, not a replacement for
 position/variant results.
 
+For the secondary stage/core/auxiliary analysis views, also emit an explicit
+pattern-level rollup when the selected repeating unit contains multiple
+positions. That rollup groups identical `功能模块` names across layers and is
+the default input for functional-module charts. Keep the position-aware rows
+in the CSV as audit/detail rows; do not use layer-qualified stage keys in the
+pattern-level view. Fine operator rows must still retain their original layer,
+unit and variant fields for drill-down.
+
 For a homogeneous repeated pattern, preserve individual positions when layer
 position changes routing load, shapes, communication or branches. Add a variant
 average only as a secondary summary.

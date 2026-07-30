@@ -34,11 +34,12 @@ OPERATOR_COLUMNS = [
 CORE_COLUMNS = [
     "序号", "单元位置", "单元ID", "单元类型", "功能模块", "module",
     "算子名称", "算子耗时(us)",
-    "算子耗时占比(%)", "shape", "mfu", "python_function", "功能介绍",
+    "算子耗时占比(%)", "模块耗时(us)", "模块耗时占比(%)", "shape", "mfu",
+    "python_function", "功能介绍",
 ]
 AUX_COLUMNS = [
     "序号", "单元位置", "单元ID", "单元类型", "功能模块", "算子名称",
-    "算子耗时(us)", "算子耗时占比(%)",
+    "算子耗时(us)", "算子耗时占比(%)", "模块耗时(us)", "模块耗时占比(%)",
     "python_function", "功能介绍",
 ]
 CLASS_COLUMNS = ["序号", "算子类型", "算子数量", "总耗时(us)", "耗时占比(%)"]
@@ -734,15 +735,25 @@ def main() -> None:
         "功能介绍": "全部算子稳定样本平均耗时之和；因并行重叠可能超过重复单元墙钟耗时。",
     })
 
+    pattern_module_duration: dict[str, float] = defaultdict(float)
+    pattern_module_rows: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    pattern_module_intro: dict[str, str] = {}
+    for key, duration in module_duration.items():
+        name = key[3]
+        pattern_module_duration[name] += duration
+        pattern_module_rows[name].extend(module_rows[key])
+        pattern_module_intro.setdefault(name, module_intro[key])
+
     core_source = sorted(
         (r for r in enriched if r["category"] == "core"),
-        key=lambda r: r["算子耗时(us)"],
-        reverse=True,
+        key=lambda r: (r["功能模块"], -r["算子耗时(us)"]),
     )
     core_rows = [{
         "序号": index, **row,
         "算子耗时(us)": fmt(row["算子耗时(us)"]),
         "算子耗时占比(%)": fmt(row["算子耗时占比(%)"]),
+        "模块耗时(us)": fmt(pattern_module_duration[row["功能模块"]]),
+        "模块耗时占比(%)": fmt(pattern_module_duration[row["功能模块"]] / total_duration * 100.0),
     } for index, row in enumerate(core_source, 1)]
     core_duration = sum(row["算子耗时(us)"] for row in core_source)
     core_rows.append({
@@ -752,18 +763,21 @@ def main() -> None:
         "算子名称": "总计",
         "算子耗时(us)": fmt(core_duration),
         "算子耗时占比(%)": fmt(core_duration / total_duration * 100.0),
+        "模块耗时(us)": fmt(core_duration),
+        "模块耗时占比(%)": fmt(core_duration / total_duration * 100.0),
         "功能介绍": "核心计算算子稳定样本平均耗时之和。",
     })
 
     aux_source = sorted(
         (r for r in enriched if r["category"] == "auxiliary"),
-        key=lambda r: r["算子耗时(us)"],
-        reverse=True,
+        key=lambda r: (r["功能模块"], -r["算子耗时(us)"]),
     )
     aux_rows = [{
         "序号": index, **row,
         "算子耗时(us)": fmt(row["算子耗时(us)"]),
         "算子耗时占比(%)": fmt(row["算子耗时占比(%)"]),
+        "模块耗时(us)": fmt(pattern_module_duration[row["功能模块"]]),
+        "模块耗时占比(%)": fmt(pattern_module_duration[row["功能模块"]] / total_duration * 100.0),
     } for index, row in enumerate(aux_source, 1)]
     auxiliary_duration = sum(row["算子耗时(us)"] for row in aux_source)
     aux_rows.append({
@@ -772,6 +786,8 @@ def main() -> None:
         "算子名称": "总计",
         "算子耗时(us)": fmt(auxiliary_duration),
         "算子耗时占比(%)": fmt(auxiliary_duration / total_duration * 100.0),
+        "模块耗时(us)": fmt(auxiliary_duration),
+        "模块耗时占比(%)": fmt(auxiliary_duration / total_duration * 100.0),
         "功能介绍": "辅助算子稳定样本平均耗时之和。",
     })
 
@@ -815,6 +831,27 @@ def main() -> None:
         "耗时口径": "稳定样本逐算子平均耗时之和；区间指标来自代表样本且不拆分融合算子",
         "功能介绍": module_intro[key],
     } for index, (key, duration) in enumerate(stage_source, 1)]
+    # Keep the position-aware rows for traceability, and add a pattern-level
+    # view for the secondary analysis tables.  The latter is the view used by
+    # the dashboard: equal functional modules from different layers are
+    # intentionally accumulated together instead of appearing as four layer
+    # entries.
+    pattern_stage_rows = [{
+        "序号": f"P{index}",
+        "单元位置": "",
+        "单元ID": "__pattern_total__",
+        "单元类型": "",
+        "功能模块": name,
+        "模块耗时(us)": fmt(duration),
+        "模块耗时占比(%)": fmt(duration / total_duration * 100.0),
+        "代表区间并集(us)": fmt(interval_metrics(pattern_module_rows[name])[0]),
+        "代表墙钟跨度(us)": fmt(interval_metrics(pattern_module_rows[name])[1]),
+        "耗时口径": "Pattern 内同名功能模块跨层汇总；稳定样本逐算子平均耗时之和",
+        "功能介绍": pattern_module_intro[name],
+    } for index, (name, duration) in enumerate(sorted(
+        pattern_module_duration.items(), key=lambda item: (-item[1], item[0]),
+    ), 1)]
+    stage_rows.extend(pattern_stage_rows)
     representative_union, representative_wall = interval_metrics(enriched)
     stage_rows.append({
         "序号": "总计",

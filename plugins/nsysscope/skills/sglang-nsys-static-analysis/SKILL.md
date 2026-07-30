@@ -237,6 +237,13 @@ Aggregate functional modules by:
 
 Never aggregate only by functional-module label in a composite unit.
 
+For the secondary stage/core/auxiliary views, emit a separate pattern-level
+rollup when the selected repeating unit has multiple positions. Group
+identical `功能模块` names across layers for the functional-module summary and
+charts, while retaining the position-aware rows and layer/unit fields as audit
+detail. Functional-module selection keys in the pattern view must not include
+layer IDs; operator drill-down can still filter by the original layer.
+
 Keep model function separate from operator category. A quantization or norm
 kernel inside an attention stage remains auxiliary. Core compute is restricted
 to GEMM/BMM/matmul, verified grouped expert GEMMs and actual

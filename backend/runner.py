@@ -879,10 +879,18 @@ Requirements:
                 for stage in stages
                 if stage.get("unitVariant")
             }
-            if stage_variants != variants or any(
-                stage.get("unitPosition") is None or not stage.get("unitId")
+            pattern_rollup = bool(stages) and all(
+                stage.get("unitId") == "__pattern_total__"
+                and stage.get("unitPosition") is None
+                and not stage.get("unitVariant")
                 for stage in stages
-            ):
+            )
+            if (not pattern_rollup and (
+                stage_variants != variants or any(
+                    stage.get("unitPosition") is None or not stage.get("unitId")
+                    for stage in stages
+                )
+            )):
                 raise RuntimeError("heterogeneous stage view loses structural-unit identity")
             units = payload.get("units") or []
             if len(units) < 2 or {

@@ -704,10 +704,11 @@ export default function Dashboard() {
 
   const visibleStages = useMemo(() => {
     if (!data) return [];
-    return selectedUnit
-      ? data.stages.filter((stage) => unitKey(stage) === selectedUnit)
-      : data.stages;
-  }, [data, selectedUnit]);
+    // Functional stages are pattern-level aggregates.  Keep the layer/unit
+    // selector for operator and timeline drill-down, but never split the
+    // module-duration panel by layer.
+    return data.stages;
+  }, [data]);
 
   const visibleClassifications = useMemo(() => {
     if (!data || !selectedUnit) return data?.classifications || [];

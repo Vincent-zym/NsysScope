@@ -364,9 +364,7 @@ def test_frontend_payload_preserves_structural_unit_identity() -> None:
     assert operator["unitId"] == "layer.7"
     assert operator["unitVariant"] == "MLA+LatentMoE"
     assert operator["layerId"] == 7
-    assert operator["stageKey"] == (
-        "4::layer.7::MLA+LatentMoE::MLA Decode 核心"
-    )
+    assert operator["stageKey"] == "MLA Decode 核心"
 
 
 def test_validate_analysis_rejects_collapsed_heterogeneous_cycle(tmp_path: Path) -> None:

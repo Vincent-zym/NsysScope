@@ -224,15 +224,13 @@ def build_operator_payload(
     unit_id = view.get("单元ID") or raw.get("unit_id") or None
     unit_variant = view.get("单元类型") or raw.get("unit_variant") or None
     stage = view["功能模块"]
-    stage_key = "::".join(
-        str(value) for value in (unit_position, unit_id, unit_variant, stage)
-        if value not in (None, "")
-    )
     return {
         "index": int(raw["序号"]),
         "module": raw["module"],
         "stage": stage,
-        "stageKey": stage_key or stage,
+        # Functional-module selection is intentionally pattern-wide.  Layer
+        # identity remains available in unitPosition/unitId/unitVariant.
+        "stageKey": stage,
         "unitPosition": int(unit_position) if str(unit_position or "").isdigit() else None,
         "unitId": unit_id,
         "unitVariant": unit_variant,
@@ -452,8 +450,16 @@ def main() -> None:
         duration_label = "结构单元耗时"
         primary_duration = total_duration
 
+    # Prefer the explicit pattern-level stage rows when present.  The CSV
+    # retains position-aware rows for auditability, while the frontend's
+    # functional-module view intentionally uses same-name modules aggregated
+    # across all layers in the repeating pattern.
+    pattern_stages = [
+        row for row in stages if row.get("单元ID") == "__pattern_total__"
+    ]
+    stage_source = pattern_stages or stages
     stage_payload = []
-    for row in stages:
+    for row in stage_source:
         unit_position = row.get("单元位置") or None
         unit_id = row.get("单元ID") or None
         unit_variant = row.get("单元类型") or None
@@ -498,7 +504,7 @@ def main() -> None:
             "operatorCount": len(rows),
             "kernelTimeSumUs": sum(row["durationUs"] or 0 for row in rows),
             "representativeWallSpanUs": (max(ends) - min(starts)) / 1000 if starts and ends else None,
-            "stageCount": sum(
+            "stageCount": len(stage_payload) if pattern_stages else sum(
                 1 for stage_row in stage_payload
                 if stage_row["unitPosition"] == position
                 and stage_row["unitId"] == unit_id
