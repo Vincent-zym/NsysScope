@@ -111,8 +111,14 @@ architecture boundary or optimization decision. Use these defaults:
 
 - input norm, projections, gates, RoPE and cache preparation belong to
   `Attention 输入与投影` unless the model exposes a separately actionable path;
-- attention/state-space backend, its internal postprocessing and architecture
-  collectives belong to one variant-specific core stage;
+- attention/state-space backend belongs to one variant-specific core stage, but
+  only the backend's actual core execution (for example one fused attention
+  kernel) should receive the core label;
+- backend output reconstruction, LSE/value recovery, postprocessing and
+  architecture collectives belong in an adjacent output-reconstruction or
+  communication stage. Never make a broad `MLA core` bucket that absorbs these
+  surrounding operators: the fine `module` column must still show them and the
+  coarse core stage must remain a meaningful single computation boundary;
 - output projection, tensor-parallel communication and residual merge belong to
   `Attention 输出与通信`;
 - router logits, top-k, packing, quantization and dispatch belong to
