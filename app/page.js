@@ -53,8 +53,15 @@ function operatorDisplayName(operator) {
   return operator.kernelName || compactKernelName(operator.fullName) || operator.name || "未知算子";
 }
 
-const stageKey = (stage) => stage?.key || stage?.stageKey || stage?.name || "";
-const operatorStageKey = (operator) => operator?.stageKey || operator?.stage || "";
+const normalizeStageKey = (value) => {
+  const text = String(value || "");
+  if (text.startsWith("__pattern_total__::")) return text.slice("__pattern_total__::".length);
+  // Compatibility with analysis.json files generated before pattern-level
+  // stage keys were introduced.
+  return text.includes("::") ? text.slice(text.lastIndexOf("::") + 2) : text;
+};
+const stageKey = (stage) => normalizeStageKey(stage?.key || stage?.stageKey || stage?.name);
+const operatorStageKey = (operator) => normalizeStageKey(operator?.stageKey || operator?.stage);
 const unitKey = (unit) => String(unit?.id || unit?.unitId || unit?.position || unit?.unitPosition || "");
 const operatorUnitKey = (operator) => String(
   operator?.unitId || operator?.unitPosition || "",

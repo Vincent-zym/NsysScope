@@ -464,7 +464,9 @@ def main() -> None:
         unit_id = row.get("单元ID") or None
         unit_variant = row.get("单元类型") or None
         name = row["功能模块"]
-        stage_key = "::".join(
+        # Pattern-level rows deliberately use the plain functional-module
+        # name so they match operator stageKey values across all layers.
+        stage_key = name if unit_id == "__pattern_total__" else "::".join(
             str(value) for value in (unit_position, unit_id, unit_variant, name)
             if value not in (None, "")
         )
