@@ -684,7 +684,9 @@ export default function Dashboard() {
   const fileRef = useRef(null);
 
   useEffect(() => {
-    fetch("/demo-analysis.json").then((r) => r.json()).then((payload) => {
+    fetch("/demo-analysis.json?default=kimi3-fixed-v2-20260731", {
+      cache: "no-store",
+    }).then((r) => r.json()).then((payload) => {
       setData(payload);
       setSelectedOp(null);
     })
