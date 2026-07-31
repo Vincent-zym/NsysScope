@@ -527,7 +527,7 @@ def main() -> None:
                 selected_unit.get("layer_id_evidence")
                 if isinstance(selected_unit, dict) else None
             ),
-            "generatedFrom": str(root),
+            "generatedFrom": str(root.parent if root.name == "csv" else root),
         },
         "summary": {
             "totalDurationUs": total_duration,
