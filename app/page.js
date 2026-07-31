@@ -62,6 +62,12 @@ const normalizeStageKey = (value) => {
 };
 const stageKey = (stage) => normalizeStageKey(stage?.key || stage?.stageKey || stage?.name);
 const operatorStageKey = (operator) => normalizeStageKey(operator?.stageKey || operator?.stage);
+const stageColor = (colors, key) => {
+  if (colors?.[key]) return colors[key];
+  const text = String(key || "");
+  const hash = [...text].reduce((sum, char) => sum + char.codePointAt(0), 0);
+  return COLORS[hash % COLORS.length];
+};
 const unitKey = (unit) => String(unit?.id || unit?.unitId || unit?.position || unit?.unitPosition || "");
 const operatorUnitKey = (operator) => String(
   operator?.unitId || operator?.unitPosition || "",
@@ -119,7 +125,7 @@ function StageBars({ stages, selected, onSelect, colors }) {
           <div className="bar-track">
             <i style={{
               width: `${stage.durationUs / max * 100}%`,
-              background: colors[key],
+              background: stageColor(colors, key),
             }} />
           </div>
           <em>{fmt(stage.durationPct)}%</em>
@@ -164,7 +170,7 @@ function Timeline({ operators, stages, selectedStage, selectedOp, colors, onPick
                 key={op.index}
                 title={`${op.unitVariant ? `${op.unitVariant} · ` : ""}${operatorDisplayName(op)} · ${fmt(op.durationUs)} μs`}
                 className={`kernel ${dim ? "dim" : ""} ${operatorSelected ? "selected" : ""}`}
-                style={{ left: `${left}%`, width: `${width}%`, background: colors[operatorStageKey(op)] }}
+                style={{ left: `${left}%`, width: `${width}%`, background: stageColor(colors, operatorStageKey(op)) }}
                 onClick={() => onPick(op)}
               />;
             })}
@@ -193,7 +199,7 @@ function Timeline({ operators, stages, selectedStage, selectedOp, colors, onPick
               }
               onClick={() => onStage(stageKey(stage))}
             >
-              <i style={{ background: colors[stageKey(stage)] }}>{index + 1}</i>
+              <i style={{ background: stageColor(colors, stageKey(stage)) }}>{index + 1}</i>
               <span>
                 <b>{stage.name}</b>
                 <small>{stage.unitVariant ? `${stage.unitPosition}. ${stage.unitVariant} · ` : ""}{fmt(stage.durationUs)} us</small>
@@ -929,7 +935,7 @@ export default function Dashboard() {
                   {filtered.map((op) => (
                     <tr key={op.index} className={selectedOp?.index === op.index ? "selected" : ""} onClick={() => selectOperator(op)}>
                       <td className="mono muted center">{op.index}</td>
-                      <td><div className="op-title"><i style={{ background: colors[operatorStageKey(op)] }} /><div><b title={operatorDisplayName(op)}>{operatorDisplayName(op)}</b><span>{op.unitVariant ? `${op.unitVariant} · ` : ""}{op.stage}</span></div></div></td>
+                      <td><div className="op-title"><i style={{ background: stageColor(colors, operatorStageKey(op)) }} /><div><b title={operatorDisplayName(op)}>{operatorDisplayName(op)}</b><span>{op.unitVariant ? `${op.unitVariant} · ` : ""}{op.stage}</span></div></div></td>
                       <td><span className={`category ${op.category}`}>{CATEGORY[op.category]?.label}</span></td>
                       <td className="mono numeric">{fmt(op.durationUs)}</td>
                       <td className="mono numeric">{fmt(op.durationPct)}</td>
@@ -945,7 +951,7 @@ export default function Dashboard() {
             <div className="panel-head"><div><span>EVIDENCE</span><h2>算子证据</h2></div><small>{selectedOp ? `#${selectedOp.index}` : "选择算子"}</small></div>
             {selectedOp ? <div className="evidence-body">
               <div className="evidence-title">
-                <i style={{ background: colors[operatorStageKey(selectedOp)] }}>{selectedOp.index}</i>
+                <i style={{ background: stageColor(colors, operatorStageKey(selectedOp)) }}>{selectedOp.index}</i>
                 <div><b>{operatorDisplayName(selectedOp)}</b><span>{selectedOp.unitVariant ? `${selectedOp.unitVariant} · ` : ""}{selectedOp.stage}</span></div>
                 <em className={`category ${selectedOp.category}`}>{CATEGORY[selectedOp.category]?.label}</em>
               </div>
