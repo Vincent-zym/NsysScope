@@ -33,18 +33,25 @@ class JobStore:
                     output_dir TEXT NOT NULL,
                     error TEXT,
                     created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
+                    updated_at TEXT NOT NULL,
+                    popo_url TEXT
                 )
             """)
+            columns = {row[1] for row in db.execute("PRAGMA table_info(jobs)")}
+            if "popo_url" not in columns:
+                db.execute("ALTER TABLE jobs ADD COLUMN popo_url TEXT")
 
     def create(self, job_id: str, request: JobCreate, output_dir: Path) -> dict[str, Any]:
         now = datetime.now(UTC).isoformat()
         with self.lock, self.connect() as db:
             db.execute(
-                "INSERT INTO jobs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO jobs "
+                "(id, status, progress, message, request_json, output_dir, "
+                "error, created_at, updated_at, popo_url) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     job_id, "queued", 0, "任务已进入队列",
-                    request.model_dump_json(), str(output_dir), None, now, now,
+                    request.model_dump_json(), str(output_dir), None, now, now, None,
                 ),
             )
         return self.get(job_id)
@@ -52,6 +59,7 @@ class JobStore:
     def update(
         self, job_id: str, *, status: str | None = None, progress: int | None = None,
         message: str | None = None, error: str | None = None,
+        popo_url: str | None = None,
     ) -> dict[str, Any]:
         fields: dict[str, Any] = {"updated_at": datetime.now(UTC).isoformat()}
         if status is not None:
@@ -62,6 +70,8 @@ class JobStore:
             fields["message"] = message
         if error is not None:
             fields["error"] = error
+        if popo_url is not None:
+            fields["popo_url"] = popo_url
         clause = ", ".join(f"{key} = ?" for key in fields)
         with self.lock, self.connect() as db:
             db.execute(

@@ -323,6 +323,7 @@ function JobDialog({ open, onClose, onLoaded }) {
   });
   const [modelRefresh, setModelRefresh] = useState(0);
   const [error, setError] = useState("");
+  const [publishing, setPublishing] = useState(false);
   const terminal = ["succeeded", "failed", "cancelled"];
 
   useEffect(() => {
@@ -573,6 +574,24 @@ function JobDialog({ open, onClose, onLoaded }) {
     }
   }
 
+  async function publishJob() {
+    setError("");
+    setPublishing(true);
+    try {
+      const response = await fetch(`${api}/api/jobs/${job.id}/publish`, {
+        method: "POST",
+        headers: { "X-NsysScope-Token": token },
+      });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.detail || `发布失败 (${response.status})`);
+      setJob(body);
+    } catch (cause) {
+      setError(cause.message);
+    } finally {
+      setPublishing(false);
+    }
+  }
+
   return <div className="dialog-backdrop" onMouseDown={onClose}>
     <section className="job-dialog" onMouseDown={(event) => event.stopPropagation()}>
       <button className="close" onClick={onClose}>×</button>
@@ -671,6 +690,10 @@ function JobDialog({ open, onClose, onLoaded }) {
         <div className="job-status"><span>{job.status.toUpperCase()}</span><b>{job.message}</b><em>{job.progress}%</em></div>
         <div className="progress-track"><i style={{ width: `${job.progress}%` }} /></div>
         {job.status === "succeeded" && <div className="result-location"><span>结果目录</span><code>{job.output_dir}</code></div>}
+        {job.status === "succeeded" && (job.popo_url
+          ? <div className="popo-share"><span>分享链接</span><a href={job.popo_url} target="_blank" rel="noreferrer">{job.popo_url}</a></div>
+          : <div className="popo-share"><button onClick={publishJob} disabled={publishing}>{publishing ? "发布中…" : "发布到 popo"}</button></div>
+        )}
         {job.idle_seconds > 180 && <div className="activity-warning">执行器超过 {Math.floor(job.idle_seconds / 60)} 分钟没有新输出，请检查日志；任务仍在运行，可随时取消。</div>}
         <div className="job-log">{logs.length ? logs.map((line, index) => <code key={`${index}-${line}`}>{line}</code>) : <code>等待执行器输出…</code>}</div>
         {(error || job.error) && <div className="error">{error || job.error}</div>}
@@ -694,6 +717,8 @@ export default function Dashboard() {
   const [category, setCategory] = useState("all");
   const [error, setError] = useState("");
   const [jobOpen, setJobOpen] = useState(false);
+  const [popoUrl, setPopoUrl] = useState("");
+  const [publishing, setPublishing] = useState(false);
   const fileRef = useRef(null);
 
   useEffect(() => {
@@ -705,6 +730,26 @@ export default function Dashboard() {
     })
       .catch(() => setError("示例数据加载失败"));
   }, []);
+
+  async function publishCurrent() {
+    if (!data) return;
+    setError("");
+    setPublishing(true);
+    try {
+      const response = await fetch("/api/publish", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(data),
+      });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.detail || `发布失败 (${response.status})`);
+      setPopoUrl(body.popo_url);
+    } catch (cause) {
+      setError(cause.message);
+    } finally {
+      setPublishing(false);
+    }
+  }
 
   const colors = useMemo(() => data ? Object.fromEntries(
     data.stages.map((stage, index) => [stageKey(stage), COLORS[index % COLORS.length]])
@@ -830,6 +875,9 @@ export default function Dashboard() {
         <div className="top-actions">
           <button className="ghost-action" onClick={() => fileRef.current?.click()}>导入 JSON</button>
           <button className="import" onClick={() => setJobOpen(true)}>新建分析</button>
+          {popoUrl
+            ? <a className="ghost-action popo-link" href={popoUrl} target="_blank" rel="noreferrer">popo 链接</a>
+            : <button className="ghost-action" onClick={publishCurrent} disabled={publishing || !data}>{publishing ? "发布中…" : "发布到 popo"}</button>}
         </div>
         <input ref={fileRef} hidden type="file" accept=".json,application/json" onChange={loadFile} />
       </header>

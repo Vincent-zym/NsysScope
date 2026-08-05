@@ -8,6 +8,7 @@
     "build": "bash scripts/build_in_temp.sh",
     "build:site": "vinext build && node scripts/prepare_sites_dist.mjs",
     "build:local": "vite build --config vite.local.config.mjs",
+    "watch:local": "vite build --config vite.local.config.mjs --watch",
     "build:next": "next build",
     "start": "next start",
     "lint": "next lint",

@@ -29,6 +29,8 @@ button { color: inherit; }
 .top-actions { display: flex; gap: 7px; }
 .ghost-action { border: 1px solid var(--line); background: var(--panel); border-radius: 9px; padding: 9px 13px; font-size: 12px; cursor: pointer; color: #9aa8bb; }
 .ghost-action:hover { border-color: #405273; color: #d6dfec; }
+.ghost-action.popo-link { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #7ec8d9; text-decoration: none; }
+.ghost-action:disabled { opacity: .6; cursor: default; }
 .shell { width: min(1580px, calc(100% - 48px)); margin: 0 auto; padding: 22px 0 52px; }
 .breadcrumb { font: 10px/1.4 ui-monospace, monospace; letter-spacing: .12em; color: #69768b; margin-bottom: 25px; }
 .breadcrumb span { color: #3c4655; padding: 0 7px; }
@@ -242,6 +244,11 @@ tbody tr.selected { background: rgba(92,129,220,.12); box-shadow: inset 3px 0 #6
 .result-location { display: grid; gap: 6px; border: 1px solid #2c3d34; background: #0d1814; border-radius: 8px; padding: 10px 12px; margin-bottom: 12px; }
 .result-location span { color: #6c917f; font-size: 9px; }
 .result-location code { color: #a8d9c0; font: 9px/1.5 ui-monospace, monospace; overflow-wrap: anywhere; }
+.popo-share { display: grid; gap: 6px; border: 1px solid #2c3d44; background: #0d1418; border-radius: 8px; padding: 10px 12px; margin-bottom: 12px; }
+.popo-share span { color: #6c8f91; font-size: 9px; }
+.popo-share a { color: #7ec8d9; font: 11px ui-monospace, monospace; overflow-wrap: anywhere; }
+.popo-share button { border: 1px solid #2c3544; border-radius: 8px; background: #171d27; color: #a8b4c5; padding: 8px 13px; font-size: 12px; cursor: pointer; justify-self: start; }
+.popo-share button:disabled { opacity: .6; cursor: default; }
 .loading { min-height: 100vh; display: flex; gap: 12px; align-items: center; justify-content: center; color: #8693a6; font-size: 12px; }
 .pulse { width: 8px; height: 8px; background: var(--blue); border-radius: 50%; animation: pulse 1.2s infinite; }
 @keyframes pulse { 50% { opacity: .25; transform: scale(.7); } }

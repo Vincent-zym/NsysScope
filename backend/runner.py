@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import shlex
 import shutil
 import subprocess
@@ -919,6 +920,103 @@ Requirements:
         if completed.returncode:
             detail = (completed.stdout + completed.stderr).strip()
             raise RuntimeError(f"analysis package validation failed: {detail}")
+
+    def publish_to_popo(self, job_id: str, job_dir: Path) -> str:
+        analysis_path = job_dir / "analysis.json"
+        if not analysis_path.is_file():
+            raise RuntimeError("analysis.json is missing; cannot publish")
+        return self._publish_analysis_bytes(analysis_path.read_bytes(), slug=f"nsysscope-{job_id}")
+
+    def publish_analysis_payload(self, analysis: dict) -> str:
+        payload_bytes = json.dumps(analysis, ensure_ascii=False).encode("utf-8")
+        slug = f"nsysscope-{secrets.token_hex(8)}"
+        return self._publish_analysis_bytes(payload_bytes, slug=slug)
+
+    def _publish_analysis_bytes(self, analysis_bytes: bytes, *, slug: str) -> str:
+        static_dir = Path(__file__).resolve().parent / "static"
+        index_html = static_dir / "index.html"
+        assets_dir = static_dir / "assets"
+        if not index_html.is_file() or not assets_dir.is_dir():
+            raise RuntimeError("dashboard static assets are missing; cannot publish")
+        upload_script = Path(
+            "/root/.comate/skills/.system/popo/scripts/upload.py"
+        )
+        if not upload_script.is_file():
+            raise RuntimeError("popo upload script is not available")
+
+        site_dir = Path(tempfile.mkdtemp(prefix="nsysscope-popo-"))
+        try:
+            shutil.copy2(index_html, site_dir / "index.html")
+            shutil.copytree(assets_dir, site_dir / "assets")
+            title = f"NsysScope 分析结果 {slug}"
+
+            # The outbound network path drops HTTPS requests whose body
+            # exceeds roughly 300KB (verified: <=280KB succeeds, >=290KB
+            # fails with a TLS-layer SSLEOFError on every retry). The shell
+            # and JS assets alone are ~250KB; adding the analysis JSON often
+            # pushes the single-request body past that ceiling. Split into
+            # two requests instead: publish the shell first, then re-deploy
+            # onto the same slug once the JSON is added, so no single
+            # request body needs to exceed the ceiling.
+            shell_command = [
+                shutil.which("python3") or "python3",
+                str(upload_script),
+                "--username", "zhongyuanming",
+                "--title", title,
+                "--slug", slug,
+                "--visibility", "internal",
+                "--base", str(site_dir),
+                "--entry", "index.html",
+                "--project-dir", str(site_dir),
+            ]
+            self._run_popo_upload(shell_command)
+
+            (site_dir / "demo-analysis.json").write_bytes(analysis_bytes)
+            full_command = [
+                shutil.which("python3") or "python3",
+                str(upload_script),
+                "--username", "zhongyuanming",
+                "--title", title,
+                "--slug", slug,
+                "--previous-slug", slug,
+                "--base", str(site_dir),
+                "--entry", "index.html",
+                "--project-dir", str(site_dir),
+            ]
+            payload = self._run_popo_upload(full_command)
+            published_slug = payload.get("data", {}).get("slug", slug)
+            return f"https://{published_slug}.popo.baidu-int.com"
+        finally:
+            shutil.rmtree(site_dir, ignore_errors=True)
+
+    @staticmethod
+    def _run_popo_upload(command: list[str]) -> dict:
+        # The outbound HTTP(S)_PROXY inherited from the parent process drops
+        # POST bodies once they exceed roughly 300KB (verified: proxied
+        # requests fail with a TLS-layer SSLEOFError above that size, while
+        # direct connections to api.popo.baidu-int.com succeed at any size
+        # tested). Popo's upload endpoint is an internal host that does not
+        # need the proxy, so strip proxy vars for this subprocess only.
+        env = {
+            key: value for key, value in os.environ.items()
+            if key.lower() not in {
+                "http_proxy", "https_proxy", "all_proxy",
+                "http_proxy_url", "no_proxy",
+            }
+        }
+        completed = subprocess.run(command, text=True, capture_output=True, env=env)
+        if completed.returncode:
+            detail = (completed.stdout + completed.stderr).strip()
+            raise RuntimeError(f"popo publish failed: {detail}")
+        try:
+            payload = json.loads(completed.stdout.strip().splitlines()[-1])
+        except (json.JSONDecodeError, IndexError) as exc:
+            raise RuntimeError(
+                f"popo publish returned an unexpected response: {completed.stdout.strip()}"
+            ) from exc
+        if not payload.get("success"):
+            raise RuntimeError(f"popo publish failed: {payload}")
+        return payload
 
     @staticmethod
     def find_package(job_dir: Path, prefix: str) -> Path:

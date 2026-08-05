@@ -218,6 +218,32 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         ))
 
     @app.post(
+        "/api/jobs/{job_id}/publish",
+        response_model=JobView,
+        dependencies=[Depends(authorize)],
+    )
+    def publish_job(job_id: str) -> JobView:
+        try:
+            job = store.get(job_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="job not found") from exc
+        if job["status"] != "succeeded":
+            raise HTTPException(status_code=409, detail="only succeeded jobs can be published")
+        try:
+            url = runner.publish_to_popo(job_id, Path(job["output_dir"]))
+        except RuntimeError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        return view(store.update(job_id, popo_url=url))
+
+    @app.post("/api/publish", dependencies=[Depends(authorize)])
+    def publish_current(payload: dict) -> dict:
+        try:
+            url = runner.publish_analysis_payload(payload)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        return {"popo_url": url}
+
+    @app.post(
         "/api/jobs/{job_id}/retry-conversion",
         response_model=JobView,
         dependencies=[Depends(authorize)],
