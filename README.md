@@ -1,81 +1,76 @@
 # NsysScope
 
-Interactive SGLang Nsight Systems analysis powered by the installed
-`sglang-nsys-static-analysis` skill.
+基于内置的 `sglang-nsys-static-analysis` skill，提供交互式的 SGLang Nsight Systems
+分析能力。
 
-## Portable executable
+## 便携式可执行文件
 
-The lightweight release is a single self-extracting Linux file:
+轻量发布版是一个独立的 Linux 自解压文件：
 
 ```bash
 chmod +x nsysscope-linux-x86_64.run
 ./nsysscope-linux-x86_64.run
 ```
 
-It contains the prebuilt dashboard, Analyzer source and a validated fallback
-Skill. It does not contain Node.js, npm packages, task data, Provider
-credentials or NVIDIA Nsight Systems. On first start it creates a reusable
-Python environment under the user's cache directory. Import-only use needs
-Python 3; new `.nsys-rep` analysis additionally needs `nsys` and a logged-in
-Codex or Comate Provider.
+它包含预构建的前端页面、Analyzer 源码和一份经过校验的兜底 Skill。不包含
+Node.js、npm 依赖包、任务数据、Provider 凭证或 NVIDIA Nsight Systems。首次启动
+会在用户缓存目录下创建一个可复用的 Python 环境。仅做"导入结果"用途只需要
+Python 3；要分析新的 `.nsys-rep`，还需要 `nsys` 和一个已登录的 Codex 或 Comate
+Provider。
 
-Build the portable file with:
+构建便携版：
 
 ```bash
 python3 scripts/build_portable.py
 ```
 
-## One-command start
+## 一条命令启动
 
 ```bash
 cd /home/users/zhongyuanming/NsysScope
 ./nsysscope start
 ```
 
-The command automatically:
+该命令会自动：
 
-- verifies Python, Nsight Systems, at least one Agent Provider and the analysis
-  skill;
-- creates or updates the small Python environment when needed;
-- starts the prebuilt dashboard and Analyzer as one FastAPI process;
-- chooses an available loopback port;
-- removes temporary state when `Ctrl-C` is pressed.
+- 检查 Python、Nsight Systems、至少一个 Agent Provider 以及分析 skill 是否就位；
+- 需要时创建或更新那个小型 Python 环境；
+- 把预构建的前端页面和 Analyzer 作为同一个 FastAPI 进程启动；
+- 自动挑选一个可用的本机端口；
+- 按 `Ctrl-C` 时清理临时状态。
 
-Node.js and npm are not required for normal local use. They are only development
-dependencies used to rebuild the checked-in browser bundle or deploy the hosted
-demo.
+正常本地使用不需要 Node.js 和 npm。它们只在你要重新构建已提交的前端产物，或
+部署托管版 demo 时才用得上。
 
-Open the page printed by the command, normally:
+打开命令打印出的地址，通常是：
 
 ```text
 http://127.0.0.1:3000
 ```
 
-For an SSH-connected server, keep `./nsysscope start` running and execute the
-printed one-port SSH forwarding command on the local computer. The remote
-Analyzer port and local browser port are intentionally separate; by default
-the local port is `remote + 10000`, avoiding conflicts with local services on
-port 3000. Override it with `NSYSSCOPE_SSH_LOCAL_PORT` when needed. The browser
-no longer needs an Analyzer URL or API token.
+如果是通过 SSH 连接的服务器，保持 `./nsysscope start` 运行，并在本地电脑上执行
+打印出来的单端口 SSH 转发命令。远端 Analyzer 端口和本地浏览器端口是特意分开的，
+默认本地端口是 `远端端口 + 10000`，避免和本地 3000 端口冲突。需要时可以用
+`NSYSSCOPE_SSH_LOCAL_PORT` 覆盖。浏览器已经不再需要填写 Analyzer URL 或
+API token。
 
-Loopback pages also detect the local Analyzer from the hostname, ignore stale
-remote API settings and retry transient startup failures automatically. The
-dashboard entry page is not cached, so a newly started runtime cannot reuse an
-older hosted-mode connection configuration.
+本机页面还会根据 hostname 自动识别本地 Analyzer，忽略过期的远程 API 配置，并
+自动重试瞬时性的启动失败。前端首页不会被缓存，所以新启动的服务不会误用旧的
+托管模式连接配置。
 
-Run the prerequisite check by itself with:
+单独运行环境检查：
 
 ```bash
 ./nsysscope doctor
 ```
 
-Missing `nsys` or Agent Providers no longer blocks startup. The dashboard
-remains available for importing an existing six-table package.
+缺少 `nsys` 或 Agent Provider 不再会阻止启动，页面仍然可以用来导入已有的六表
+分析包。
 
-## Replaceable analysis Skill
+## 可替换的分析 Skill
 
-NsysScope includes a small built-in Skill and can track an externally maintained
-Skill directory without copying it into the application:
+NsysScope 内置了一份精简版 Skill，同时也支持跟踪一个外部维护的 Skill 目录，而
+不需要把它复制进应用里：
 
 ```bash
 ./nsysscope skill status
@@ -85,116 +80,102 @@ Skill directory without copying it into the application:
 ./nsysscope skill reset
 ```
 
-After `skill use`, edits to that external directory take effect on the next
-start. Every new analysis records the selected Skill path, source and SHA256 in
-`metadata/skill.json`. Resolution order is an explicit
-`NSYSSCOPE_SKILL_DIR`, the configured external path, the user's Codex-installed
-copy, then the bundled fallback.
+执行 `skill use` 之后，对那个外部目录的修改会在下次启动时生效。每次新分析都会
+把选用的 Skill 路径、来源和 SHA256 记录到 `metadata/skill.json`。解析优先级依次
+是：显式设置的 `NSYSSCOPE_SKILL_DIR`、配置的外部路径、用户 Codex 安装的副本、
+内置的兜底版本。
 
-## Agent providers
+## Agent Provider
 
-NsysScope supports two interchangeable analysis providers:
+NsysScope 支持两种可互换的分析 Provider：
 
-- **Codex CLI** through non-interactive `codex exec`;
-- **Comate Zulu CLI** through non-interactive `zulu run`.
+- **Codex CLI**，通过非交互式的 `codex exec`；
+- **Comate Zulu CLI**，通过非交互式的 `zulu run`。
 
-Both providers receive the same prompt and task materials, activate the same
-`sglang-nsys-static-analysis` skill, and must produce the same six-table package
-and pass the same deterministic validation before the dashboard accepts the
-result.
+两个 Provider 接收相同的 prompt 和任务材料，激活同一个
+`sglang-nsys-static-analysis` skill，并且必须产出相同的六表分析包，通过相同的
+确定性校验，页面才会接受结果。
 
-For every new composite or heterogeneous model, the Skill first creates a
-current-model architecture taxonomy. Each operator and functional stage carries
-its structural position, concrete unit ID and architecture variant. Aggregation
-uses `(position, unit, variant, functional module)`, so mixed patterns such as
-`KDA,KDA,KDA,MLA` cannot collapse into a generic Attention average. The
-dashboard exposes the complete cycle and every structural unit as separate
-views. Fine-grained source attribution stays in `module`; the functional view
-defaults to 5–8 architecture stages per variant so projections, norms, gates,
-cache operations and dispatch details do not overwhelm the comparison layer.
+对每一个新的组合式/异构模型，Skill 会先建立一份针对当前模型的架构分类体系。每
+个算子和功能阶段都带有其结构位置、具体 unit ID 和架构变体。聚合方式是
+`(位置, unit, 变体, 功能模块)`，所以像 `KDA,KDA,KDA,MLA` 这样的混合模式不会被
+折叠成一个笼统的 Attention 平均值。页面会把完整周期和每一个结构单元都展示为
+独立视图。细粒度的源码归因保留在 `module` 字段里；功能视图默认每个变体呈现
+5–8 个架构阶段，避免投影、归一化、门控、缓存操作和路由细节把对比层面淹没。
 
-Every newly generated CSV ends with a total row. Operator/category/stage totals
-represent accumulated GPU work and may exceed wall time under overlap. The
-operator overview also preserves the origin `module` column immediately before
-the compact operator name.
+每个新生成的 CSV 都以一行总计结尾。算子/分类/阶段的总计代表累计 GPU 耗时，在
+重叠场景下可能超过墙钟时间。算子总览表还会在紧凑算子名之前保留原始的
+`module` 列。
 
-Provider readiness is shown in the **新建分析** dialog. Log in when needed:
+Provider 是否就位会显示在"新建分析"对话框里。需要登录时执行：
 
 ```bash
 ./nsysscope login codex
 ./nsysscope login comate internal
 ```
 
-Restart `./nsysscope start` after login, then select **Codex CLI** or
-**Comate Zulu** in the task form. The launcher discovers the Zulu executable
-shipped with the installed Comate extension; `NSYSSCOPE_COMATE_BIN` can override
-that path. The default Comate platform is `internal`; use
-`./nsysscope login comate saas` for public SaaS. Internal Comate commands bypass
-the shell HTTP proxy because the internal endpoint is directly reachable. The
-launcher also supplies Zulu's required `PLATFORM` selector so that `status` and
-`run` reuse the token written by `login`.
-`NSYSSCOPE_COMATE_PLATFORM`, `NSYSSCOPE_COMATE_MODEL` and
-`NSYSSCOPE_COMATE_TIMEOUT_SECONDS` control the platform, optional model and
-timeout.
+登录后重启 `./nsysscope start`，再在任务表单里选择 **Codex CLI** 或
+**Comate Zulu**。启动脚本会自动发现随已安装的 Comate 插件一起分发的 Zulu
+可执行文件；可以用 `NSYSSCOPE_COMATE_BIN` 覆盖该路径。默认 Comate 平台是
+`internal`；公网 SaaS 场景使用 `./nsysscope login comate saas`。内部版 Comate
+命令会绕开 shell 的 HTTP 代理，因为内部服务地址是可以直连的。启动脚本还会给
+Zulu 传入所需的 `PLATFORM` 参数，让 `status` 和 `run` 能复用 `login` 写入的
+token。`NSYSSCOPE_COMATE_PLATFORM`、`NSYSSCOPE_COMATE_MODEL` 和
+`NSYSSCOPE_COMATE_TIMEOUT_SECONDS` 分别控制平台、可选模型和超时时间。
 
-The task form also has an **Agent 基座模型** selector:
+任务表单里还有一个"Agent 基座模型"选择框：
 
-- Codex choices come from the current CLI model cache, while the automatic
-  option preserves the model configured in `~/.codex/config.toml`;
-- Comate choices are fetched from the logged-in account with
-  `zulu model list --ids`;
-- the selected value is stored with the job and forwarded only to that run as
-  `codex --model ... exec` or `zulu run --model ...`.
+- Codex 的候选项来自当前 CLI 的本地模型缓存，"自动"选项会保留
+  `~/.codex/config.toml` 里配置的模型；
+- Comate 的候选项通过 `zulu model list --ids` 从已登录账号拉取；
+- 选中的值只会随这次任务一起保存，并只在这次运行时传给对应 Provider（即
+  `codex --model ... exec` 或 `zulu run --model ...`）。
 
-This task-level selection does not rewrite either Provider's global model
-configuration.
+这个任务级别的选择不会改写任一 Provider 的全局模型配置。
 
-## Create an analysis
+## 创建一次分析
 
-Click **新建分析**, then provide:
+点击"新建分析"，然后提供：
 
-- `.nsys-rep` or exported `.sqlite`;
-- model `config.json`;
-- the real deployment YAML or launch script;
-- the corresponding SGLang/model source root;
-- model name, inference stage and hardware;
-- an empty or not-yet-created result directory;
-- optional design notes;
-- analysis scope and hard acceptance criteria.
+- `.nsys-rep` 或已导出的 `.sqlite`；
+- 模型的 `config.json`；
+- 真实的部署 YAML 或启动脚本；
+- 对应的 SGLang/模型源码根目录；
+- 模型名称、推理阶段和硬件；
+- 一个空的或尚未创建的结果目录；
+- 可选的设计文档；
+- 分析范围和硬性验收标准。
 
-Scope criteria are binding. If a specific layer subtype or branch is requested,
-the Agent must select that exact unit or fail with evidence; it may not silently
-replace it with a wider architectural period. For example, requesting a single
-GLM5.2 non-shared Indexer layer must not select the four-layer full/shared
-Indexer cycle.
+范围约束是强制性的。如果请求了某个具体的 layer 子类型或分支，Agent 必须精确
+选中那个单元，或者带着证据失败退出；不能悄悄改用一个更宽泛的架构周期替代。举
+例来说，请求分析单独一个 GLM5.2 非共享 Indexer 层时，不能改成分析四层的
+全量/共享 Indexer 周期。
 
-The paths are resolved on the machine running NsysScope. By default, the tool
-allows materials under the directory containing this repository. The portable
-`.run` file instead uses the directory from which it was launched, never its
-private extraction directory. Override the scope when needed:
+路径解析发生在运行 NsysScope 的这台机器上。默认情况下，工具只允许访问本仓库
+所在目录之下的材料。便携版 `.run` 文件则使用启动时所在的目录作为范围，而不是
+它私有的解压目录。需要时可以覆盖这个范围：
 
 ```bash
 NSYSSCOPE_ALLOWED_ROOTS=/reports:/model-source ./nsysscope start
 ```
 
-The result directory is the portable unit of storage. A successful run writes:
+结果目录是可移植的存储单元。一次成功的运行会写出：
 
 ```text
 result-package/
 ├── analysis.json
 ├── nsysscope-package.json
-├── csv/                 # exactly six normalized CSV tables
-├── xlsx/                # one XLSX workbook for each CSV
-├── trace/               # exported or copied SQLite trace
-├── logs/job.log         # bounded Agent/job log
-└── metadata/            # request, prompt, manifest and validation evidence
+├── csv/                 # 六张规范化的 CSV 表
+├── xlsx/                # 每张 CSV 对应一份 XLSX 工作簿
+├── trace/               # 导出或复制的 SQLite trace
+├── logs/job.log         # 有大小上限的 Agent/任务日志
+└── metadata/            # 请求、prompt、manifest 和校验证据
 ```
 
-By default, `./nsysscope start` keeps its job index, lock and operational log
-in a temporary runtime directory and deletes that directory when the tool
-stops. The result packages are the only persistent task data.
+默认情况下，`./nsysscope start` 把任务索引、锁文件和运行日志放在一个临时运行
+目录里，工具停止时会一起删除。结果包是唯一会持久保留的任务数据。
 
-Persistent task history is optional. Enable it explicitly when needed:
+持久化任务历史是可选功能，需要显式开启：
 
 ```bash
 NSYSSCOPE_PERSIST_STATE=true \
@@ -202,44 +183,38 @@ NSYSSCOPE_DATA_DIR=/path/to/small-state-dir \
 ./nsysscope start
 ```
 
-Even in persistent mode, this directory contains only lightweight task
-metadata; CSV, XLSX, SQLite and task logs remain in their result packages.
+即使开启了持久化模式，这个目录也只存放轻量的任务元数据；CSV、XLSX、SQLite 和
+任务日志仍然留在各自的结果包里。
 
-Agent logs are bounded by default:
+Agent 日志默认有大小上限：
 
-- Comate uses Zulu `task-json`, so only the final task result is consumed instead
-  of cumulative conversation snapshots;
-- a lightweight heartbeat is recorded every 30 seconds while an Agent is
-  silent;
-- individual log records are capped at 16 KiB and each job log is capped at
-  2 MiB;
-- the dashboard reads logs incrementally by byte offset rather than loading the
-  whole file.
+- Comate 使用 Zulu 的 `task-json` 模式，只保留最终任务结果，不会保留累积的会话
+  快照；
+- Agent 静默期间每 30 秒记录一次轻量心跳；
+- 单条日志记录上限 16 KiB，单个任务日志总大小上限 2 MiB；
+- 页面按字节偏移增量读取日志，不会加载整个文件。
 
-The limits can be adjusted with `NSYSSCOPE_AGENT_HEARTBEAT_SECONDS`,
-`NSYSSCOPE_JOB_LOG_LINE_MAX_BYTES`, and `NSYSSCOPE_JOB_LOG_MAX_BYTES`.
+这些限制可以通过 `NSYSSCOPE_AGENT_HEARTBEAT_SECONDS`、
+`NSYSSCOPE_JOB_LOG_LINE_MAX_BYTES` 和 `NSYSSCOPE_JOB_LOG_MAX_BYTES` 调整。
 
-## Existing results
+## 导入已有结果
 
-Use **导入结果目录（无需 Agent）** and enter the package directory or ZIP. If it
-already contains `analysis.json`, NsysScope opens it directly; if it only has
-the normalized six CSV files, NsysScope builds `analysis.json` automatically.
-Both the new `csv/` layout and legacy flat six-table directories are supported.
-Use **导入 JSON** only for a standalone browser-side preview.
+使用"导入结果目录（无需 Agent）"，填入包目录或 ZIP 文件路径。如果目录里已经有
+`analysis.json`，NsysScope 会直接打开；如果只有规范化的六张 CSV，NsysScope 会
+自动构建 `analysis.json`。新版的 `csv/` 子目录布局和旧版的平铺六表目录都支持。
+"导入 JSON"只用于纯浏览器端的单次预览。
 
-ZIP import asks for a new result directory, validates paths before extraction,
-and writes the normalized CSV, XLSX, analysis data, optional trace, metadata and
-bounded log only into that selected directory.
+ZIP 导入会要求指定一个新的结果目录，解压前会先校验路径，并且只会把规范化的
+CSV、XLSX、分析数据、可选的 trace、metadata 和有大小上限的日志写入那个指定
+目录。
 
-The six CSV files are sufficient. Manifests, semantic maps, validation reports
-and statistics sidecars improve provenance but are optional for quick import.
-When sidecars are absent, categories are recovered from the core and auxiliary
-tables, remaining rows are treated as communication, and the imported package
-is marked as lacking external validation evidence.
+六张 CSV 文件本身就足够使用。Manifest、语义映射、校验报告和统计 sidecar 能
+提升可追溯性，但对于快速导入来说是可选的。缺少这些 sidecar 时，分类信息会从
+核心计算表和辅助算子表里恢复，剩余的行会被视为通信类别，导入的包也会被标记
+为"缺少外部校验证据"。
 
-## Optional Codex plugin
+## 可选的 Codex 插件
 
-The validated plugin source lives at `plugins/nsysscope`. It contributes the
-same analysis Skill to Codex and includes a launcher adapter, while the
-standalone executable remains the primary UI and also supports Comate and
-Agent-free imports.
+经过校验的插件源码位于 `plugins/nsysscope`。它把同一个分析 Skill 提供给
+Codex，并附带一个启动适配器；独立可执行文件仍然是主要的使用入口，同时也支持
+Comate 以及无需 Agent 的导入场景。
