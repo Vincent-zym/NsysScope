@@ -16,6 +16,16 @@ chmod +x nsysscope-linux-x86_64.run
 Python 3；分析新的 `.nsys-rep` 还需要 `nsys` 和一个已登录的 Codex 或 Comate
 Provider。
 
+`.run` 文件是构建产物，未提交到仓库（见 `.gitignore` 里的 `release/*.run`）。
+从源码重新构建：
+
+```bash
+python3 scripts/build_portable.py
+```
+
+生成的文件位于 `release/nsysscope-linux-x86_64.run`，只包含运行时后端、已构建
+的前端页面和兜底 skill，不含 Node.js、npm 依赖或任务数据。
+
 **从源码启动**：
 
 ```bash
