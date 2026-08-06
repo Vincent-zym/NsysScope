@@ -397,9 +397,11 @@ def main() -> None:
         source = class_rows.get(computed["name"])
         if source is None:
             raise ValueError(f"classification table misses {computed['name']}")
-        if int(number(source.get("算子数量")) or -1) != computed["count"]:
+        source_count = number(source.get("算子数量"))
+        if source_count is None or int(source_count) != computed["count"]:
             raise ValueError(f"classification count mismatch for {computed['name']}")
-        if abs((number(source.get("总耗时(us)")) or -1) - computed["durationUs"]) > 0.01:
+        source_duration = number(source.get("总耗时(us)"))
+        if source_duration is None or abs(source_duration - computed["durationUs"]) > 0.01:
             raise ValueError(f"classification duration mismatch for {computed['name']}")
     try:
         stable_samples = stable_sample_count(stats, manifest)

@@ -12,7 +12,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from .config import Settings
-from .models import JobCreate, JobView
+from .models import JobCreate, JobView, PublishRequest, PublishUsername
 from .runner import JobRunner
 from .store import JobStore
 
@@ -213,16 +213,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if job["status"] in {"succeeded", "failed", "cancelled"}:
             return view(job)
         runner.cancel(job_id)
-        return view(store.update(
-            job_id, status="cancelled", progress=100, message="任务已取消",
-        ))
+        # Atomic conditional update: only flips to cancelled if the job has
+        # not already reached succeeded/failed/cancelled in the meantime, so
+        # a run() that finishes concurrently cannot have its terminal state
+        # overwritten by this request.
+        cancelled = store.cancel_if_active(job_id)
+        if cancelled["status"] == "cancelled":
+            try:
+                runner.wipe_job_outputs(Path(cancelled["output_dir"]))
+            except OSError as exc:
+                runner.log(Path(cancelled["output_dir"]), f"[cancelled] 清理结果目录失败：{exc}")
+        return view(cancelled)
 
     @app.post(
         "/api/jobs/{job_id}/publish",
         response_model=JobView,
         dependencies=[Depends(authorize)],
     )
-    def publish_job(job_id: str) -> JobView:
+    def publish_job(job_id: str, request: PublishUsername) -> JobView:
         try:
             job = store.get(job_id)
         except KeyError as exc:
@@ -230,15 +238,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if job["status"] != "succeeded":
             raise HTTPException(status_code=409, detail="only succeeded jobs can be published")
         try:
-            url = runner.publish_to_popo(job_id, Path(job["output_dir"]))
+            url = runner.publish_to_popo(job_id, Path(job["output_dir"]), request.username)
         except RuntimeError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
         return view(store.update(job_id, popo_url=url))
 
     @app.post("/api/publish", dependencies=[Depends(authorize)])
-    def publish_current(payload: dict) -> dict:
+    def publish_current(request: PublishRequest) -> dict:
         try:
-            url = runner.publish_analysis_payload(payload)
+            url = runner.publish_analysis_payload(request.analysis, request.username)
         except RuntimeError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
         return {"popo_url": url}

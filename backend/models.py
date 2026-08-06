@@ -64,3 +64,12 @@ class JobView(BaseModel):
     error: str | None = None
     last_activity_at: datetime | None = None
     idle_seconds: int | None = None
+
+
+class PublishRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=120)
+    analysis: dict = Field(default_factory=dict)
+
+
+class PublishUsername(BaseModel):
+    username: str = Field(min_length=1, max_length=120)

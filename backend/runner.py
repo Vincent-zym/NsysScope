@@ -7,6 +7,7 @@ import re
 import secrets
 import shlex
 import shutil
+import stat
 import subprocess
 import tempfile
 import threading
@@ -43,11 +44,75 @@ class JobRunner:
         self.lock = threading.Lock()
         self.log_lock = threading.Lock()
 
+    def _run_tracked(
+        self, job_id: str | None, command: list[str], *,
+        env: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        """Run a short deterministic subprocess (converter/validator) with a
+        bounded timeout, registered under `job_id` so cancel() can kill it.
+
+        Unlike run_process (used for the long-lived Agent call), this blocks
+        until completion or timeout and returns a CompletedProcess, matching
+        the call sites that previously used bare subprocess.run.
+        """
+        process = subprocess.Popen(
+            command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, env=env, start_new_session=True,
+        )
+        if job_id is not None:
+            with self.lock:
+                self.processes[job_id] = process
+        try:
+            stdout, _ = process.communicate(
+                timeout=self.settings.subprocess_timeout_seconds,
+            )
+        except subprocess.TimeoutExpired:
+            self._kill_process_group(process)
+            stdout, _ = process.communicate()
+            raise RuntimeError(
+                f"process timed out after {self.settings.subprocess_timeout_seconds}s: "
+                f"{command[0]}"
+            ) from None
+        finally:
+            if job_id is not None:
+                with self.lock:
+                    if self.processes.get(job_id) is process:
+                        self.processes.pop(job_id, None)
+        return subprocess.CompletedProcess(command, process.returncode, stdout, "")
+
+    @staticmethod
+    def _kill_process_group(process: subprocess.Popen[str]) -> None:
+        try:
+            os.killpg(process.pid, 15)
+        except ProcessLookupError:
+            return
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(process.pid, 9)
+            except ProcessLookupError:
+                pass
+
     def submit(self, job_id: str) -> None:
         self.pool.submit(self.run, job_id)
 
     def submit_conversion_retry(self, job_id: str) -> None:
         self.pool.submit(self.retry_conversion, job_id)
+
+    @staticmethod
+    def wipe_job_outputs(job_dir: Path) -> None:
+        """Remove everything a cancelled job may have produced, keeping only
+        the bounded job log so the user can see why/when it was cancelled.
+        """
+        preserve = {"logs"}
+        for entry in job_dir.iterdir():
+            if entry.name in preserve:
+                continue
+            if entry.is_dir():
+                shutil.rmtree(entry, ignore_errors=True)
+            else:
+                entry.unlink(missing_ok=True)
 
     @staticmethod
     def job_log_path(job_dir: Path) -> Path:
@@ -82,8 +147,13 @@ class JobRunner:
         self.store.update(job_id, status=status, progress=progress, message=message)
         self.log(job_dir, f"[{progress:03d}%] {message}")
 
+    def is_cancelled(self, job_id: str) -> bool:
+        return self.store.get(job_id)["status"] == "cancelled"
+
     def run(self, job_id: str) -> None:
         job = self.store.get(job_id)
+        if job["status"] == "cancelled":
+            return
         request = JobCreate.model_validate(job["request"])
         job_dir = Path(job["output_dir"])
         try:
@@ -93,7 +163,7 @@ class JobRunner:
                 )
                 self.state(job_id, job_dir, "converting", 70, "正在转换已有六表分析包")
                 if package.is_file():
-                    self.import_zip_package(package, job_dir, request)
+                    self.import_zip_package(package, job_dir, request, job_id=job_id)
                 else:
                     csv_package = self.csv_package_dir(package)
                     analysis_path = package / "analysis.json"
@@ -105,17 +175,24 @@ class JobRunner:
                         if prefix:
                             self.validate_package(
                                 csv_package, prefix, analysis_path=analysis_path,
+                                job_id=job_id,
                             )
-                            self.ensure_xlsx(csv_package, package / "xlsx")
+                            self.ensure_xlsx(csv_package, package / "xlsx", job_id=job_id)
                     else:
                         prefix = self.detect_prefix(csv_package, request.prefix)
-                        self.validate_package(csv_package, prefix)
-                        self.convert(csv_package, package / "analysis.json", prefix, request)
+                        self.validate_package(csv_package, prefix, job_id=job_id)
+                        self.convert(
+                            csv_package, package / "analysis.json", prefix, request,
+                            job_id=job_id,
+                        )
                         self.validate_package(
                             csv_package, prefix, analysis_path=package / "analysis.json",
+                            job_id=job_id,
                         )
-                        self.ensure_xlsx(csv_package, package / "xlsx")
+                        self.ensure_xlsx(csv_package, package / "xlsx", job_id=job_id)
             else:
+                if self.is_cancelled(job_id):
+                    return
                 paths = self.resolve_inputs(request)
                 context = {key: str(value) if value else None for key, value in paths.items()}
                 context.update(request.model_dump())
@@ -127,32 +204,47 @@ class JobRunner:
                 (metadata_dir / "context.json").write_text(
                     json.dumps(context, ensure_ascii=False, indent=2) + "\n",
                 )
+                if self.is_cancelled(job_id):
+                    return
                 sqlite_path = self.export_nsys(job_id, job_dir, paths["report"])
                 context["sqlite_path"] = str(sqlite_path)
                 (metadata_dir / "context.json").write_text(
                     json.dumps(context, ensure_ascii=False, indent=2) + "\n",
                 )
+                if self.is_cancelled(job_id):
+                    return
                 self.run_agent(job_id, job_dir, request, paths, sqlite_path)
+                if self.is_cancelled(job_id):
+                    return
                 self.state(job_id, job_dir, "converting", 88, "正在构建前端 analysis.json")
                 package = self.find_package(job_dir, request.prefix)
-                self.validate_package(package, request.prefix)
-                self.convert(package, job_dir / "analysis.json", request.prefix, request)
+                self.validate_package(package, request.prefix, job_id=job_id)
+                self.convert(
+                    package, job_dir / "analysis.json", request.prefix, request,
+                    job_id=job_id,
+                )
                 self.validate_package(
                     package, request.prefix, analysis_path=job_dir / "analysis.json",
+                    job_id=job_id,
                 )
                 trace_path = self.organize_result_package(
-                    job_dir, package, request.prefix, sqlite_path,
+                    job_dir, package, request.prefix, sqlite_path, job_id=job_id,
                 )
                 context["sqlite_path"] = str(trace_path)
                 (metadata_dir / "context.json").write_text(
                     json.dumps(context, ensure_ascii=False, indent=2) + "\n",
                 )
 
+            if self.is_cancelled(job_id):
+                return
             self.state(job_id, job_dir, "validating", 95, "正在校验前端数据契约")
             self.validate_analysis(job_dir / "analysis.json")
-            self.state(job_id, job_dir, "succeeded", 100, "分析完成")
+            # Never let a terminal write clobber a cancellation that raced in
+            # after the last cancellation check above.
+            if not self.is_cancelled(job_id):
+                self.state(job_id, job_dir, "succeeded", 100, "分析完成")
         except Exception as exc:
-            if self.store.get(job_id)["status"] == "cancelled":
+            if self.is_cancelled(job_id):
                 self.log(job_dir, "[cancelled] Agent 进程已终止")
             else:
                 self.log(job_dir, traceback.format_exc())
@@ -167,15 +259,17 @@ class JobRunner:
 
     def retry_conversion(self, job_id: str) -> None:
         job = self.store.get(job_id)
+        if job["status"] == "cancelled":
+            return
         request = JobCreate.model_validate(job["request"])
         job_dir = Path(job["output_dir"])
         try:
             self.state(job_id, job_dir, "converting", 88, "正在重试构建前端 analysis.json")
             package = self.find_package(job_dir, request.prefix)
             prefix = self.detect_prefix(package, request.prefix)
-            self.convert(package, job_dir / "analysis.json", prefix, request)
+            self.convert(package, job_dir / "analysis.json", prefix, request, job_id=job_id)
             if request.mode == "existing_package" or package == job_dir / "csv":
-                self.ensure_xlsx(package, job_dir / "xlsx")
+                self.ensure_xlsx(package, job_dir / "xlsx", job_id=job_id)
             else:
                 context_path = job_dir / "metadata" / "context.json"
                 context = json.loads(context_path.read_text()) if context_path.exists() else {}
@@ -191,21 +285,27 @@ class JobRunner:
                 if sqlite_path is None:
                     raise RuntimeError("conversion retry cannot locate the SQLite trace")
                 trace_path = self.organize_result_package(
-                    job_dir, package, prefix, sqlite_path,
+                    job_dir, package, prefix, sqlite_path, job_id=job_id,
                 )
                 context["sqlite_path"] = str(trace_path)
                 context_path.write_text(
                     json.dumps(context, ensure_ascii=False, indent=2) + "\n",
                 )
+            if self.is_cancelled(job_id):
+                return
             self.state(job_id, job_dir, "validating", 95, "正在校验前端数据契约")
             self.validate_analysis(job_dir / "analysis.json")
-            self.state(job_id, job_dir, "succeeded", 100, "分析完成")
+            if not self.is_cancelled(job_id):
+                self.state(job_id, job_dir, "succeeded", 100, "分析完成")
         except Exception as exc:
-            self.log(job_dir, traceback.format_exc())
-            self.store.update(
-                job_id, status="failed", progress=100,
-                message="转换重试失败", error=str(exc),
-            )
+            if self.is_cancelled(job_id):
+                self.log(job_dir, "[cancelled] 转换重试已终止")
+            else:
+                self.log(job_dir, traceback.format_exc())
+                self.store.update(
+                    job_id, status="failed", progress=100,
+                    message="转换重试失败", error=str(exc),
+                )
 
     def resolve_inputs(self, request: JobCreate) -> dict[str, Path | None]:
         values = {
@@ -684,7 +784,7 @@ Requirements:
 
     def convert(
         self, package: Path, output: Path, prefix: str,
-        request: JobCreate | None = None,
+        request: JobCreate | None = None, job_id: str | None = None,
     ) -> None:
         command = [
             "python3", str(self.settings.converter), str(package), str(output),
@@ -696,21 +796,22 @@ Requirements:
                 "--stage", request.stage,
                 "--hardware", request.hardware,
             ])
-        completed = subprocess.run(command, text=True, capture_output=True)
+        completed = self._run_tracked(job_id, command)
         if completed.returncode:
-            raise RuntimeError(completed.stderr.strip() or "analysis conversion failed")
+            raise RuntimeError(completed.stdout.strip() or "analysis conversion failed")
 
-    def ensure_xlsx(self, csv_dir: Path, xlsx_dir: Path) -> None:
+    def ensure_xlsx(self, csv_dir: Path, xlsx_dir: Path, job_id: str | None = None) -> None:
         command = [
             "python3", str(self.settings.xlsx_converter),
             str(csv_dir), str(xlsx_dir),
         ]
-        completed = subprocess.run(command, text=True, capture_output=True)
+        completed = self._run_tracked(job_id, command)
         if completed.returncode:
-            raise RuntimeError(completed.stderr.strip() or "CSV to XLSX conversion failed")
+            raise RuntimeError(completed.stdout.strip() or "CSV to XLSX conversion failed")
 
     def import_zip_package(
         self, archive_path: Path, result_dir: Path, request: JobCreate,
+        job_id: str | None = None,
     ) -> None:
         if archive_path.suffix.lower() != ".zip":
             raise RuntimeError("existing package file must be a .zip archive")
@@ -723,6 +824,11 @@ Requirements:
                 if total_size > 100 * 1024 * 1024 * 1024:
                     raise RuntimeError("ZIP package expands beyond the 100 GiB safety limit")
                 for item in archive.infolist():
+                    if item.is_dir():
+                        continue
+                    mode = (item.external_attr >> 16) & 0xFFFF
+                    if stat.S_ISLNK(mode):
+                        raise RuntimeError(f"unsafe ZIP entry (symlink): {item.filename}")
                     target = (extracted / item.filename).resolve()
                     if not target.is_relative_to(extracted.resolve()):
                         raise RuntimeError(f"unsafe ZIP path: {item.filename}")
@@ -742,8 +848,11 @@ Requirements:
             if source_analysis.exists():
                 shutil.copy2(source_analysis, result_dir / "analysis.json")
             else:
-                self.convert(csv_source, result_dir / "analysis.json", prefix, request)
-            self.ensure_xlsx(csv_dir, xlsx_dir)
+                self.convert(
+                    csv_source, result_dir / "analysis.json", prefix, request,
+                    job_id=job_id,
+                )
+            self.ensure_xlsx(csv_dir, xlsx_dir, job_id=job_id)
             for sidecar in source.rglob("*.json"):
                 if sidecar.name in {"analysis.json", "nsysscope-package.json"}:
                     continue
@@ -787,6 +896,7 @@ Requirements:
 
     def organize_result_package(
         self, result_dir: Path, package_dir: Path, prefix: str, sqlite_path: Path,
+        job_id: str | None = None,
     ) -> Path:
         csv_dir = result_dir / "csv"
         xlsx_dir = result_dir / "xlsx"
@@ -805,8 +915,7 @@ Requirements:
             for extra_csv in source_dir.glob("*.csv"):
                 shutil.move(str(extra_csv), metadata_dir / extra_csv.name)
 
-        self.ensure_xlsx(csv_dir, xlsx_dir)
-        trace_path = trace_dir / sqlite_path.name
+        self.ensure_xlsx(csv_dir, xlsx_dir, job_id=job_id)
         if sqlite_path.resolve() != trace_path.resolve():
             if sqlite_path.is_relative_to(result_dir):
                 shutil.move(str(sqlite_path), trace_path)
@@ -904,6 +1013,7 @@ Requirements:
 
     def validate_package(
         self, package: Path, prefix: str, *, analysis_path: Path | None = None,
+        job_id: str | None = None,
     ) -> None:
         validator = self.settings.skill_dir / "scripts" / "validate_analysis_package.py"
         if not validator.is_file():
@@ -916,33 +1026,36 @@ Requirements:
         ]
         if analysis_path is not None:
             command.extend(["--analysis-json", str(analysis_path)])
-        completed = subprocess.run(command, text=True, capture_output=True)
+        completed = self._run_tracked(job_id, command)
         if completed.returncode:
-            detail = (completed.stdout + completed.stderr).strip()
-            raise RuntimeError(f"analysis package validation failed: {detail}")
+            raise RuntimeError(f"analysis package validation failed: {completed.stdout.strip()}")
 
-    def publish_to_popo(self, job_id: str, job_dir: Path) -> str:
+    def publish_to_popo(self, job_id: str, job_dir: Path, username: str) -> str:
         analysis_path = job_dir / "analysis.json"
         if not analysis_path.is_file():
             raise RuntimeError("analysis.json is missing; cannot publish")
-        return self._publish_analysis_bytes(analysis_path.read_bytes(), slug=f"nsysscope-{job_id}")
+        return self._publish_analysis_bytes(
+            analysis_path.read_bytes(), slug=f"nsysscope-{job_id}", username=username,
+        )
 
-    def publish_analysis_payload(self, analysis: dict) -> str:
+    def publish_analysis_payload(self, analysis: dict, username: str) -> str:
         payload_bytes = json.dumps(analysis, ensure_ascii=False).encode("utf-8")
         slug = f"nsysscope-{secrets.token_hex(8)}"
-        return self._publish_analysis_bytes(payload_bytes, slug=slug)
+        return self._publish_analysis_bytes(payload_bytes, slug=slug, username=username)
 
-    def _publish_analysis_bytes(self, analysis_bytes: bytes, *, slug: str) -> str:
+    def _publish_analysis_bytes(
+        self, analysis_bytes: bytes, *, slug: str, username: str,
+    ) -> str:
         static_dir = Path(__file__).resolve().parent / "static"
         index_html = static_dir / "index.html"
         assets_dir = static_dir / "assets"
         if not index_html.is_file() or not assets_dir.is_dir():
             raise RuntimeError("dashboard static assets are missing; cannot publish")
-        upload_script = Path(
-            "/root/.comate/skills/.system/popo/scripts/upload.py"
-        )
+        upload_script = self.settings.popo_upload_script
         if not upload_script.is_file():
             raise RuntimeError("popo upload script is not available")
+        if not username:
+            raise RuntimeError("no popo username was provided")
 
         site_dir = Path(tempfile.mkdtemp(prefix="nsysscope-popo-"))
         try:
@@ -961,7 +1074,7 @@ Requirements:
             shell_command = [
                 shutil.which("python3") or "python3",
                 str(upload_script),
-                "--username", "zhongyuanming",
+                "--username", username,
                 "--title", title,
                 "--slug", slug,
                 "--visibility", "internal",
@@ -975,7 +1088,7 @@ Requirements:
             full_command = [
                 shutil.which("python3") or "python3",
                 str(upload_script),
-                "--username", "zhongyuanming",
+                "--username", username,
                 "--title", title,
                 "--slug", slug,
                 "--previous-slug", slug,
@@ -1048,9 +1161,6 @@ Requirements:
         with self.lock:
             process = self.processes.get(job_id)
         if process and process.poll() is None:
-            try:
-                os.killpg(process.pid, 15)
-                return True
-            except ProcessLookupError:
-                return False
+            self._kill_process_group(process)
+            return True
         return False

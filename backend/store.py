@@ -80,6 +80,23 @@ class JobStore:
             )
         return self.get(job_id)
 
+    def cancel_if_active(self, job_id: str) -> dict[str, Any]:
+        """Mark a job cancelled only if it has not already reached a terminal
+        state. Runs the read-check-write as one transaction under the lock so
+        a run() completing concurrently cannot be overwritten after the fact,
+        and this call cannot resurrect an already-finished job as cancelled.
+        """
+        now = datetime.now(UTC).isoformat()
+        with self.lock, self.connect() as db:
+            db.execute(
+                "UPDATE jobs SET status = 'cancelled', progress = 100, "
+                "message = '任务已取消', updated_at = ? "
+                "WHERE id = ? AND status NOT IN "
+                "('succeeded', 'failed', 'cancelled')",
+                (now, job_id),
+            )
+        return self.get(job_id)
+
     def get(self, job_id: str) -> dict[str, Any]:
         with self.connect() as db:
             row = db.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()

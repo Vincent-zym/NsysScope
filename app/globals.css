@@ -231,6 +231,12 @@ tbody tr.selected { background: rgba(92,129,220,.12); box-shadow: inset 3px 0 #6
 .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
 .dialog-actions button { border: 1px solid #2c3544; border-radius: 8px; background: #171d27; color: #a8b4c5; padding: 9px 15px; font-size: 12px; cursor: pointer; }
 .dialog-actions button.primary { background: #244386; border-color: #4365ba; color: #e5ecff; }
+.confirm-backdrop { position: fixed; inset: 0; z-index: 60; background: rgba(2,4,8,.6); backdrop-filter: blur(4px); display: grid; place-items: center; padding: 22px; }
+.confirm-card { width: min(380px, 92vw); border: 1px solid #303a4a; border-radius: 13px; padding: 22px; background: linear-gradient(145deg,#161c27,#0e1219); box-shadow: 0 24px 70px rgba(0,0,0,.55); }
+.confirm-card p { margin: 0 0 18px; font-size: 13px; line-height: 1.6; color: #c3cde0; }
+.confirm-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.confirm-actions button { border: 1px solid #2c3544; border-radius: 8px; background: #171d27; color: #a8b4c5; padding: 9px 15px; font-size: 12px; cursor: pointer; }
+.confirm-actions button.danger { background: #7a2430; border-color: #a8394a; color: #ffd7dc; }
 .job-progress { margin-top: 24px; }
 .job-status { display: grid; grid-template-columns: 90px 1fr 45px; align-items: center; }
 .job-status span { color: #7899f0; font: 9px ui-monospace, monospace; letter-spacing: .12em; }

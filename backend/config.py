@@ -43,6 +43,9 @@ class Settings:
     skill_dir: Path
     converter: Path
     xlsx_converter: Path
+    subprocess_timeout_seconds: int
+    popo_username: str
+    popo_upload_script: Path
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -101,6 +104,14 @@ class Settings:
                 "NSYSSCOPE_XLSX_CONVERTER",
                 project / "scripts/csv_to_xlsx.py",
             )).resolve(),
+            subprocess_timeout_seconds=max(
+                30, int(os.getenv("NSYSSCOPE_SUBPROCESS_TIMEOUT_SECONDS", "600")),
+            ),
+            popo_username=os.getenv("NSYSSCOPE_POPO_USERNAME", os.getenv("USER", "")),
+            popo_upload_script=Path(os.getenv(
+                "NSYSSCOPE_POPO_UPLOAD_SCRIPT",
+                "/root/.comate/skills/.system/popo/scripts/upload.py",
+            )).expanduser(),
         )
 
     def prepare(self) -> None:
@@ -138,7 +149,16 @@ class Settings:
         if not any(path == root or path.is_relative_to(root) for root in self.allowed_roots):
             roots = ", ".join(map(str, self.allowed_roots))
             raise ValueError(f"result path is outside NSYSSCOPE_ALLOWED_ROOTS: {roots}")
-        if path.exists() and (not path.is_dir() or any(path.iterdir())):
-            raise ValueError(f"result path must be a new or empty directory: {path}")
+        if path.exists() and not path.is_dir():
+            raise ValueError(f"result path must be a directory: {path}")
+        if path.exists():
+            # A directory left over from a cancelled run only contains
+            # logs/ (see JobRunner.wipe_job_outputs); treat that as reusable
+            # so the same result_path can be resubmitted without picking a
+            # new one each time.
+            leftovers = {entry.name for entry in path.iterdir()}
+            if leftovers - {"logs"}:
+                raise ValueError(f"result path must be a new or empty directory: {path}")
         path.mkdir(parents=True, exist_ok=True)
         return path
+

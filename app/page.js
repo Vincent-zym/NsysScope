@@ -324,6 +324,7 @@ function JobDialog({ open, onClose, onLoaded }) {
   const [modelRefresh, setModelRefresh] = useState(0);
   const [error, setError] = useState("");
   const [publishing, setPublishing] = useState(false);
+  const [cancelConfirmOpen, setCancelConfirmOpen] = useState(false);
   const terminal = ["succeeded", "failed", "cancelled"];
 
   useEffect(() => {
@@ -560,6 +561,7 @@ function JobDialog({ open, onClose, onLoaded }) {
   }
 
   async function cancelJob() {
+    setCancelConfirmOpen(false);
     setError("");
     try {
       const response = await fetch(`${api}/api/jobs/${job.id}/cancel`, {
@@ -575,12 +577,15 @@ function JobDialog({ open, onClose, onLoaded }) {
   }
 
   async function publishJob() {
+    const username = window.prompt("请输入你的 popo 账号（用户名）：");
+    if (!username) return;
     setError("");
     setPublishing(true);
     try {
       const response = await fetch(`${api}/api/jobs/${job.id}/publish`, {
         method: "POST",
-        headers: { "X-NsysScope-Token": token },
+        headers: { "X-NsysScope-Token": token, "Content-Type": "application/json" },
+        body: JSON.stringify({ username }),
       });
       const body = await response.json();
       if (!response.ok) throw new Error(body.detail || `发布失败 (${response.status})`);
@@ -699,10 +704,19 @@ function JobDialog({ open, onClose, onLoaded }) {
         {(error || job.error) && <div className="error">{error || job.error}</div>}
         <div className="dialog-actions">
           <button onClick={() => { setJob(null); setLogs([]); logCursor.current = 0; analysisLoaded.current = false; setLogHasMore(true); setError(""); }}>新建任务</button>
-          {!terminal.includes(job.status) && <button onClick={cancelJob}>取消任务</button>}
+          {!terminal.includes(job.status) && <button onClick={() => setCancelConfirmOpen(true)}>取消任务</button>}
           {job.status === "failed" && <button onClick={retryConversion}>仅重试转换</button>}
           <button className="primary" onClick={onClose}>{job.status === "succeeded" ? "查看结果" : "后台运行"}</button>
         </div>
+        {cancelConfirmOpen && <div className="confirm-backdrop" onMouseDown={() => setCancelConfirmOpen(false)}>
+          <div className="confirm-card" onMouseDown={(event) => event.stopPropagation()}>
+            <p>确定要取消这个任务吗？已产生的结果文件会被清空，此操作不可撤销。</p>
+            <div className="confirm-actions">
+              <button onClick={() => setCancelConfirmOpen(false)}>再想想</button>
+              <button className="danger" onClick={cancelJob}>确定取消</button>
+            </div>
+          </div>
+        </div>}
       </div>}
     </section>
   </div>;
@@ -733,13 +747,15 @@ export default function Dashboard() {
 
   async function publishCurrent() {
     if (!data) return;
+    const username = window.prompt("请输入你的 popo 账号（用户名）：");
+    if (!username) return;
     setError("");
     setPublishing(true);
     try {
       const response = await fetch("/api/publish", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(data),
+        body: JSON.stringify({ username, analysis: data }),
       });
       const body = await response.json();
       if (!response.ok) throw new Error(body.detail || `发布失败 (${response.status})`);
