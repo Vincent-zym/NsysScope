@@ -237,6 +237,13 @@ tbody tr.selected { background: rgba(92,129,220,.12); box-shadow: inset 3px 0 #6
 .confirm-actions { display: flex; justify-content: flex-end; gap: 8px; }
 .confirm-actions button { border: 1px solid #2c3544; border-radius: 8px; background: #171d27; color: #a8b4c5; padding: 9px 15px; font-size: 12px; cursor: pointer; }
 .confirm-actions button.danger { background: #7a2430; border-color: #a8394a; color: #ffd7dc; }
+.publish-prompt { width: min(420px, 92vw); }
+.publish-account-list { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
+.publish-account-list button { border: 1px solid #2c3544; border-radius: 8px; background: #171d27; color: #a8b4c5; padding: 8px 13px; font-size: 12px; cursor: pointer; }
+.publish-account-list button:hover { border-color: #4365ba; color: #e5ecff; }
+.publish-account-custom { display: block; margin-bottom: 18px; }
+.publish-account-custom span { display: block; margin-bottom: 6px; color: #6c8f91; font-size: 10px; }
+.publish-account-custom input { width: 100%; border: 1px solid #2c3544; border-radius: 8px; background: #0d1117; color: #d6dfec; padding: 9px 12px; font-size: 13px; }
 .job-progress { margin-top: 24px; }
 .job-status { display: grid; grid-template-columns: 90px 1fr 45px; align-items: center; }
 .job-status span { color: #7899f0; font: 9px ui-monospace, monospace; letter-spacing: .12em; }

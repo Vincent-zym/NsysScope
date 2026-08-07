@@ -325,6 +325,7 @@ function JobDialog({ open, onClose, onLoaded }) {
   const [error, setError] = useState("");
   const [publishing, setPublishing] = useState(false);
   const [cancelConfirmOpen, setCancelConfirmOpen] = useState(false);
+  const [publishPrompt, setPublishPrompt] = useState(null);
   const terminal = ["succeeded", "failed", "cancelled"];
 
   useEffect(() => {
@@ -577,24 +578,37 @@ function JobDialog({ open, onClose, onLoaded }) {
   }
 
   async function publishJob() {
-    const username = window.prompt("请输入你的 popo 账号（用户名）：");
-    if (!username) return;
-    setError("");
-    setPublishing(true);
+    openPublishPrompt(async (username) => {
+      setError("");
+      setPublishing(true);
+      try {
+        const response = await fetch(`${api}/api/jobs/${job.id}/publish`, {
+          method: "POST",
+          headers: { "X-NsysScope-Token": token, "Content-Type": "application/json" },
+          body: JSON.stringify({ username }),
+        });
+        const body = await response.json();
+        if (!response.ok) throw new Error(body.detail || `发布失败 (${response.status})`);
+        setJob(body);
+      } catch (cause) {
+        setError(cause.message);
+      } finally {
+        setPublishing(false);
+      }
+    });
+  }
+
+  async function openPublishPrompt(onConfirm) {
+    let accounts = [];
     try {
-      const response = await fetch(`${api}/api/jobs/${job.id}/publish`, {
-        method: "POST",
-        headers: { "X-NsysScope-Token": token, "Content-Type": "application/json" },
-        body: JSON.stringify({ username }),
+      const response = await fetch(`${api}/api/popo/accounts`, {
+        headers: { "X-NsysScope-Token": token },
       });
-      const body = await response.json();
-      if (!response.ok) throw new Error(body.detail || `发布失败 (${response.status})`);
-      setJob(body);
-    } catch (cause) {
-      setError(cause.message);
-    } finally {
-      setPublishing(false);
+      if (response.ok) ({ accounts } = await response.json());
+    } catch {
+      accounts = [];
     }
+    setPublishPrompt({ accounts, custom: "", onConfirm });
   }
 
   return <div className="dialog-backdrop" onMouseDown={onClose}>
@@ -718,7 +732,45 @@ function JobDialog({ open, onClose, onLoaded }) {
           </div>
         </div>}
       </div>}
+      <PublishAccountPrompt prompt={publishPrompt} onClose={() => setPublishPrompt(null)} />
     </section>
+  </div>;
+}
+
+function PublishAccountPrompt({ prompt, onClose }) {
+  const [custom, setCustom] = useState("");
+  useEffect(() => { if (prompt) setCustom(""); }, [prompt]);
+  if (!prompt) return null;
+  const { accounts, onConfirm } = prompt;
+  const confirmCustom = () => {
+    const value = custom.trim();
+    if (!value) return;
+    onConfirm(value);
+    onClose();
+  };
+  return <div className="confirm-backdrop" onMouseDown={onClose}>
+    <div className="confirm-card publish-prompt" onMouseDown={(event) => event.stopPropagation()}>
+      <p>发布到 popo 用哪个账号？</p>
+      {accounts.length > 0 && <div className="publish-account-list">
+        {accounts.map((account) => (
+          <button key={account} onClick={() => { onConfirm(account); onClose(); }}>{account}</button>
+        ))}
+      </div>}
+      <label className="publish-account-custom">
+        <span>{accounts.length > 0 ? "或输入其他账号" : "输入你的 popo 账号"}</span>
+        <input
+          value={custom}
+          onChange={(event) => setCustom(event.target.value)}
+          onKeyDown={(event) => { if (event.key === "Enter") confirmCustom(); }}
+          placeholder="用户名"
+          autoFocus={accounts.length === 0}
+        />
+      </label>
+      <div className="confirm-actions">
+        <button onClick={onClose}>取消</button>
+        <button className="primary" onClick={confirmCustom}>确定</button>
+      </div>
+    </div>
   </div>;
 }
 
@@ -733,6 +785,7 @@ export default function Dashboard() {
   const [jobOpen, setJobOpen] = useState(false);
   const [popoUrl, setPopoUrl] = useState("");
   const [publishing, setPublishing] = useState(false);
+  const [publishPrompt, setPublishPrompt] = useState(null);
   const fileRef = useRef(null);
 
   useEffect(() => {
@@ -747,24 +800,35 @@ export default function Dashboard() {
 
   async function publishCurrent() {
     if (!data) return;
-    const username = window.prompt("请输入你的 popo 账号（用户名）：");
-    if (!username) return;
-    setError("");
-    setPublishing(true);
+    openPublishPrompt(async (username) => {
+      setError("");
+      setPublishing(true);
+      try {
+        const response = await fetch("/api/publish", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ username, analysis: data }),
+        });
+        const body = await response.json();
+        if (!response.ok) throw new Error(body.detail || `发布失败 (${response.status})`);
+        setPopoUrl(body.popo_url);
+      } catch (cause) {
+        setError(cause.message);
+      } finally {
+        setPublishing(false);
+      }
+    });
+  }
+
+  async function openPublishPrompt(onConfirm) {
+    let accounts = [];
     try {
-      const response = await fetch("/api/publish", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ username, analysis: data }),
-      });
-      const body = await response.json();
-      if (!response.ok) throw new Error(body.detail || `发布失败 (${response.status})`);
-      setPopoUrl(body.popo_url);
-    } catch (cause) {
-      setError(cause.message);
-    } finally {
-      setPublishing(false);
+      const response = await fetch("/api/popo/accounts");
+      if (response.ok) ({ accounts } = await response.json());
+    } catch {
+      accounts = [];
     }
+    setPublishPrompt({ accounts, custom: "", onConfirm });
   }
 
   const colors = useMemo(() => data ? Object.fromEntries(
@@ -1040,6 +1104,7 @@ export default function Dashboard() {
         </section>
       </section>
       <JobDialog open={jobOpen} onClose={() => setJobOpen(false)} onLoaded={loadAnalysis} />
+      <PublishAccountPrompt prompt={publishPrompt} onClose={() => setPublishPrompt(null)} />
     </main>
   );
 }

@@ -94,6 +94,22 @@ class JobRunner:
             except ProcessLookupError:
                 pass
 
+    @staticmethod
+    def detect_popo_accounts() -> list[str]:
+        """List local usernames that have a cached popo ugate token, so the
+        frontend can offer them instead of asking the user to type one from
+        scratch. Reads only filenames, never token contents.
+        """
+        uuap_dir = Path.home() / ".config" / "uuap"
+        if not uuap_dir.is_dir():
+            return []
+        prefix = ".eac_ugate_token_"
+        return sorted(
+            entry.name.removeprefix(prefix)
+            for entry in uuap_dir.iterdir()
+            if entry.is_file() and entry.name.startswith(prefix)
+        )
+
     def submit(self, job_id: str) -> None:
         self.pool.submit(self.run, job_id)
 

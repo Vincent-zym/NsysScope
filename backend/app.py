@@ -204,6 +204,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=500, detail="analysis artifact is missing")
         return FileResponse(path, media_type="application/json", filename=f"{job_id}-analysis.json")
 
+    @app.get("/api/popo/accounts", dependencies=[Depends(authorize)])
+    def popo_accounts() -> dict:
+        return {"accounts": runner.detect_popo_accounts()}
+
     @app.post("/api/jobs/{job_id}/cancel", response_model=JobView, dependencies=[Depends(authorize)])
     def cancel_job(job_id: str) -> JobView:
         try:
