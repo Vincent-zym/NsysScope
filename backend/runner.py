@@ -1090,6 +1090,7 @@ Requirements:
                 shutil.move(str(extra_csv), metadata_dir / extra_csv.name)
 
         self.ensure_xlsx(csv_dir, xlsx_dir, job_id=job_id)
+        trace_path = trace_dir / sqlite_path.name
         if sqlite_path.resolve() != trace_path.resolve():
             if sqlite_path.is_relative_to(result_dir):
                 shutil.move(str(sqlite_path), trace_path)
