@@ -34,8 +34,18 @@ Origin:
 序号,module,operator_name,duration_us,start_ns,end_ns,device,stream,layer_id,
 unit_position,unit_id,unit_variant,duration_min_us,duration_max_us,
 duration_diff_us,duration_avg_us,duration_avg_pct_of_total,python_function,
-function_introduction,mapping_reason
+function_introduction,mapping_reason,dispatch_code_snippet
 ```
+
+`dispatch_code_snippet` is the actual source text of the call-chain's deepest
+frame captured at analysis time (the statement that dispatches the CUDA/Triton
+work, plus any immediately enclosing branch condition needed to understand why
+it fired). It is a text snapshot, not a line-number reference: source line
+numbers drift as code changes after the trace was captured, but the quoted
+text remains checkable evidence. See
+[references/mapping-and-stats.md](references/mapping-and-stats.md) for the
+capture rule. Leave blank only when the dispatch site cannot be identified,
+and record that in `uncertain_mappings`.
 
 Operator overview:
 
@@ -51,7 +61,7 @@ Core compute:
 
 ```text
 序号,单元位置,单元ID,单元类型,功能模块,module,算子名称,算子耗时(us),
-算子耗时占比(%),shape,mfu,python_function,功能介绍
+算子耗时占比(%),shape,mfu,mbu,python_function,功能介绍
 ```
 
 Auxiliary:
@@ -155,6 +165,23 @@ MFU = 2*M*N*K / (duration_seconds * dense_peak_flops)
 
 Use `references/hardware-peaks.json`. Reject MFU above 100%. When shape, compute
 mode and verified hardware profile exist, missing MFU is an error.
+
+Core GEMMs also receive an approximate `mbu` (Memory Bandwidth Utilization),
+reported alongside `mfu` and left empty when the byte estimate is unavailable.
+No hardware memory-bandwidth peak is registered yet, so `mbu` is populated as
+the estimated accessed bytes without a utilization percentage until a peak
+registry exists:
+
+```text
+accessed_bytes = (M*K + K*N + M*N) * dtype_bytes
+mbu = accessed_bytes / duration_seconds   # bytes/second, not yet a peak ratio
+```
+
+`dtype_bytes` is derived from the GEMM's operand `dtypes` (falling back to the
+resolved `compute_dtype`); this is a coarse estimate that ignores cache reuse
+and intermediate quantization/dequantization traffic. Once a memory-bandwidth
+peak registry is added (see `references/hardware-peaks.json`), `mbu` should be
+reported as a true peak-relative percentage like `mfu`.
 
 Classify each operator independently. Core compute is a strict allow-list:
 

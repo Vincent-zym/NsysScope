@@ -59,6 +59,25 @@ For grouped MoE, distinguish logical routed rows from padded physical rows. If
 the trace exposes only logical work, report logical MFU and say so. Do not
 invent expert padding.
 
+## MBU evidence (approximate)
+
+For each eligible GEMM record, alongside MFU, also estimate accessed bytes and
+report a coarse `mbu`:
+
+```text
+accessed_bytes = (M*K + K*N + M*N) * dtype_bytes
+mbu = accessed_bytes / duration_seconds
+```
+
+`dtype_bytes` comes from the GEMM's operand dtypes (same source as MFU's
+`compute_dtype`). This ignores cache reuse, tiling, and intermediate
+quantization/dequantization traffic, so treat it as a rough bytes/second
+estimate, not a peak-relative utilization percentage. There is currently no
+registered memory-bandwidth peak (`references/hardware-peaks.json` only lists
+compute TFLOPS), so `mbu` cannot yet be expressed as `% of peak bandwidth`.
+Once a bandwidth peak registry exists, switch this to a true utilization
+ratio like MFU's.
+
 ## CPU attribution
 
 GPU idle is not CPU delay. To claim a CPU launch gap, join the next CUDA work's

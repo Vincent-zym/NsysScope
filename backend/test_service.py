@@ -53,8 +53,14 @@ def settings(tmp_path: Path) -> Settings:
         job_log_line_max_bytes=16 * 1024,
         nsys_bin="nsys",
         skill_dir=Path("/root/.codex/skills/sglang-nsys-static-analysis"),
+        operator_advisor_skill_dir=(
+            PROJECT / "bundled" / "skills" / "sglang-operator-fusion-advisor"
+        ),
         converter=PROJECT / "scripts/build_analysis_json.py",
         xlsx_converter=PROJECT / "scripts/csv_to_xlsx.py",
+        subprocess_timeout_seconds=600,
+        popo_username="",
+        popo_upload_script=PROJECT / "does-not-exist" / "upload.py",
     )
 
 

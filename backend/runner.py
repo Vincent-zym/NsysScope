@@ -255,6 +255,18 @@ class JobRunner:
                 return
             self.state(job_id, job_dir, "validating", 95, "正在校验前端数据契约")
             self.validate_analysis(job_dir / "analysis.json")
+            if request.enable_operator_advisor and not self.is_cancelled(job_id):
+                try:
+                    self.run_operator_advisor(job_id, job_dir, request)
+                except Exception:
+                    # The operator-fusion advisor is an optional value-add
+                    # pass; its failure must never fail the main analysis,
+                    # which has already succeeded and validated by this point.
+                    self.log(
+                        job_dir,
+                        "[optimization] 算子优化建议生成失败，不影响主分析结果：\n"
+                        + traceback.format_exc(),
+                    )
             # Never let a terminal write clobber a cancellation that raced in
             # after the last cancellation check above.
             if not self.is_cancelled(job_id):
@@ -362,6 +374,152 @@ class JobRunner:
             self.run_comate(job_id, job_dir, request, paths, sqlite_path)
         else:
             self.run_codex(job_id, job_dir, request, paths, sqlite_path)
+
+    def run_operator_advisor(
+        self, job_id: str, job_dir: Path, request: JobCreate,
+    ) -> None:
+        """Optional follow-up pass: propose operator-fusion suggestions.
+
+        Runs the sglang-operator-fusion-advisor skill against the already
+        validated analysis.json/six-table package plus the original
+        source_path. Writes job_dir/optimization.json. Any failure here is
+        caught by the caller and logged as a warning — it must never flip an
+        already-succeeded main analysis to failed.
+        """
+        skill_dir = self.settings.operator_advisor_skill_dir
+        if not (skill_dir / "SKILL.md").exists():
+            raise RuntimeError(f"operator-fusion-advisor skill is missing: {skill_dir}")
+        self.state(job_id, job_dir, "validating", 96, "正在生成算子优化建议")
+        analysis_path = job_dir / "analysis.json"
+        package_dir = self.find_package(job_dir, request.prefix)
+        source_path = self.settings.resolve_allowed(
+            request.source_path or "", kind="source_path",
+        ) if request.source_path else None
+        prompt = self.build_advisor_prompt(
+            job_dir, request, analysis_path, package_dir, source_path,
+        )
+        prompt_path = job_dir / "metadata" / "advisor-prompt.md"
+        prompt_path.parent.mkdir(exist_ok=True)
+        prompt_path.write_text(prompt)
+        if request.agent_provider == "comate":
+            self.run_comate_advisor(job_id, job_dir, request, prompt, skill_dir, source_path)
+        else:
+            self.run_codex_advisor(job_id, job_dir, request, prompt, skill_dir, source_path)
+        optimization_path = job_dir / "optimization.json"
+        if not optimization_path.exists():
+            raise RuntimeError("operator-fusion-advisor did not produce optimization.json")
+        json.loads(optimization_path.read_text())  # fail fast on malformed JSON
+
+    def build_advisor_prompt(
+        self, job_dir: Path, request: JobCreate, analysis_path: Path,
+        package_dir: Path, source_path: Path | None,
+    ) -> str:
+        skill_dir = self.settings.operator_advisor_skill_dir
+        return f"""Use the `sglang-operator-fusion-advisor` skill at:
+{skill_dir}
+
+Read that SKILL.md completely before analysis. This exact path is the task's
+selected Skill version and overrides any older installed copy.
+
+This is an optional follow-up to an already-completed
+sglang-nsys-static-analysis job. Treat these as read-only input evidence:
+- analysis.json: {analysis_path}
+- six-table package directory: {package_dir}
+- model source root: {source_path or 'not supplied — skip source-tree fusion checks'}
+
+Scope: analyze exactly one repeating unit at a time. If analysis.json
+contains multiple distinct (unitPosition, unitId, unitVariant) combinations,
+pick the single position whose distinct unitVariant best represents the
+job's `model`/`stage`, or the only position if there is just one; state
+which one you chose in `scope`. Do not compare or merge suggestions across
+two different positions or variants.
+
+Write exactly one output file, at:
+{job_dir / "optimization.json"}
+
+Never edit analysis.json, the six-table package, or any file under the
+supplied model source root.
+"""
+
+    def run_codex_advisor(
+        self, job_id: str, job_dir: Path, request: JobCreate, prompt: str,
+        skill_dir: Path, source_path: Path | None,
+    ) -> None:
+        if not self.settings.codex_enabled:
+            raise RuntimeError(
+                "Codex analyzer is disabled. Set NSYSSCOPE_CODEX_ENABLED=true on an isolated runner."
+            )
+        output_message = job_dir / "metadata" / "advisor-agent-final.txt"
+        command = [
+            self.settings.codex_bin, "--ask-for-approval", "never",
+        ]
+        if request.agent_model:
+            command.extend(["--model", request.agent_model])
+        command.extend([
+            "exec",
+            "--ephemeral", "--json", "--sandbox", "workspace-write",
+            "--skip-git-repo-check", "-C", str(job_dir),
+        ])
+        add_dirs = {str(skill_dir)}
+        if source_path is not None:
+            add_dirs.add(str(source_path if source_path.is_dir() else source_path.parent))
+        for directory in sorted(add_dirs):
+            command.extend(["--add-dir", directory])
+        command.extend(["--output-last-message", str(output_message), "-"])
+        self.run_process(
+            job_id, job_dir, command, stdin=prompt,
+            heartbeat_seconds=self.settings.agent_heartbeat_seconds,
+            heartbeat_message="Codex 算子优化建议 Agent 仍在运行",
+        )
+
+    def run_comate_advisor(
+        self, job_id: str, job_dir: Path, request: JobCreate, prompt: str,
+        skill_dir: Path, source_path: Path | None,
+    ) -> None:
+        status = self._comate_status()
+        if not status["ready"]:
+            raise RuntimeError(status["message"])
+        self.stage_comate_advisor_skill(job_dir, skill_dir)
+        command = [
+            self.settings.comate_bin, "run",
+            "--query", prompt,
+            "--cwd", str(job_dir),
+            "--mode", "Agent",
+            "--activate-skill", "sglang-operator-fusion-advisor",
+            "--display", "task-json",
+            "--background-timeout", str(self.settings.comate_timeout_seconds),
+            "--disable-hooks",
+        ]
+        if self.settings.comate_username:
+            command.extend(["--username", self.settings.comate_username])
+        selected_model = request.agent_model or self.settings.comate_model
+        if selected_model:
+            command.extend(["--model", selected_model])
+        self.run_process(
+            job_id, job_dir, command, redacted_values={prompt},
+            # Operator-fusion research benefits from web search, unlike the
+            # core static-analysis pass. Keep the inherited proxy env here
+            # instead of comate_environment()'s stripped copy, so the agent
+            # can reach outbound search if the provider supports it.
+            environment={**os.environ, "NO_COLOR": "1", "PLATFORM": self.settings.comate_platform},
+            output_formatter=self.format_comate_output,
+            heartbeat_seconds=self.settings.agent_heartbeat_seconds,
+            heartbeat_message="Comate 算子优化建议 Agent 仍在运行",
+        )
+
+    def stage_comate_advisor_skill(self, job_dir: Path, skill_dir: Path) -> Path:
+        if not (skill_dir / "SKILL.md").exists():
+            raise RuntimeError(f"operator-fusion-advisor skill is missing: {skill_dir / 'SKILL.md'}")
+        target = job_dir / ".comate" / "skills" / "sglang-operator-fusion-advisor"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(
+            skill_dir,
+            target,
+            ignore=shutil.ignore_patterns(
+                "result", "evals", "agents", "__pycache__", "*.pyc",
+            ),
+        )
+        return target
 
     def skill_provenance(self) -> dict[str, str]:
         root = self.settings.skill_dir.resolve()

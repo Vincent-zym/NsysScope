@@ -28,6 +28,7 @@ class JobCreate(BaseModel):
     result_path: str | None = None
     prefix: str = Field(default="analysis", pattern=r"^[a-zA-Z0-9_-]+$")
     notes: str = Field(default="", max_length=4000)
+    enable_operator_advisor: bool = False
 
     @model_validator(mode="after")
     def validate_mode(self) -> "JobCreate":
@@ -60,6 +61,7 @@ class JobView(BaseModel):
     updated_at: datetime
     output_dir: str
     analysis_url: str | None = None
+    optimization_url: str | None = None
     popo_url: str | None = None
     error: str | None = None
     last_activity_at: datetime | None = None

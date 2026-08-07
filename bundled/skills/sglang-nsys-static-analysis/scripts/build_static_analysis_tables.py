@@ -23,18 +23,19 @@ ORIGIN_COLUMNS = [
     "duration_min_us", "duration_max_us",
     "duration_diff_us", "duration_avg_us", "duration_avg_pct_of_total",
     "python_function", "function_introduction", "mapping_reason",
+    "dispatch_code_snippet",
 ]
 OPERATOR_COLUMNS = [
     "序号", "单元位置", "单元ID", "单元类型", "功能模块", "module",
     "算子名称",
     "算子耗时(us)", "算子耗时占比(%)",
-    "shape", "mfu", "模块耗时(us)", "模块耗时占比(%)", "python_function",
+    "shape", "mfu", "mbu", "模块耗时(us)", "模块耗时占比(%)", "python_function",
     "功能介绍",
 ]
 CORE_COLUMNS = [
     "序号", "单元位置", "单元ID", "单元类型", "功能模块", "module",
     "算子名称", "算子耗时(us)",
-    "算子耗时占比(%)", "模块耗时(us)", "模块耗时占比(%)", "shape", "mfu",
+    "算子耗时占比(%)", "模块耗时(us)", "模块耗时占比(%)", "shape", "mfu", "mbu",
     "python_function", "功能介绍",
 ]
 AUX_COLUMNS = [
@@ -573,6 +574,59 @@ def compute_mfu(
     return f"{utilization:.2f}%", evidence
 
 
+# Coarse bytes-per-dtype used only for the approximate MBU estimate below.
+# This ignores cache reuse, tiling and any intermediate quantization traffic.
+DTYPE_BYTES = {
+    "fp32": 4, "tf32": 4,
+    "bf16": 2, "fp16": 2,
+    "fp8": 1, "fp8_e4m3": 1, "fp8_e5m2": 1, "mxfp8": 1,
+    "fp6": 1, "mxfp4": 1, "fp4": 1,
+    "int8": 1,
+}
+
+
+def resolve_dtype_bytes(rule: dict[str, Any], compute_dtype: str | None) -> float | None:
+    dtypes = rule.get("dtypes")
+    candidates: list[str] = []
+    if isinstance(dtypes, list):
+        candidates.extend(
+            str(item).lower()
+            for item in dtypes
+            if str(item).lower() not in {"fp32_accum", "fp32-accum", "accum_fp32"}
+        )
+    if compute_dtype:
+        candidates.append(compute_dtype.lower())
+    for candidate in candidates:
+        if candidate in DTYPE_BYTES:
+            return float(DTYPE_BYTES[candidate])
+    return None
+
+
+def compute_mbu(
+    shape: tuple[int, int, int] | None,
+    duration_us: float,
+    rule: dict[str, Any],
+    compute_dtype: str | None,
+) -> str:
+    """Approximate memory-bandwidth-utilization estimate for core GEMMs.
+
+    No hardware bandwidth-peak registry exists yet (see hardware-peaks.json,
+    which only lists compute TFLOPS), so this reports estimated bytes/second
+    rather than a true peak-relative percentage. See
+    references/runtime-evidence-and-mfu.md for the formula and caveats.
+    """
+    if shape is None or duration_us <= 0:
+        return ""
+    dtype_bytes = resolve_dtype_bytes(rule, compute_dtype)
+    if not dtype_bytes:
+        return ""
+    m, n, k = shape
+    accessed_bytes = (m * k + k * n + m * n) * dtype_bytes
+    bytes_per_second = accessed_bytes / (duration_us / 1_000_000.0)
+    gb_per_second = bytes_per_second / 1e9
+    return f"{gb_per_second:.2f}GB/s"
+
+
 def main() -> None:
     args = parse_args()
     _, source_rows = read_csv(args.origin_csv)
@@ -668,6 +722,10 @@ def main() -> None:
                 row.get("operator_name", ""), rule.get("operator_name"),
             )
             mfu_evidence.append(evidence)
+        mbu = compute_mbu(
+            shape, duration, rule,
+            evidence.get("compute_dtype") if evidence else None,
+        )
         enriched.append({
             "module": row.get("module", ""),
             "单元位置": unit_position,
@@ -681,6 +739,7 @@ def main() -> None:
             "算子耗时占比(%)": duration / total_duration * 100.0,
             "shape": shape_text(shape),
             "mfu": mfu,
+            "mbu": mbu,
             "python_function": row.get("python_function", ""),
             "功能介绍": introduction,
             "stage_introduction": str(rule.get("functional_introduction") or introduction),

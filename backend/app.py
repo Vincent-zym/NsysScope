@@ -71,6 +71,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             max(0, int((datetime.now(UTC) - activity).total_seconds()))
             if job["status"] not in {"succeeded", "failed", "cancelled"} else None
         )
+        optimization_path = Path(job["output_dir"]) / "optimization.json"
+        job["optimization_url"] = (
+            f"/api/jobs/{job['id']}/optimization" if optimization_path.exists() else None
+        )
         return JobView.model_validate(job)
 
     @app.get("/api/health")
@@ -203,6 +207,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if not path.exists():
             raise HTTPException(status_code=500, detail="analysis artifact is missing")
         return FileResponse(path, media_type="application/json", filename=f"{job_id}-analysis.json")
+
+    @app.get("/api/jobs/{job_id}/optimization", dependencies=[Depends(authorize)])
+    def get_optimization(job_id: str) -> FileResponse:
+        try:
+            job = store.get(job_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="job not found") from exc
+        path = Path(job["output_dir"]) / "optimization.json"
+        if not path.exists():
+            raise HTTPException(status_code=404, detail="optimization suggestions are not available")
+        return FileResponse(
+            path, media_type="application/json", filename=f"{job_id}-optimization.json",
+        )
 
     @app.get("/api/popo/accounts", dependencies=[Depends(authorize)])
     def popo_accounts() -> dict:

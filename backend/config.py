@@ -41,6 +41,7 @@ class Settings:
     job_log_line_max_bytes: int
     nsys_bin: str
     skill_dir: Path
+    operator_advisor_skill_dir: Path
     converter: Path
     xlsx_converter: Path
     subprocess_timeout_seconds: int
@@ -55,6 +56,9 @@ class Settings:
             os.getenv("XDG_CACHE_HOME", Path.home() / ".cache")
         ).expanduser().resolve()
         bundled_skill = project / "bundled" / "skills" / "sglang-nsys-static-analysis"
+        bundled_advisor_skill = (
+            project / "bundled" / "skills" / "sglang-operator-fusion-advisor"
+        )
         comate_bin = os.getenv("NSYSSCOPE_COMATE_BIN", "") or _discover_zulu()
         return cls(
             data_dir=Path(os.getenv(
@@ -95,6 +99,10 @@ class Settings:
             skill_dir=Path(os.getenv(
                 "NSYSSCOPE_SKILL_DIR",
                 bundled_skill,
+            )).resolve(),
+            operator_advisor_skill_dir=Path(os.getenv(
+                "NSYSSCOPE_OPERATOR_ADVISOR_SKILL_DIR",
+                bundled_advisor_skill,
             )).resolve(),
             converter=Path(os.getenv(
                 "NSYSSCOPE_CONVERTER",

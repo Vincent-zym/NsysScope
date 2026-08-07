@@ -246,6 +246,7 @@ def build_operator_payload(
         "diffUs": number(raw["duration_diff_us"]),
         "shape": view["shape"] or None,
         "mfu": number(view["mfu"]),
+        "mbu": view.get("mbu") or None,
         "startNs": int(raw["start_ns"]),
         "endNs": int(raw["end_ns"]),
         "device": int(raw["device"]),
@@ -253,6 +254,7 @@ def build_operator_payload(
         "pythonFunction": raw["python_function"],
         "introduction": view["功能介绍"],
         "mappingReason": raw["mapping_reason"],
+        "dispatchCodeSnippet": raw.get("dispatch_code_snippet") or None,
     }
 
 

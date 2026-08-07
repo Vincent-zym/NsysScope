@@ -51,6 +51,32 @@ selected branch, usually under 15 lines. Ranges over 25 lines require an
 `uncertain_mappings` explanation. `mapping_reason` must separately explain the
 module classification and call-site evidence.
 
+Line numbers are a pointer, not evidence: source can be edited after the trace
+is captured, so a cited range may no longer match current source. Capture the
+actual dispatch statement's text into `dispatch_code_snippet` at analysis time
+so the mapping stays checkable even after line numbers drift. Keep it to the
+smallest snippet that explains *why* this kernel fired:
+
+- the dispatching statement itself (the call/assignment that reaches CUDA/
+  Triton/C++), and
+- any immediately enclosing `if`/branch condition needed to explain why that
+  statement executed (e.g. a dtype or `use_full_rank_gate` check), but not the
+  surrounding function body.
+
+For auxiliary operators (elementwise, cast, copy, gather/scatter and similar),
+`功能介绍`/`function_introduction` must also state what triggers the kernel,
+not only its generic semantics. Prefer "triggered by <upstream operation>,
+used for <purpose>" over a bare operator description — e.g. "由
+`mla_output_gate` 后紧跟的 residual-add 触发，用于门控输出与残差的逐元素相加"
+rather than "逐元素加法". When the same elementwise kernel signature recurs
+across different call sites, distinguish them by their `dispatch_code_snippet`
+and enclosing module rather than assuming a single shared meaning.
+
+When the dispatch site cannot be confidently identified (e.g. the call chain
+is ambiguous or the deepest frame is inside vendored/compiled code with no
+accessible source), leave `dispatch_code_snippet` blank and record the gap in
+`uncertain_mappings` instead of guessing a line range.
+
 ## Dual-stream grouping
 
 One module occurrence maps to exactly one CUDA stream. Use explicit

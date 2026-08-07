@@ -308,7 +308,7 @@ function JobDialog({ open, onClose, onLoaded }) {
     stage: "prefill", hardware: "Nvidia B200",
     report_path: "", config_path: "", launch_path: "", source_path: "",
     design_path: "", existing_package_path: "", result_path: "",
-    prefix: "analysis", notes: "",
+    prefix: "analysis", notes: "", enable_operator_advisor: false,
   });
   const [job, setJob] = useState(null);
   const [logs, setLogs] = useState([]);
@@ -495,7 +495,7 @@ function JobDialog({ open, onClose, onLoaded }) {
           if (!result.ok) throw new Error("分析产物读取失败");
           const payload = await result.json();
           analysisLoaded.current = true;
-          onLoaded(payload);
+          onLoaded(payload, { api, token, optimizationUrl: next.optimization_url });
         }
       } catch (cause) {
         setError(cause.message);
@@ -507,6 +507,7 @@ function JobDialog({ open, onClose, onLoaded }) {
   if (!open) return null;
 
   const set = (key) => (event) => setForm({ ...form, [key]: event.target.value });
+  const setCheckbox = (key) => (event) => setForm({ ...form, [key]: event.target.checked });
   const setProvider = (event) => setForm({
     ...form, agent_provider: event.target.value, agent_model: "",
   });
@@ -702,6 +703,7 @@ function JobDialog({ open, onClose, onLoaded }) {
           </>}
           <label>输出前缀<input required value={form.prefix} onChange={set("prefix")} pattern="[a-zA-Z0-9_-]+" /></label>
           {!importingPackage && <label className="span-2">分析范围与硬性要求<textarea value={form.notes} onChange={set("notes")} placeholder="例如：只分析 GLM5.2 的单个非 shared Indexer 层，不要扩展为 4 层周期。" /><small>Agent 必须按这里限定重复单元和分支；无法满足时任务应失败，不能静默改用其他范围。</small></label>}
+          {!importingPackage && <label className="span-2 checkbox-row"><input type="checkbox" checked={form.enable_operator_advisor} onChange={setCheckbox("enable_operator_advisor")} /> 开启算子优化建议（实验性）<small>主分析完成后追加一次分析，识别可融合/优化的辅助算子并给出方案；不影响主分析结果。</small></label>}
         </div>
         {error && <div className="error">{error}</div>}
         <div className="dialog-actions"><button type="button" onClick={onClose}>取消</button><button className="primary" type="submit">提交分析</button></div>
@@ -774,6 +776,65 @@ function PublishAccountPrompt({ prompt, onClose }) {
   </div>;
 }
 
+const CONFIDENCE_LABEL = { high: "高", medium: "中", low: "低" };
+
+function OptimizationView({ optimization, error, onBack }) {
+  if (error) return <section className="shell"><div className="optimization-empty error">{error}</div></section>;
+  if (!optimization) return <section className="shell"><div className="optimization-empty">正在载入算子优化建议…</div></section>;
+  const { scope, suggestions } = optimization;
+  return (
+    <section className="shell optimization-shell">
+      <div className="title-row compact-title">
+        <div>
+          <p className="eyebrow">OPERATOR FUSION ADVISOR</p>
+          <h1>算子优化建议</h1>
+          <p>范围：位置 {scope?.unitPosition ?? "—"} · {scope?.unitId ?? "—"} · {scope?.unitVariant ?? "—"}（单个重复单元内）</p>
+        </div>
+      </div>
+      {suggestions.length === 0
+        ? <div className="optimization-empty">该重复单元内没有找到符合最低标准的融合/优化候选。</div>
+        : <div className="optimization-list">
+          {suggestions.map((suggestion) => (
+            <article key={suggestion.id} className="optimization-card">
+              <header>
+                <div className="optimization-card-title">
+                  <b>{(suggestion.targetOperatorNames || []).join(" + ")}</b>
+                  <span>算子序号 #{(suggestion.targetOperators || []).join(", #")}</span>
+                </div>
+                <div className="optimization-card-meta">
+                  <span>组耗时 {fmt(suggestion.groupDurationUs)} us</span>
+                  <span>占单元 {fmt(suggestion.groupDurationPctOfUnit)}%</span>
+                </div>
+              </header>
+              <div className="optimization-options">
+                {(suggestion.options || []).map((option, index) => (
+                  <div key={index} className="optimization-option">
+                    <div className="optimization-option-head">
+                      <b>{option.approach}</b>
+                      <span className={`confidence confidence-${option.confidence}`}>
+                        置信度：{CONFIDENCE_LABEL[option.confidence] || option.confidence}
+                      </span>
+                      <em>预估收益 {fmt(option.estimatedGainPct)}%</em>
+                    </div>
+                    <p className="optimization-rationale">{option.rationale}</p>
+                    <p className="optimization-basis"><span>收益依据</span>{option.estimatedGainBasis}</p>
+                    {option.referenceLinks?.length > 0 && (
+                      <div className="optimization-links">
+                        {option.referenceLinks.map((link, linkIndex) => (
+                          <code key={linkIndex}>{link}</code>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </article>
+          ))}
+        </div>}
+    </section>
+  );
+}
+
 export default function Dashboard() {
   const [data, setData] = useState(null);
   const [selectedUnit, setSelectedUnit] = useState(null);
@@ -786,6 +847,9 @@ export default function Dashboard() {
   const [popoUrl, setPopoUrl] = useState("");
   const [publishing, setPublishing] = useState(false);
   const [publishPrompt, setPublishPrompt] = useState(null);
+  const [optimization, setOptimization] = useState(null);
+  const [optimizationError, setOptimizationError] = useState("");
+  const [view, setView] = useState("dashboard");
   const fileRef = useRef(null);
 
   useEffect(() => {
@@ -899,12 +963,26 @@ export default function Dashboard() {
     }
   }
 
-  const loadAnalysis = useCallback((payload) => {
+  const loadAnalysis = useCallback((payload, jobMeta) => {
     setData(payload);
     setSelectedUnit(null);
     setSelectedStage(null);
     setSelectedOp(null);
     setError("");
+    setOptimization(null);
+    setOptimizationError("");
+    setView("dashboard");
+    const optimizationUrl = jobMeta?.optimizationUrl;
+    if (optimizationUrl) {
+      const headers = jobMeta.token ? { "X-NsysScope-Token": jobMeta.token } : {};
+      fetch(`${jobMeta.api}${optimizationUrl}`, { headers })
+        .then((response) => {
+          if (!response.ok) throw new Error(`算子优化建议读取失败 (${response.status})`);
+          return response.json();
+        })
+        .then(setOptimization)
+        .catch((cause) => setOptimizationError(cause.message));
+    }
   }, []);
 
   if (!data) return <main className="loading"><div className="pulse" />正在载入分析数据…</main>;
@@ -953,6 +1031,9 @@ export default function Dashboard() {
         <div className="brand"><i>NS</i><div><b>NsysScope</b><span>GPU INFERENCE PROFILER</span></div></div>
         <div className="report-chip"><span className="status-dot" />{displayModel}</div>
         <div className="top-actions">
+          {view === "dashboard"
+            ? (optimization && <button className="ghost-action" onClick={() => setView("optimization")}>算子优化建议</button>)
+            : <button className="ghost-action" onClick={() => setView("dashboard")}>返回分析</button>}
           <button className="ghost-action" onClick={() => fileRef.current?.click()}>导入 JSON</button>
           <button className="import" onClick={() => setJobOpen(true)}>新建分析</button>
           {popoUrl
@@ -962,7 +1043,9 @@ export default function Dashboard() {
         <input ref={fileRef} hidden type="file" accept=".json,application/json" onChange={loadFile} />
       </header>
 
-      <section className="shell">
+      {view === "optimization"
+        ? <OptimizationView optimization={optimization} error={optimizationError} onBack={() => setView("dashboard")} />
+        : <section className="shell">
         <div className="title-row compact-title">
           <div>
             <p className="eyebrow">PERFORMANCE REPORT</p>
@@ -1087,6 +1170,7 @@ export default function Dashboard() {
                 <div><span>平均耗时</span><b>{fmt(selectedOp.durationUs)} us</b></div>
                 <div><span>最小 / 最大</span><b>{fmt(selectedOp.minUs)} / {fmt(selectedOp.maxUs)} us</b></div>
                 <div><span>MFU</span><b>{selectedOp.mfu != null ? `${fmt(selectedOp.mfu)}%` : "N/A"}</b></div>
+                <div><span>MBU（估算）</span><b>{selectedOp.mbu || "N/A"}</b></div>
                 <div><span>Shape</span><b>{selectedOp.shape || "N/A"}</b></div>
                 <div><span>设备 / Stream</span><b>GPU {selectedOp.device} / Stream {selectedOp.stream}</b></div>
                 <div><span>结构单元</span><b>{selectedOp.unitPosition || "—"}. {selectedOp.unitVariant || selectedOp.unitId || "N/A"}</b></div>
@@ -1099,10 +1183,11 @@ export default function Dashboard() {
                 <h3>Python 调用链</h3><CallStack value={selectedOp.pythonFunction} />
               </section>
               <details className="cuda-symbol"><summary>查看完整 CUDA 符号</summary><code>{selectedOp.fullName}</code></details>
+              {selectedOp.dispatchCodeSnippet ? <details className="cuda-symbol"><summary>查看触发代码片段</summary><code>{selectedOp.dispatchCodeSnippet}</code></details> : null}
             </div> : <div className="evidence-empty">从左侧选择一个算子查看详细信息。</div>}
           </aside>
         </section>
-      </section>
+      </section>}
       <JobDialog open={jobOpen} onClose={() => setJobOpen(false)} onLoaded={loadAnalysis} />
       <PublishAccountPrompt prompt={publishPrompt} onClose={() => setPublishPrompt(null)} />
     </main>
