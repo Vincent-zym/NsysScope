@@ -602,29 +602,66 @@ def resolve_dtype_bytes(rule: dict[str, Any], compute_dtype: str | None) -> floa
     return None
 
 
+def resolve_bandwidth_peak(
+    semantics: dict[str, Any],
+    hardware_profiles: dict[str, Any],
+    hardware: str | None,
+) -> tuple[float | None, str | None]:
+    """Look up per-GPU HBM peak bandwidth in GB/s for the MBU denominator."""
+    if not hardware:
+        return None, None
+    legacy = semantics.get("hardware_bandwidth_gb_per_s", {})
+    if isinstance(legacy, dict):
+        peak = number(legacy.get(hardware))
+        if peak and peak > 0:
+            return peak, "semantic-map hardware_bandwidth_gb_per_s"
+
+    wanted = normalize_hardware(hardware)
+    for profile in (hardware_profiles.get("profiles") or {}).values():
+        if not isinstance(profile, dict):
+            continue
+        aliases = [profile.get("display_name"), *(profile.get("aliases") or [])]
+        if wanted not in {normalize_hardware(str(alias)) for alias in aliases if alias}:
+            continue
+        peak = number(profile.get("hbm_bandwidth_gb_per_s"))
+        if peak and peak > 0:
+            source = (hardware_profiles.get("source") or {}).get("url")
+            return peak, str(source or "hardware profile registry")
+    return None, None
+
+
 def compute_mbu(
     shape: tuple[int, int, int] | None,
     duration_us: float,
     rule: dict[str, Any],
     compute_dtype: str | None,
+    semantics: dict[str, Any],
+    hardware_profiles: dict[str, Any],
+    hardware: str | None,
 ) -> str:
-    """Approximate memory-bandwidth-utilization estimate for core GEMMs.
+    """Approximate memory-bandwidth utilization for core GEMMs, as a percentage.
 
-    No hardware bandwidth-peak registry exists yet (see hardware-peaks.json,
-    which only lists compute TFLOPS), so this reports estimated bytes/second
-    rather than a true peak-relative percentage. See
-    references/runtime-evidence-and-mfu.md for the formula and caveats.
+    Reported the same way as ``mfu``: a peak-relative percentage against the
+    registered per-GPU HBM bandwidth. Left empty when the byte estimate or the
+    bandwidth peak is unavailable. See references/runtime-evidence-and-mfu.md for
+    the formula and its caveats.
     """
     if shape is None or duration_us <= 0:
         return ""
     dtype_bytes = resolve_dtype_bytes(rule, compute_dtype)
     if not dtype_bytes:
         return ""
+    peak_gb_per_second, _ = resolve_bandwidth_peak(
+        semantics, hardware_profiles, hardware,
+    )
+    if not peak_gb_per_second or peak_gb_per_second <= 0:
+        return ""
     m, n, k = shape
     accessed_bytes = (m * k + k * n + m * n) * dtype_bytes
     bytes_per_second = accessed_bytes / (duration_us / 1_000_000.0)
     gb_per_second = bytes_per_second / 1e9
-    return f"{gb_per_second:.2f}GB/s"
+    utilization = gb_per_second / peak_gb_per_second * 100.0
+    return f"{utilization:.2f}%"
 
 
 def main() -> None:
@@ -725,6 +762,7 @@ def main() -> None:
         mbu = compute_mbu(
             shape, duration, rule,
             evidence.get("compute_dtype") if evidence else None,
+            semantics, hardware_profiles, args.hardware,
         )
         enriched.append({
             "module": row.get("module", ""),

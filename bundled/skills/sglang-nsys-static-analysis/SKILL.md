@@ -107,6 +107,13 @@ unit_position, unit_id, unit_variant, layer_id/module discriminator
 For every variant, record source evidence, trace/config discriminators and its
 ordered functional modules.
 
+Also fill the machine-readable marker fields whenever the evidence exists:
+`repeating_unit.boundary_evidence.layer_start_kernel` and each variant's
+`trace_marker_kernels` (bare kernel shortName substrings from this capture,
+positive markers only). The forward-pipeline table cuts a step into layers with
+them; without them it parses prose and may refuse to publish. See
+references/architecture-taxonomy.md ("Machine-readable trace markers").
+
 Keep the two semantic levels distinct: `module` is the fine-grained
 source/execution attribution, while `功能模块` is the architecture rollup.
 Default to 5–8 ordered functional modules per variant. Merge adjacent

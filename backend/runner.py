@@ -9,6 +9,7 @@ import shlex
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import threading
 import tomllib
@@ -30,6 +31,12 @@ CSV_SUFFIXES = (
     "_auxiliary_operator_table.csv",
     "_op_classification_table.csv",
     "_stage_table.csv",
+)
+
+# Part of the standard package, but only produced when the capture actually has the
+# forward steps to measure, so its absence must not fail package detection.
+OPTIONAL_CSV_SUFFIXES = (
+    "_forward_pipeline_table.csv",
 )
 
 
@@ -115,6 +122,33 @@ class JobRunner:
 
     def submit_conversion_retry(self, job_id: str) -> None:
         self.pool.submit(self.retry_conversion, job_id)
+
+    def submit_operator_advisor(self, job_id: str) -> None:
+        self.pool.submit(self.run_operator_advisor_job, job_id)
+
+    def run_operator_advisor_job(self, job_id: str) -> None:
+        """Standalone entry point: (re)generate optimization.json on demand.
+
+        Unlike the follow-up pass inside run(), this can be invoked for any
+        job whose directory already has analysis.json and a complete
+        six-table package — including jobs imported via existing_package
+        mode, not just ones that just finished the codex_skill pipeline.
+        """
+        job = self.store.get(job_id)
+        job_dir = Path(job["output_dir"])
+        request = JobCreate.model_validate(job["request"])
+        try:
+            self.run_operator_advisor(job_id, job_dir, request)
+            self.state(job_id, job_dir, "succeeded", 100, "算子优化建议已生成")
+        except Exception:
+            self.log(
+                job_dir,
+                "[optimization] 算子优化建议生成失败：\n" + traceback.format_exc(),
+            )
+            self.store.update(
+                job_id, error="算子优化建议生成失败，请查看日志",
+            )
+            raise
 
     @staticmethod
     def wipe_job_outputs(job_dir: Path) -> None:
@@ -235,6 +269,9 @@ class JobRunner:
                 self.state(job_id, job_dir, "converting", 88, "正在构建前端 analysis.json")
                 package = self.find_package(job_dir, request.prefix)
                 self.validate_package(package, request.prefix, job_id=job_id)
+                self.build_forward_pipeline(
+                    job_id, job_dir, package, request.prefix, sqlite_path,
+                )
                 self.convert(
                     package, job_dir / "analysis.json", request.prefix, request,
                     job_id=job_id,
@@ -395,6 +432,12 @@ class JobRunner:
         source_path = self.settings.resolve_allowed(
             request.source_path or "", kind="source_path",
         ) if request.source_path else None
+        # Run the deterministic prescan here rather than trusting the agent to run
+        # it. candidates.json is the evidence the agent's verdicts are checked
+        # against, so it must not be agent-generated.
+        candidates_path = self.run_fusion_prescan(
+            job_id, job_dir, skill_dir, analysis_path, source_path,
+        )
         prompt = self.build_advisor_prompt(
             job_dir, request, analysis_path, package_dir, source_path,
         )
@@ -409,6 +452,54 @@ class JobRunner:
         if not optimization_path.exists():
             raise RuntimeError("operator-fusion-advisor did not produce optimization.json")
         json.loads(optimization_path.read_text())  # fail fast on malformed JSON
+        self.validate_optimization(
+            job_id, job_dir, skill_dir, optimization_path, analysis_path, candidates_path,
+        )
+
+    def run_fusion_prescan(
+        self, job_id: str, job_dir: Path, skill_dir: Path, analysis_path: Path,
+        source_path: Path | None,
+    ) -> Path:
+        """Generate candidates.json deterministically, before the agent runs."""
+        candidates_path = job_dir / "candidates.json"
+        command = [
+            sys.executable,
+            str(skill_dir / "scripts" / "scan_fusion_candidates.py"),
+            "--analysis", str(analysis_path),
+            "--out", str(candidates_path),
+        ]
+        if source_path:
+            command += ["--source", str(source_path)]
+        completed = subprocess.run(command, text=True, capture_output=True)
+        self.log(job_dir, f"[prescan] {' '.join(command)}")
+        if completed.stdout:
+            self.log(job_dir, completed.stdout.strip())
+        if completed.returncode != 0:
+            raise RuntimeError(
+                f"fusion prescan failed ({completed.returncode}): "
+                f"{completed.stderr.strip()[:2000]}"
+            )
+        return candidates_path
+
+    def validate_optimization(
+        self, job_id: str, job_dir: Path, skill_dir: Path, optimization_path: Path,
+        analysis_path: Path, candidates_path: Path,
+    ) -> None:
+        """Enforce the output contract instead of trusting the agent's own check."""
+        command = [
+            sys.executable,
+            str(skill_dir / "scripts" / "validate_optimization_package.py"),
+            str(optimization_path),
+            "--analysis-json", str(analysis_path),
+            "--candidates-json", str(candidates_path),
+        ]
+        completed = subprocess.run(command, text=True, capture_output=True)
+        if completed.returncode != 0:
+            raise RuntimeError(
+                "optimization.json failed schema validation: "
+                f"{completed.stderr.strip()[:2000]}"
+            )
+        self.log(job_dir, "[prescan] optimization.json 通过 schema 校验")
 
     def build_advisor_prompt(
         self, job_dir: Path, request: JobCreate, analysis_path: Path,
@@ -434,8 +525,31 @@ job's `model`/`stage`, or the only position if there is just one; state
 which one you chose in `scope`. Do not compare or merge suggestions across
 two different positions or variants.
 
-Write exactly one output file, at:
-{job_dir / "optimization.json"}
+Mandatory: candidates.json has already been generated for you by the
+deterministic prescan. Read it and work only from its rows — do not select
+candidates by judgement, do not invent registry matches, do not overrule its
+verdicts:
+- {job_dir / "candidates.json"}
+
+If you need a different repeating unit than the one it scoped, re-run the
+prescan with an explicit unit flag instead of reasoning around it:
+
+  python3 {skill_dir / "scripts" / "scan_fusion_candidates.py"} \\
+    --analysis {analysis_path} \\
+    {f"--source {source_path} " if source_path else ""}\\
+    --unit-variant <variant> \\
+    --out {job_dir / "candidates.json"}
+
+Your output is validated automatically after you finish; a schema or
+evidence violation fails the job. You can run the same check yourself:
+
+  python3 {skill_dir / "scripts" / "validate_optimization_package.py"} \\
+    {job_dir / "optimization.json"} \\
+    --analysis-json {analysis_path} \\
+    --candidates-json {job_dir / "candidates.json"}
+
+Write exactly one output file:
+- {job_dir / "optimization.json"} (final report, schemaVersion 1.1)
 
 Never edit analysis.json, the six-table package, or any file under the
 supplied model source root.
@@ -497,21 +611,29 @@ supplied model source root.
             command.extend(["--model", selected_model])
         self.run_process(
             job_id, job_dir, command, redacted_values={prompt},
-            # Operator-fusion research benefits from web search, unlike the
-            # core static-analysis pass. Keep the inherited proxy env here
-            # instead of comate_environment()'s stripped copy, so the agent
-            # can reach outbound search if the provider supports it.
-            environment={**os.environ, "NO_COLOR": "1", "PLATFORM": self.settings.comate_platform},
+            # Use the same environment as the core static-analysis pass.
+            # Whether outbound research is possible is Comate's own call to
+            # make (via whatever mechanism it uses internally); this skill's
+            # research-and-estimation.md already requires it to say so
+            # explicitly and skip citations rather than fabricate them when
+            # no network research was available in a given run.
+            environment=self.comate_environment(),
             output_formatter=self.format_comate_output,
             heartbeat_seconds=self.settings.agent_heartbeat_seconds,
             heartbeat_message="Comate 算子优化建议 Agent 仍在运行",
         )
+
 
     def stage_comate_advisor_skill(self, job_dir: Path, skill_dir: Path) -> Path:
         if not (skill_dir / "SKILL.md").exists():
             raise RuntimeError(f"operator-fusion-advisor skill is missing: {skill_dir / 'SKILL.md'}")
         target = job_dir / ".comate" / "skills" / "sglang-operator-fusion-advisor"
         target.parent.mkdir(parents=True, exist_ok=True)
+        # Re-triggering /optimize on a job dir that already staged the skill must
+        # not fail. Replace rather than merge, so a stale file from an older skill
+        # version cannot survive into this run.
+        if target.exists():
+            shutil.rmtree(target)
         shutil.copytree(
             skill_dir,
             target,
@@ -630,6 +752,10 @@ supplied model source root.
             raise RuntimeError(f"analysis skill is missing: {source / 'SKILL.md'}")
         target = job_dir / ".comate" / "skills" / "sglang-nsys-static-analysis"
         target.parent.mkdir(parents=True, exist_ok=True)
+        # Same reasoning as stage_comate_advisor_skill: re-running into an existing
+        # job dir must replace the staged skill, not fail or merge into it.
+        if target.exists():
+            shutil.rmtree(target)
         shutil.copytree(
             source,
             target,
@@ -956,6 +1082,45 @@ Requirements:
             "message": message,
         }
 
+    def build_forward_pipeline(
+        self, job_id: str, job_dir: Path, package: Path, prefix: str,
+        sqlite_path: Path,
+    ) -> None:
+        """Generate the optional forward-pipeline table.
+
+        Never fails the job: the table is additional context on top of an already
+        validated six-table package, and it legitimately cannot be produced for
+        captures without two complete CUDA-graph forward steps.
+        """
+        script = self.settings.skill_dir / "scripts" / "build_forward_pipeline_table.py"
+        if not script.exists() or not sqlite_path.exists():
+            return
+        taxonomy = None
+        for candidate in (
+            job_dir / "metadata" / f"{prefix}_architecture_taxonomy.json",
+            package / f"{prefix}_architecture_taxonomy.json",
+        ):
+            if candidate.exists():
+                taxonomy = candidate
+                break
+        command = [
+            sys.executable, str(script),
+            "--sqlite", str(sqlite_path),
+            "--output-dir", str(package),
+            "--prefix", prefix,
+            "--manifest-out",
+            str(job_dir / "metadata" / f"{prefix}_forward_pipeline.json"),
+        ]
+        if taxonomy:
+            command += ["--taxonomy", str(taxonomy)]
+        completed = subprocess.run(command, text=True, capture_output=True)
+        if completed.returncode != 0:
+            detail = (completed.stderr or completed.stdout or "").strip()[:1500]
+            self.log(job_dir, f"[forward-pipeline] 跳过 forward 链路耗时表：{detail}")
+            return
+        if completed.stdout:
+            self.log(job_dir, f"[forward-pipeline] {completed.stdout.strip()}")
+
     def convert(
         self, package: Path, output: Path, prefix: str,
         request: JobCreate | None = None, job_id: str | None = None,
@@ -1018,6 +1183,18 @@ Requirements:
                 directory.mkdir(exist_ok=True)
             for suffix in CSV_SUFFIXES:
                 shutil.copy2(csv_source / f"{prefix}{suffix}", csv_dir)
+            optional_tables: list[str] = []
+            for suffix in OPTIONAL_CSV_SUFFIXES:
+                name = f"{prefix}{suffix}"
+                # older packages kept this table beside the sidecars, so look there too
+                found = next(
+                    (path for path in (csv_source / name, *source.rglob(name))
+                     if path.is_file()),
+                    None,
+                )
+                if found:
+                    shutil.copy2(found, csv_dir / name)
+                    optional_tables.append(name)
             source_analysis = source / "analysis.json"
             if source_analysis.exists():
                 shutil.copy2(source_analysis, result_dir / "analysis.json")
@@ -1044,7 +1221,7 @@ Requirements:
                 "log": "logs/job.log",
                 "metadataDirectory": "metadata",
                 "prefix": prefix,
-                "tables": [f"{prefix}{suffix}" for suffix in CSV_SUFFIXES],
+                "tables": [f"{prefix}{suffix}" for suffix in CSV_SUFFIXES] + optional_tables,
                 "importedFrom": str(archive_path),
             }
             (result_dir / "nsysscope-package.json").write_text(
@@ -1085,6 +1262,11 @@ Requirements:
             target = csv_dir / source.name
             shutil.move(str(source), target)
             csv_files.append(target.name)
+        for suffix in OPTIONAL_CSV_SUFFIXES:
+            source = package_dir / f"{prefix}{suffix}"
+            if source.is_file():
+                shutil.move(str(source), csv_dir / source.name)
+                csv_files.append(source.name)
         for source_dir in dict.fromkeys((package_dir, result_dir)):
             for extra_csv in source_dir.glob("*.csv"):
                 shutil.move(str(extra_csv), metadata_dir / extra_csv.name)

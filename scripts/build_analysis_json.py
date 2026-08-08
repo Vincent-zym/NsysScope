@@ -5,8 +5,10 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import re
+import sys
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -144,6 +146,24 @@ def stable_sample_count(stats: dict[str, Any], manifest: dict[str, Any]) -> int:
     return int(value)
 
 
+def device_id(value: Any) -> int:
+    """Parse a device column that may carry a human-readable annotation.
+
+    The six-table spec asks for a bare integer, but real packages have shipped
+    values like ``cuda:3 (pp_rank 3)`` or ``GPU 3``. Take the first integer so a
+    cosmetic annotation cannot fail the whole conversion; the original string is
+    preserved separately as ``deviceLabel``.
+    """
+    if isinstance(value, bool):
+        raise ValueError(f"device is not a device id: {value!r}")
+    if isinstance(value, int):
+        return value
+    match = re.search(r"-?\d+", str(value))
+    if not match:
+        raise ValueError(f"device has no numeric id: {value!r}")
+    return int(match.group())
+
+
 def included_devices(stats: dict[str, Any], manifest: dict[str, Any]) -> list[int]:
     stable = (
         manifest.get("stable_statistics")
@@ -162,7 +182,7 @@ def included_devices(stats: dict[str, Any], manifest: dict[str, Any]) -> list[in
             devices = counts.keys()
     if devices is None:
         raise KeyError("included devices are missing from statistics and manifest")
-    return sorted(int(device) for device in devices)
+    return sorted(device_id(device) for device in devices)
 
 
 def match_rule(module: str, operator: str, rules: list[dict[str, Any]]) -> dict[str, Any]:
@@ -211,6 +231,132 @@ def compact_kernel_name(raw_name: str, overview_name: str = "") -> str:
     return leaf
 
 
+def trace_fingerprint(path: Path) -> dict[str, Any]:
+    """Same fingerprint the forward-pipeline builder records, for cross-checking."""
+    with open(path, "rb") as fh:
+        head = fh.read(1024 * 1024)
+    return {
+        "path": str(path.resolve()),
+        "size_bytes": path.stat().st_size,
+        "sha256_head_1mib": hashlib.sha256(head).hexdigest(),
+    }
+
+
+def job_sqlite_path(metadata_root: Path) -> Path | None:
+    """Locate this job's own trace, so a foreign table can be detected."""
+    context_path = metadata_root / "context.json"
+    if context_path.exists():
+        try:
+            recorded = json.loads(context_path.read_text()).get("sqlite_path")
+        except (json.JSONDecodeError, OSError):
+            recorded = None
+        if recorded and Path(recorded).exists():
+            return Path(recorded)
+    trace_dir = metadata_root.parent / "trace"
+    if trace_dir.is_dir():
+        candidates = sorted(trace_dir.glob("*.sqlite"))
+        if len(candidates) == 1:
+            return candidates[0]
+    return None
+
+
+def build_forward_pipeline(
+    root: Path, metadata_root: Path, prefix: str, manifest: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Read the optional forward-pipeline table into a frontend-ready node.
+
+    Returns None when the table is absent, so packages produced before this table
+    existed keep converting unchanged and the frontend simply omits the module.
+    """
+    path = root / f"{prefix}_forward_pipeline_table.csv"
+    if not path.exists():
+        # In an organised result package this optional table sits in metadata/ rather
+        # than csv/, so a re-convert of an exported package still finds it.
+        path = metadata_root / f"{prefix}_forward_pipeline_table.csv"
+    if not path.exists():
+        return None
+    rows = [row for row in read_csv(path) if row.get("环节")]
+    if not rows:
+        return None
+
+    phases = [
+        {
+            "name": row["环节"],
+            "kind": row["环节类型"],
+            "layers": int(row["层数"]) if str(row.get("层数", "")).isdigit() else None,
+            "subSteps": int(row["子步数"]) if str(row.get("子步数", "")).isdigit() else None,
+            "perUnitUs": number(row.get("单次耗时(us)")),
+            "durationUs": number(row.get("总耗时(us)")),
+            "stepPct": number(row.get("占forward步(%)")),
+            "parentPct": number(row.get("占父环节(%)")),
+            "samples": int(row["样本数"]) if str(row.get("样本数", "")).isdigit() else None,
+            "minUs": number(row.get("min_us")),
+            "maxUs": number(row.get("max_us")),
+            "note": row.get("备注") or None,
+        }
+        for row in rows
+    ]
+
+    def find(kind: str | None, name: str | None = None) -> dict[str, Any] | None:
+        for item in phases:
+            if (kind is None or item["kind"] == kind) and (
+                name is None or item["name"] == name
+            ):
+                return item
+        return None
+
+    sidecar = optional_json_artifact(
+        metadata_root, None, f"{prefix}_forward_pipeline.json",
+    ) or {}
+    # The sidecar is the builder's own output, so it wins over the agent-written
+    # manifest block for any field both carry.
+    info = {
+        **(manifest.get("forward_pipeline") or {}),
+        **(sidecar.get("forward_pipeline") or sidecar or {}),
+    }
+    total = find("total")
+    # Guard against a table built from a different capture than this package. It is
+    # easy to do by hand (copying a decode-derived table into a prefill job) and the
+    # result silently misreports the pipeline, so drop the node instead of trusting it.
+    recorded = (info or {}).get("trace") or {}
+    job_trace = job_sqlite_path(metadata_root)
+    if recorded and job_trace and job_trace.exists():
+        actual = trace_fingerprint(job_trace)
+        if (
+            recorded.get("size_bytes") != actual["size_bytes"]
+            or recorded.get("sha256_head_1mib") != actual["sha256_head_1mib"]
+        ):
+            print(
+                "WARNING: forward pipeline table was built from "
+                f"{recorded.get('path')} but this job's trace is {job_trace}; "
+                "dropping forwardPipeline",
+                file=sys.stderr,
+            )
+            return None
+    batch = info.get("batch_size")
+    gpus = info.get("gpu_count")
+    return {
+        "rows": phases,
+        "summary": {
+            "batchSize": batch,
+            "gpuCount": gpus,
+            # per-rank batch scaled by the GPUs this capture covers
+            "clusterBatchSize": batch * gpus if batch and gpus else None,
+            "speculativeTokens": info.get("speculative_tokens"),
+            "stepCount": (info.get("step_marker") or {}).get("step_count"),
+            "sampledSteps": info.get("sampled_steps"),
+            "gapThresholdUs": info.get("gap_threshold_us"),
+            "stepDurationUs": (total or {}).get("durationUs"),
+            "targetUs": (find("phase", "target 主模型") or {}).get("durationUs"),
+            "draftUs": (find("phase", "draft 模型") or {}).get("durationUs"),
+            "prepDraftUs": info.get("prep_draft_us"),
+            "prepVerifyUs": info.get("prep_verify_us"),
+            "gapUs": (find("gap") or {}).get("durationUs"),
+        },
+        "evidence": info or None,
+    }
+
+
 def build_operator_payload(
     raw: dict[str, str],
     view: dict[str, str],
@@ -246,10 +392,15 @@ def build_operator_payload(
         "diffUs": number(raw["duration_diff_us"]),
         "shape": view["shape"] or None,
         "mfu": number(view["mfu"]),
-        "mbu": view.get("mbu") or None,
+        # MBU is a percentage like MFU. Older packages emitted a raw bandwidth
+        # string ("3977.64GB/s"), which number() cannot parse -- keep the raw text
+        # in mbuLabel so those packages still render something meaningful.
+        "mbu": number(view.get("mbu")),
+        "mbuLabel": (str(view.get("mbu")).strip() or None) if view.get("mbu") else None,
         "startNs": int(raw["start_ns"]),
         "endNs": int(raw["end_ns"]),
-        "device": int(raw["device"]),
+        "device": device_id(raw["device"]),
+        "deviceLabel": str(raw["device"]).strip() or None,
         "stream": int(raw["stream"]),
         "pythonFunction": raw["python_function"],
         "introduction": view["功能介绍"],
@@ -412,7 +563,7 @@ def main() -> None:
     try:
         devices = included_devices(stats, manifest)
     except KeyError:
-        devices = sorted({int(row["device"]) for row in origin_ops})
+        devices = sorted({device_id(row["device"]) for row in origin_ops})
 
     selected_unit = (
         manifest.get("selected_unit")
@@ -525,6 +676,10 @@ def main() -> None:
             "hardware": manifest.get("hardware") or args.hardware or "Unknown",
             "report": manifest.get("input_report") or first_value(
                 manifest.get("inputs") or {}, "original_report", "nsys_rep", "sqlite",
+            ) or (
+                # The agent's manifest does not always record the input; the job's own
+                # trace is still known, and naming it keeps the report identifiable.
+                str(job_trace) if (job_trace := job_sqlite_path(metadata_root)) else None
             ),
             "repeatingUnit": repeating_unit_label(
                 selected_unit
@@ -548,11 +703,17 @@ def main() -> None:
             "stableSamples": stable_samples,
             "devices": devices,
             "maxMfu": max((op["mfu"] or 0 for op in operators), default=0),
+            "maxMbu": max((op["mbu"] or 0 for op in operators), default=0),
         },
         "units": units,
         "stages": stage_payload,
         "classifications": classifications,
         "operators": operators,
+        # None for packages produced before this table existed; the frontend then
+        # omits the forward-pipeline module entirely.
+        "forwardPipeline": build_forward_pipeline(
+            root, metadata_root, prefix, manifest,
+        ),
         "evidence": {
             "boundary": manifest.get("boundary_evidence") or (
                 selected_unit if isinstance(selected_unit, dict) else {}

@@ -8,6 +8,7 @@
 4. Taxonomy and semantic mapping
 5. MFU and operator categories
 6. Validation invariants
+7. Forward pipeline table
 
 ## Required artifacts
 
@@ -21,6 +22,14 @@ Always create:
 - `<prefix>_stage_table.csv`
 - `<prefix>_analysis_manifest.json`
 - `<prefix>_architecture_taxonomy.json`
+
+Also create `<prefix>_forward_pipeline_table.csv` whenever the capture contains at
+least two complete forward steps (see "Forward pipeline table"). It is a standard
+member of the package and belongs in the same directory as the six tables, so the
+organised result package carries it under `csv/` with an `xlsx/` counterpart. When
+the capture cannot support it — a single-step prefill capture, for example — omit
+the file and record the reason in the manifest under
+`forward_pipeline.skipped_reason`.
 
 Use `duration_avg_us` when stable samples exist; otherwise use `duration_us` and
 record the fallback. All percentages use the repeating-unit wall-span. Preserve
@@ -36,6 +45,11 @@ unit_position,unit_id,unit_variant,duration_min_us,duration_max_us,
 duration_diff_us,duration_avg_us,duration_avg_pct_of_total,python_function,
 function_introduction,mapping_reason,dispatch_code_snippet
 ```
+
+`device` and `stream` must be bare integers (`3`, `156`). Do not annotate them
+(`cuda:3 (pp_rank 3)`, `GPU 3`) — record rank/PP context in the manifest or in
+`mapping_reason` instead. The NsysScope converter tolerates an annotated value by
+taking its first integer, but the column contract is the plain id.
 
 `dispatch_code_snippet` is the actual source text of the call-chain's deepest
 frame captured at analysis time (the statement that dispatches the CUDA/Triton
@@ -167,21 +181,23 @@ Use `references/hardware-peaks.json`. Reject MFU above 100%. When shape, compute
 mode and verified hardware profile exist, missing MFU is an error.
 
 Core GEMMs also receive an approximate `mbu` (Memory Bandwidth Utilization),
-reported alongside `mfu` and left empty when the byte estimate is unavailable.
-No hardware memory-bandwidth peak is registered yet, so `mbu` is populated as
-the estimated accessed bytes without a utilization percentage until a peak
-registry exists:
+reported alongside `mfu` in the same form — a peak-relative percentage such as
+`49.72%` — and left empty when the byte estimate or the bandwidth peak is
+unavailable:
 
 ```text
 accessed_bytes = (M*K + K*N + M*N) * dtype_bytes
-mbu = accessed_bytes / duration_seconds   # bytes/second, not yet a peak ratio
+achieved_gb_per_s = accessed_bytes / duration_seconds / 1e9
+mbu = achieved_gb_per_s / hbm_bandwidth_gb_per_s * 100   # percent of peak
 ```
 
 `dtype_bytes` is derived from the GEMM's operand `dtypes` (falling back to the
 resolved `compute_dtype`); this is a coarse estimate that ignores cache reuse
-and intermediate quantization/dequantization traffic. Once a memory-bandwidth
-peak registry is added (see `references/hardware-peaks.json`), `mbu` should be
-reported as a true peak-relative percentage like `mfu`.
+and intermediate quantization/dequantization traffic, so treat `mbu` as an
+order-of-magnitude read on whether a kernel is bandwidth-bound, not an exact
+utilization. `hbm_bandwidth_gb_per_s` comes from the matched profile in
+`references/hardware-peaks.json`; when a hardware profile has no bandwidth peak
+registered, leave `mbu` empty rather than reporting raw bytes/second.
 
 Classify each operator independently. Core compute is a strict allow-list:
 
@@ -213,3 +229,133 @@ and metadata transforms are auxiliary even inside a core-owning stage.
 
 Legacy six-table packages without taxonomy remain importable, but new composite
 analysis must satisfy this contract.
+
+## Forward pipeline table
+
+`<prefix>_forward_pipeline_table.csv` describes one **forward step** — the full
+decode iteration, not the repeating layer unit. Where the other tables answer
+"where does the time inside one layer go", this one answers "where does the time
+inside one output token go".
+
+```text
+环节,环节类型,层数,子步数,单次耗时(us),总耗时(us),占forward步(%),占父环节(%),
+样本数,min_us,max_us,备注
+```
+
+### Phase decomposition
+
+A step is measured as four **contiguous, non-overlapping** intervals in execution
+order, anchored at the target model's forward:
+
+- `target` — the target/verify model forward
+- `prep draft` — everything between the end of the target forward and the start of
+  the draft forward: verify acceptance, KV bookkeeping, next-draft input assembly
+- `draft` — the draft model forward plus its own output head and speculative
+  sampling loop
+- `prep verify` — everything between the end of the draft forward and the start of
+  the next target forward: speculative-token concat, page-table build
+
+They are **reported** as two top-level phases. `prep draft` and `prep verify` are the
+target/verify path's own host-side bookkeeping and do not scale with layer count,
+which is exactly what `other` collects, so they are folded into the `target` phase's
+`其他` row instead of being separate environments. A step therefore splits into
+`target` + `draft`, where `target` = target forward + prep draft + prep verify. Say so
+in the target row's and the `其他` row's `备注`, and keep the split available as
+`forward_pipeline.prep_draft_us` / `prep_verify_us` in the manifest.
+
+Without speculative decoding there is no draft model: emit only the `target` phase
+with its `prep draft` stage covering the inter-step bookkeeping, and record
+`speculative_tokens: 0` in the manifest.
+
+Nested rows use `环节类型`:
+
+- `total` — the whole step; exactly one row
+- `phase` — a top-level phase (`target`, `draft`)
+- `variant` — a layer variant inside `target` (KDA, MLA, ...), with `层数` set
+- `stage` — a named sub-interval inside a phase (for example the draft forward)
+- `other` — the remainder of a phase after its `variant`/`stage` rows. Non-layer
+  work such as embedding, lm_head, output all-gather and the sampling loop belongs
+  here, because it does not scale with layer count and keeping it separate makes
+  layer cost comparable across models.
+- `gap` — the inter-token gap; see below. Does not participate in any sum.
+
+### Step boundary detection
+
+Boundaries must come from a kernel that fires **exactly once per forward**. Record
+the chosen marker, its launch count and the derived step count in the manifest
+under `forward_pipeline.step_marker`. Never infer boundaries from a fixed period.
+
+A reliable pattern on SGLang decode captures: the vocab-parallel embedding kernel
+fires once per model forward, and its `gridX` separates draft from target because
+it equals `batch * draft_block` for the draft and `batch * (draft_block + 1)` for
+the target verify. That also yields the batch size — record how it was derived, or
+state that it came from the launch config instead.
+
+Cross-validate with a second once-per-step kernel and report both counts. If the
+two disagree by more than one step, treat the segmentation as failed rather than
+publishing it.
+
+### Phase boundaries without CUDA graphs
+
+On a CUDA-graph decode path each phase carries its own `graphId`, which is the most
+reliable discriminator: the target forward, the draft forward and the non-captured
+host bookkeeping fall into distinct graphs. Prefill and eager decode have no graph,
+and prefill **may still run speculative decoding**, so a graph-free fallback is
+required rather than optional:
+
+- the target forward ends at the end of its **last layer block**, found with the
+  same layer segmentation the six-table pipeline uses (so `--variant-marker` or a
+  `--taxonomy` is mandatory in this mode)
+- the draft forward **starts** at the draft population of the step marker, and
+  **ends** one median layer stride after the last occurrence of its layer core
+
+Consequence to record in `备注` and in `forward_pipeline.draft_boundary_source`: a
+forward's tail after its last layer — lm_head, output aggregation, the speculative
+sampling loop — is not separable from the bookkeeping that follows it, so it is
+counted in the next `prep` phase instead of in the forward. Phase closure still
+holds; only the boundary semantics differ from graph mode. Record the mode in
+`forward_pipeline.phase_discriminator` (`CUPTI graphId` or
+`marker + layer segmentation`) so a reader never compares the two blindly.
+
+`--ignore-cuda-graphs` forces the fallback on a graph-captured trace, which is how
+this path is cross-checked: layer counts and the draft layer-forward time must
+reproduce the graph-derived ones.
+
+### Inter-token gap
+
+`token 间间隙` counts GPU idle **only inside the `prep draft` and `prep verify`
+phases**, and only holes longer than the gap threshold (default `50us`, exposed as
+`--gap-threshold-us`).
+
+Idle inside the `target` and `draft` phases is deliberately excluded: on a
+CUDA-graph replay path it is launch-gap scatter spread over hundreds of kernel
+boundaries, not a recoverable stall, and summing it produces a large number that
+looks like an optimization opportunity but is not.
+
+Record the threshold and every qualifying hole (start, end, length, phase) in the
+manifest so the number is reproducible and can be recomputed under a different
+threshold without re-running the analysis. A `0.0` result is a valid, meaningful
+answer — write the threshold and the hole count in `备注` so a reader can tell
+"measured, none found" from "not measured".
+
+### Closure invariants
+
+All three must hold, with a tolerance no looser than `0.5%` of the step:
+
+- `target + draft = forward step 总计`
+- inside `target`: `sum(variant rows) + other = target`, where `other` carries the
+  non-layer forward work plus prep draft / prep verify
+- inside `draft`: `sum(stage rows) + other = draft`
+
+Plus one sanity bound: `token 间间隙 <= prep draft + prep verify`.
+
+These are the correctness test for the segmentation. A mis-placed boundary marker
+shows up as a closure failure, so never "fix" a closure error by adjusting the
+`other` row — re-derive the boundaries.
+
+### Statistics
+
+Every row reports `样本数` / `min_us` / `max_us` over the steps actually measured,
+and `总耗时(us)` is the **median** across steps, not the mean: a single mis-cut
+step skews a mean badly while leaving the median intact. State the step range used
+in `备注` when it is not the whole capture.

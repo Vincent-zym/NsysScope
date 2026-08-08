@@ -1,0 +1,1881 @@
+{
+  "schemaVersion": "1.0",
+  "provenance": {
+    "derivedFrom": "sgl-project/sglang .claude/skills/llm-torch-profiler-analysis/scripts/triage_kernel_helpers.py::FUSION_PATTERN_REGISTRY",
+    "importedAt": "2026-08-08",
+    "sglangCheckout": "/home/users/zhongyuanming/sglang_community/sglang",
+    "sglangHead": null,
+    "note": "candidatePathsPresentLocally is a snapshot of the checkout at import time; scan_fusion_candidates.py re-resolves paths by basename against the analysed source tree, so upstream file moves do not break matching."
+  },
+  "patterns": [
+    {
+      "id": "fused_residual_add_rmsnorm",
+      "pattern": "Fused residual add + RMSNorm",
+      "patternZh": "残差加 + RMSNorm 融合",
+      "origin": "mainline",
+      "activeKeywords": [
+        "fused_add_rmsnorm",
+        "gemma_fused_add_rmsnorm",
+        "npu_add_rms_norm",
+        "add_rmsnorm_bias"
+      ],
+      "splitGroups": [],
+      "candidatePaths": [
+        "python/sglang/srt/layers/layernorm.py",
+        "python/sglang/srt/layers/quantization/modelslim/modelslim.py"
+      ],
+      "candidatePathsPresentLocally": [
+        true,
+        true
+      ],
+      "minSharePct": 0.1,
+      "likelySharePct": 1.0,
+      "priority": 0,
+      "subsumes": [],
+      "modelInclude": [],
+      "modelExclude": [],
+      "requireTp": false,
+      "minTpSize": 1,
+      "rationaleHint": "Residual add plus RMSNorm already has fused implementations across several backends."
+    },
+    {
+      "id": "flashinfer_unified_allreduce_fusion",
+      "pattern": "FlashInfer unified allreduce_fusion",
+      "patternZh": "FlashInfer 统一 allreduce 融合（AllReduce + 残差 + RMSNorm）",
+      "origin": "mainline",
+      "activeKeywords": [
+        "allreduce_fusion",
+        "fusedaddrmsnormkernel",
+        "flashinfer_comm_fusion.py"
+      ],
+      "splitGroups": [
+        [
+          "cross_device_reduce",
+          "allreduce",
+          "all_reduce",
+          "custom_all_reduce_ops.py"
+        ],
+        [
+          "rmsnorm",
+          "layernorm",
+          "fused_add_rmsnorm",
+          "layernorm.py"
+        ]
+      ],
+      "candidatePaths": [
+        "python/sglang/srt/layers/flashinfer_comm_fusion.py",
+        "python/sglang/srt/layers/layernorm.py",
+        "python/sglang/srt/layers/communicator.py"
+      ],
+      "candidatePathsPresentLocally": [
+        true,
+        true,
+        true
+      ],
+      "minSharePct": 0.5,
+      "likelySharePct": 4.0,
+      "priority": 0,
+      "subsumes": [],
+      "modelInclude": [],
+      "modelExclude": [],
+      "requireTp": true,
+      "minTpSize": 2,
+      "rationaleHint": "FlashInfer has a TP all-reduce plus residual/RMSNorm fusion path."
+    },
+    {
+      "id": "aiter_allreduce_fusion",
+      "pattern": "AITER allreduce fusion",
+      "patternZh": "AITER（ROCm）AllReduce + RMSNorm 融合",
+      "origin": "mainline",
+      "activeKeywords": [
+        "tensor_model_parallel_fused_allreduce_rmsnorm",
+        "apply_aiter_all_reduce_fusion",
+        "custom_fused_ar_rms"
+      ],
+      "splitGroups": [
+        [
+          "allreduce",
+          "all_reduce",
+          "cross_device_reduce"
+        ],
+        [
+          "rmsnorm",
+          "layernorm"
+        ]
+      ],
+      "candidatePaths": [
+        "python/sglang/srt/distributed/communication_op.py",
+        "python/sglang/srt/layers/communicator.py",
+        "python/sglang/srt/layers/layernorm.py"
+      ],
+      "candidatePathsPresentLocally": [
+        true,
+        true,
+        true
+      ],
+      "minSharePct": 0.5,
+      "likelySharePct": 4.0,
+      "priority": 0,
+      "subsumes": [],
+      "modelInclude": [],
+      "modelExclude": [],
+      "requireTp": true,
+      "minTpSize": 2,
+      "rationaleHint": "ROCm already has an AITER fused all-reduce plus RMSNorm family."
+    },
+    {
+      "id": "fused_activation_and_mul_swiglu_geglu",
+      "pattern": "Fused activation-and-mul (SwiGLU / GeGLU)",
+      "patternZh": "激活与逐元素乘融合（SwiGLU / GeGLU）",
+      "origin": "mainline",
+      "activeKeywords": [
+        "silu_and_mul",
+        "gelu_and_mul",
+        "npu_swiglu"
+      ],
+      "splitGroups": [],
+      "candidatePaths": [
+        "python/sglang/srt/layers/activation.py"
+      ],
+      "candidatePathsPresentLocally": [
+        true
+      ],
+      "minSharePct": 0.1,
+      "likelySharePct": 1.0,
+      "priority": 0,
+      "subsumes": [],
+      "modelInclude": [],
+      "modelExclude": [],
+      "requireTp": false,
+      "minTpSize": 1,
+      "rationaleHint": "Packed MLP activation and multiply already has dedicated fused ops."
+    },
+    {
+      "id": "in_place_qk_rmsnorm",
+      "pattern": "In-place QK RMSNorm",
+      "patternZh": "Q/K RMSNorm 原地融合",
+      "origin": "mainline",
+      "activeKeywords": [
+        "fused_inplace_qknorm",
+        "minimaxm2rmsnormtp"
+      ],
+      "splitGroups": [
+        [
+          "apply_qk_norm",
+          "q_norm",
+          "k_norm",
+          "qknorm"
+        ]
+      ],
+      "candidatePaths": [
+        "python/sglang/srt/models/utils.py",
+        "python/sglang/kernels/ops/layernorm/norm.py"
+      ],
+      "candidatePathsPresentLocally": [
+        true,
+        true
+      ],
+      "minSharePct": 0.3,
+      "likelySharePct": 2.0,
+      "priority": 0,
+      "subsumes": [],
+      "modelInclude": [],
+      "modelExclude": [],
+      "requireTp": false,
+      "minTpSize": 1,
+      "rationaleHint": "Q/K normalization already has in-place or model-specific fused implementations."
+    },
+    {
+      "id": "fused_qk_rmsnorm_rope",
+      "pattern": "Fused QK RMSNorm + RoPE",
+      "patternZh": "Q/K RMSNorm + RoPE 融合",
+      "origin": "mainline",
+      "activeKeywords": [
+        "fused_qknorm_rope",
+        "fused_qk_norm_rope"
+      ],
+      "splitGroups": [
+        [
+          "apply_qk_norm",
+          "q_norm",
+          "k_norm",
+          "qknorm"
+        ],
+        [
+          "apply_rope",
+          "rotary",
+          "rope",
+          "mrope"
+        ]
+      ],
+      "candidatePaths": [
+        "python/sglang/kernels/ops/attention/fused_qknorm_rope.py",
+        "python/sglang/srt/models/qwen3_moe.py"
+      ],
+      "candidatePathsPresentLocally": [
+        true,
+        true
+      ],
+      "minSharePct": 0.3,
+      "likelySharePct": 2.0,
+      "priority": 30,
+      "subsumes": [],
+      "modelInclude": [],
+      "modelExclude": [],
+      "requireTp": false,
+      "minTpSize": 1,
+      "rationaleHint": "SGLang has a fused QK-norm plus RoPE kernel family."
+    },
+    {
+      "id": "fused_qk_rope_reshape_kv_cache_write",
+      "pattern": "Fused QK RoPE reshape + KV cache write",
+      "patternZh": "Q/K RoPE + reshape + KV cache 写入融合",
+      "origin": "mainline",
+      "activeKeywords": [
+        "fused_qk_rope_reshape_and_cache"
+      ],
+      "splitGroups": [
+        [
+          "rotary",
+          "rope",
+          "mrope"
+        ],
+        [
+          "reshape",
+          "set_kv",
+          "kv_cache",
+          "cache write",
+          "paged kv"
+        ]
+      ],
+      "candidatePaths": [
+        "python/sglang/srt/layers/attention/utils.py"
+      ],
+      "candidatePathsPresentLocally": [
+        false
+      ],
+      "minSharePct": 0.4,
+      "likelySharePct": 2.0,
+      "priority": 40,
+      "subsumes": [
+        "Fused RoPE + KV cache store"
+      ],
+      "modelInclude": [],
+      "modelExclude": [],
+      "requireTp": false,
+      "minTpSize": 1,
+      "rationaleHint": "Attention prep already has a fused RoPE plus reshape plus cache write path."
+    },
+    {
+      "id": "fused_rope_kv_cache_store",
+      "pattern": "Fused RoPE + KV cache store",
+      "patternZh": "RoPE + KV cache 存储融合",
+      "origin": "mainline",
+      "activeKeywords": [
+        "fused_set_kv_buffer"
+      ],
+      "splitGroups": [
+        [
+          "rotary",
+          "rope",
+          "mrope"
+        ],
+        [
+          "set_kv_buffer",
+          "kv cache write",
+          "paged kv",
+          "cache write"
+        ]
+      ],
+      "candidatePaths": [
+        "python/sglang/kernels/ops/attention/rope.py",
+        "python/sglang/srt/models/utils.py"
+      ],
+      "candidatePathsPresentLocally": [
+        true,
+        true
+      ],
+      "minSharePct": 0.3,
+      "likelySharePct": 1.5,
+      "priority": 20,
+      "subsumes": [],
+      "modelInclude": [],
+      "modelExclude": [],
+      "requireTp": false,
+      "minTpSize": 1,
+      "rationaleHint": "RoPE application and KV cache storage already have fused fast paths in several models."
+    },
+    {
+      "id": "fused_decode_metadata_setup",
+      "pattern": "Fused decode metadata setup",
+      "patternZh": "decode 元数据准备融合",
+      "origin": "mainline",
+      "activeKeywords": [
+        "normal_decode_set_metadata",
+        "cache_seqlens_int32",
+        "cu_seqlens_k",
+        "swa_page_table"
+      ],
+      "splitGroups": [],
+      "candidatePaths": [
+        "python/sglang/srt/layers/attention/flashattention_backend.py"
+      ],
+      "candidatePathsPresentLocally": [
+        true
+      ],
+      "minSharePct": 0.05,
+      "likelySharePct": 0.5,
+      "priority": 0,
+      "subsumes": [],
+      "modelInclude": [],
+      "modelExclude": [],
+      "requireTp": false,
+      "minTpSize": 1,
+      "rationaleHint": "Decode metadata setup already has a fused Triton preparation path."
+    },
+    {
+      "id": "nsa_fused_metadata_copy_for_graph_replay",
+      "pattern": "NSA fused metadata copy for graph replay",
+      "patternZh": "NSA 图重放元数据拷贝融合",
+      "origin": "mainline",
+      "activeKeywords": [
+        "fused_metadata_copy",
+        "fused_metadata_copy_multi",
+        "fused_nsa_cache_seqlens",
+        "fused_flashmla_metadata"
+      ],
+      "splitGroups": [],
+      "candidatePaths": [
+        "python/sglang/kernels/ops/attention/fused_metadata_copy.py"
+      ],
+      "candidatePathsPresentLocally": [
+        true
+      ],
+      "minSharePct": 0.02,
+      "likelySharePct": 0.2,
+      "priority": 0,
+      "subsumes": [],
+      "modelInclude": [],
+      "modelExclude": [],
+      "requireTp": false,
+      "minTpSize": 1,
+      "rationaleHint": "NSA replay metadata copies are already fused into one-kernel families."
+    },
+    {
+      "id": "deepseek_mla_fused_projection_norm_rope",
+      "pattern": "DeepSeek MLA fused projection + norm + RoPE",
+      "patternZh": "DeepSeek MLA 投影 + norm + RoPE 融合",
+      "origin": "mainline",
+      "activeKeywords": [
+        "qkv_proj_with_rope_fused_weight",
+        "fused_qkv_a_proj_with_mqa",
+        "forward_absorb_fused_mla_rope"
+      ],
+      "splitGroups": [
+        [
+          "mla",
+          "qkv_a_proj",
+          "q_a_proj"
+        ],
+        [
+          "qknorm",
+          "rmsnorm",
+          "apply_qk_norm"
+        ],
+        [
+          "rope",
+          "rotary"
+        ]
+      ],
+      "candidatePaths": [
+        "python/sglang/srt/models/deepseek_common/attention_forward_methods/forward_mla_fused_rope_cpu.py",
+        "python/sglang/srt/models/deepseek_common/attention_forward_methods/forward_mla_fused_rope_rocm.py"
+      ],
+      "candidatePathsPresentLocally": [
+        true,
+        true
+      ],
+      "minSharePct": 0.4,
+      "likelySharePct": 2.0,
+      "priority": 80,
+      "subsumes": [
+        "Fused QK RMSNorm + RoPE"
+      ],
+      "modelInclude": [
+        "deepseek",
+        "glm"
+      ],
+      "modelExclude": [],
+      "requireTp": false,
+      "minTpSize": 1,
+      "rationaleHint": "DeepSeek MLA has backend-specific fused projection, norm, and RoPE prep paths."
+    },
+    {
+      "id": "fused_qk_rope_concat_mla_cache_write",
+      "pattern": "Fused QK RoPE concat + MLA cache write",
+      "patternZh": "Q/K RoPE 拼接 + MLA cache 写入融合",
+      "origin": "mainline",
+      "activeKeywords": [
+        "fused_qk_rope_cat_and_cache_mla",
+        "set_mla_kv_buffer"
+      ],
+      "splitGroups": [
+        [
+          "mla",
+          "rope",
+          "rotary"
+        ],
+        [
+          "cache",
+          "kv_buffer",
+          "concat"
+        ]
+      ],
+      "candidatePaths": [
+        "python/sglang/srt/layers/rocm_linear_utils.py",
+        "python/sglang/srt/models/deepseek_common/attention_forward_methods/forward_mla.py"
+      ],
+      "candidatePathsPresentLocally": [
+        true,
+        true
+      ],
+      "minSharePct": 0.3,
+      "likelySharePct": 1.5,
+      "priority": 85,
+      "subsumes": [
+        "Fused RoPE + KV cache store"
+      ],
+      "modelInclude": [
+        "deepseek",
+        "glm"
+      ],
+      "modelExclude": [],
+      "requireTp": false,
+      "minTpSize": 1,
+      "rationaleHint": "MLA RoPE packing and cache write already have fused backend paths."
+    },
+    {
+      "id": "qwen3_decode_fused_qk_norm_3d_mrope_kv_cache_write",
+      "pattern": "Qwen3 decode fused QK norm + 3D mRoPE + KV cache write",
+      "patternZh": "Qwen3 decode Q/K norm + 3D mRoPE + KV cache 写入融合",
+      "origin": "mainline",
+      "activeKeywords": [
+        "fused_qk_norm_mrope_3d_cache_pts_quant_shuffle"
+      ],
+      "splitGroups": [
+        [
+          "apply_qk_norm",
+          "q_norm",
+          "k_norm",
+          "qknorm"
+        ],
+        [
+          "mrope",
+          "3d rope",
+          "rotary"
+        ],
+        [
+          "cache",
+          "kv_buffer",
+          "paged kv",
+          "cache write"
+        ]
+      ],
+      "candidatePaths": [
+        "python/sglang/srt/models/qwen3.py"
+      ],
+      "candidatePathsPresentLocally": [
+        true
+      ],
+      "minSharePct": 0.4,
+      "likelySharePct": 2.0,
+      "priority": 90,
+      "subsumes": [
+        "Fused QK RMSNorm + RoPE",
+        "Fused QK RoPE reshape + KV cache write",
+        "Fused RoPE + KV cache store"
+      ],
+      "modelInclude": [
+        "qwen3"
+      ],
+      "modelExclude": [
+        "qwen3.5",
+        "qwen3_5"
+      ],
+      "requireTp": false,
+      "minTpSize": 1,
+      "rationaleHint": "Qwen3-style decode already has a fused QK-norm plus 3D mRoPE plus cache-write path."
+    },
+    {
+      "id": "fused_moe_router_top_k_softcapping",
+      "pattern": "Fused MoE router / top-k / softcapping",
+      "patternZh": "MoE router / top-k / softcap 融合",
+      "origin": "mainline",
+      "activeKeywords": [
+        "fusedmoerouter",
+        "fused_moe_router"
+      ],
+      "splitGroups": [
+        [
+          "router",
+          "gate",
+          "router logits"
+        ],
+        [
+          "topk",
+          "softmax",
+          "softcap",
+          "tanh"
+        ]
+      ],
+      "candidatePaths": [
+        "python/sglang/srt/layers/moe/router.py"
+      ],
+      "candidatePathsPresentLocally": [
+        false
+      ],
+      "minSharePct": 0.3,
+      "likelySharePct": 1.5,
+      "priority": 30,
+      "subsumes": [],
+      "modelInclude": [],
+      "modelExclude": [],
+      "requireTp": false,
+      "minTpSize": 1,
+      "rationaleHint": "MoE routing already has fused router, softcap, and top-k kernels."
+    },
+    {
+      "id": "fused_moe_grouped_topk_gate_kernels",
+      "pattern": "Fused MoE grouped-topk / gate kernels",
+      "patternZh": "MoE grouped-topk / gate 融合",
+      "origin": "mainline",
+      "activeKeywords": [
+        "fused_topk_deepseek",
+        "moe_fused_gate",
+        "aiter_fused_topk",
+        "kimi_k2_moe_fused_gate"
+      ],
+      "splitGroups": [
+        [
+          "grouped_topk",
+          "topk",
+          "biased_grouped_topk"
+        ],
+        [
+          "gate",
+          "router",
+          "renorm",
+          "routed scaling"
+        ]
+      ],
+      "candidatePaths": [
+        "python/sglang/srt/layers/moe/topk.py"
+      ],
+      "candidatePathsPresentLocally": [
+        true
+      ],
+      "minSharePct": 0.3,
+      "likelySharePct": 1.5,
+      "priority": 50,
+      "subsumes": [
+        "Fused MoE router / top-k / softcapping"
+      ],
+      "modelInclude": [],
+      "modelExclude": [],
+      "requireTp": false,
+      "minTpSize": 1,
+      "rationaleHint": "Grouped-topk, bias handling, and routed scaling already have fused gate kernels."
+    },
+    {
+      "id": "qwen_style_shared_expert_append_into_routed_top_k_output",
+      "pattern": "Qwen-style shared-expert append into routed top-k output",
+      "patternZh": "Qwen 风格共享专家并入 routed top-k 输出",
+      "origin": "mainline",
+      "activeKeywords": [
+        "_append_shared_to_topk_output",
+        "fused_append_shared_experts_with_weights",
+        "_fused_append_shared_experts_with_weights_kernel"
+      ],
+      "splitGroups": [
+        [
+          "_append_shared_to_topk_output",
+          "topk",
+          "grouped_topk"
+        ],
+        [
+          "shared_expert",
+          "shared_expert_gate",
+          "sigmoid"
+        ]
+      ],
+      "candidatePaths": [
+        "python/sglang/srt/models/qwen2_moe.py",
+        "python/sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe_triton_kernels.py"
+      ],
+      "candidatePathsPresentLocally": [
+        true,
+        false
+      ],
+      "minSharePct": 0.05,
+      "likelySharePct": 0.5,
+      "priority": 55,
+      "subsumes": [],
+      "modelInclude": [],
+      "modelExclude": [],
+      "requireTp": false,
+      "minTpSize": 1,
+      "rationaleHint": "Qwen-style shared experts can already be appended into routed top-k output in one Triton prep kernel before fused MoE execution."
+    },
+    {
+      "id": "fused_moe_sum_all_reduce",
+      "pattern": "Fused MoE sum + all-reduce",
+      "patternZh": "MoE 求和 + AllReduce 融合",
+      "origin": "mainline",
+      "activeKeywords": [
+        "fuse_sum_all_reduce",
+        "enable_fused_moe_sum_all_reduce"
+      ],
+      "splitGroups": [
+        [
+          "fused_moe",
+          "expert",
+          "moe"
+        ],
+        [
+          "allreduce",
+          "all_reduce",
+          "cross_device_reduce"
+        ]
+      ],
+      "candidatePaths": [
+        "python/sglang/srt/layers/moe/fused_moe_triton/fused_moe.py"
+      ],
+      "candidatePathsPresentLocally": [
+        false
+      ],
+      "minSharePct": 0.4,
+      "likelySharePct": 2.0,
+      "priority": 0,
+      "subsumes": [],
+      "modelInclude": [],
+      "modelExclude": [],
+      "requireTp": true,
+      "minTpSize": 2,
+      "rationaleHint": "The second MoE GEMM already has a fused sum-plus-all-reduce path."
+    },
+    {
+      "id": "fused_moe_activation_quant_re_quant",
+      "pattern": "Fused MoE activation + quant / re-quant",
+      "patternZh": "MoE 激活 + 量化 / 重量化融合",
+      "origin": "mainline",
+      "activeKeywords": [
+        "silu_and_mul_scaled_fp4",
+        "npu_dequant_swiglu_quant",
+        "swiglu_quant"
+      ],
+      "splitGroups": [
+        [
+          "silu",
+          "gelu",
+          "act_and_mul"
+        ],
+        [
+          "quant",
+          "fp8",
+          "mxfp",
+          "nvfp4",
+          "dequant"
+        ]
+      ],
+      "candidatePaths": [
+        "python/sglang/srt/layers/moe/ep_moe/kernels.py",
+        "python/sglang/kernels/ops/quantization/nvfp4_gemm_swiglu_nvfp4_quant.py",
+        "python/sglang/srt/layers/moe/cutlass_w4a8_moe.py"
+      ],
+      "candidatePathsPresentLocally": [
+        false,
+        true,
+        true
+      ],
+      "minSharePct": 0.3,
+      "likelySharePct": 1.5,
+      "priority": 0,
+      "subsumes": [],
+      "modelInclude": [],
+      "modelExclude": [],
+      "requireTp": false,
+      "minTpSize": 1,
+      "rationaleHint": "Quantized MoE backends already fuse activation with re-quantization."
+    },
+    {
+      "id": "deepseek_comm_prep_fused_rmsnorm_quant_flatten_quant",
+      "pattern": "DeepSeek comm-prep fused RMSNorm + quant / flatten-quant",
+      "patternZh": "DeepSeek 通信前 RMSNorm + 量化融合",
+      "origin": "mainline",
+      "activeKeywords": [
+        "fused_rms_fp8_group_quant",
+        "fused_rms_mxfp4_quant",
+        "fused_flatten_fp8_group_quant",
+        "fused_flatten_mxfp4_quant"
+      ],
+      "splitGroups": [
+        [
+          "rmsnorm",
+          "layernorm",
+          "flatten"
+        ],
+        [
+          "fp8",
+          "mxfp4",
+          "quant"
+        ]
+      ],
+      "candidatePaths": [
+        "python/sglang/srt/layers/communicator.py",
+        "python/sglang/srt/models/deepseek_common/attention_forward_methods/forward_mla.py",
+        "python/sglang/srt/models/deepseek_common/attention_forward_methods/forward_mha.py"
+      ],
+      "candidatePathsPresentLocally": [
+        true,
+        true,
+        true
+      ],
+      "minSharePct": 0.3,
+      "likelySharePct": 1.5,
+      "priority": 0,
+      "subsumes": [],
+      "modelInclude": [
+        "deepseek",
+        "glm"
+      ],
+      "modelExclude": [],
+      "requireTp": false,
+      "minTpSize": 1,
+      "rationaleHint": "DeepSeek comm preparation already fuses norm or flatten work with quantization."
+    },
+    {
+      "id": "nsa_fused_top_k_transform_page_table_build",
+      "pattern": "NSA fused top-k transform / page-table build",
+      "patternZh": "NSA top-k 变换 / page-table 构建融合",
+      "origin": "mainline",
+      "activeKeywords": [
+        "fast_topk_transform_fused",
+        "fast_topk_transform_ragged_fused"
+      ],
+      "splitGroups": [],
+      "candidatePaths": [
+        "python/sglang/srt/layers/attention/nsa_backend.py"
+      ],
+      "candidatePathsPresentLocally": [
+        true
+      ],
+      "minSharePct": 0.05,
+      "likelySharePct": 0.3,
+      "priority": 0,
+      "subsumes": [],
+      "modelInclude": [],
+      "modelExclude": [],
+      "requireTp": false,
+      "minTpSize": 1,
+      "rationaleHint": "NSA top-k metadata preparation already has fused transform kernels."
+    },
+    {
+      "id": "nsa_fused_quantize_indexed_k_cache_store",
+      "pattern": "NSA fused quantize + indexed K-cache store",
+      "patternZh": "NSA 量化 + 索引 K-cache 写入融合",
+      "origin": "mainline",
+      "activeKeywords": [
+        "fused_store_index_k_cache"
+      ],
+      "splitGroups": [
+        [
+          "act_quant",
+          "quant",
+          "scale_buffer"
+        ],
+        [
+          "index_k",
+          "cache",
+          "store"
+        ]
+      ],
+      "candidatePaths": [
+        "python/sglang/kernels/ops/attention/fused_store_index_cache.py",
+        "python/sglang/srt/layers/attention/nsa/nsa_indexer.py"
+      ],
+      "candidatePathsPresentLocally": [
+        true,
+        true
+      ],
+      "minSharePct": 0.2,
+      "likelySharePct": 1.0,
+      "priority": 0,
+      "subsumes": [],
+      "modelInclude": [],
+      "modelExclude": [],
+      "requireTp": false,
+      "minTpSize": 1,
+      "rationaleHint": "NSA already has a fused quantize-and-indexed-store kernel family."
+    },
+    {
+      "id": "fused_sampling_temperature_softmax",
+      "pattern": "Fused sampling temperature + softmax",
+      "patternZh": "采样温度 + softmax 融合",
+      "origin": "mainline",
+      "activeKeywords": [
+        "fused_temperature_softmax"
+      ],
+      "splitGroups": [
+        [
+          "temperature",
+          "temp_scale"
+        ],
+        [
+          "softmax",
+          "sampling"
+        ]
+      ],
+      "candidatePaths": [
+        "python/sglang/srt/layers/fused_sampling.py",
+        "python/sglang/srt/layers/sampler.py"
+      ],
+      "candidatePathsPresentLocally": [
+        false,
+        true
+      ],
+      "minSharePct": 0.05,
+      "likelySharePct": 0.5,
+      "priority": 0,
+      "subsumes": [],
+      "modelInclude": [],
+      "modelExclude": [],
+      "requireTp": false,
+      "minTpSize": 1,
+      "rationaleHint": "Decode-time sampling already has fused temperature and softmax kernels."
+    },
+    {
+      "id": "fused_logit_softcap",
+      "pattern": "Fused logit softcap",
+      "patternZh": "logit softcap 融合",
+      "origin": "mainline",
+      "activeKeywords": [
+        "fused_softcap",
+        "final_logit_softcapping"
+      ],
+      "splitGroups": [],
+      "candidatePaths": [
+        "python/sglang/srt/layers/elementwise.py",
+        "python/sglang/srt/layers/logits_processor.py"
+      ],
+      "candidatePathsPresentLocally": [
+        false,
+        true
+      ],
+      "minSharePct": 0.02,
+      "likelySharePct": 0.2,
+      "priority": 0,
+      "subsumes": [],
+      "modelInclude": [],
+      "modelExclude": [],
+      "requireTp": false,
+      "minTpSize": 1,
+      "rationaleHint": "Logit softcap math already has dedicated fused elementwise kernels."
+    },
+    {
+      "id": "pr_20667_qwen3_5_fused_qk_norm_rope_kv_cache_write",
+      "pattern": "PR #20667 Qwen3.5 fused QK norm + RoPE + KV cache write",
+      "patternZh": "PR #20667 Qwen3.5 Q/K norm + RoPE + KV cache 写入融合",
+      "origin": "inflight",
+      "activeKeywords": [
+        "fused_qk_norm_rope_cache_pts_quant_shuffle",
+        "fused_qk_norm_mrope_3d_cache_pts_quant_shuffle"
+      ],
+      "splitGroups": [
+        [
+          "apply_qk_norm",
+          "qknorm",
+          "q_norm",
+          "k_norm"
+        ],
+        [
+          "rotary",
+          "rope",
+          "mrope"
+        ],
+        [
+          "cache",
+          "kv_buffer",
+          "cache write"
+        ]
+      ],
+      "candidatePaths": [
+        "PR #20667",
+        "python/sglang/srt/models/qwen3_5.py",
+        "python/sglang/srt/models/utils.py"
+      ],
+      "candidatePathsPresentLocally": [
+        false,
+        true,
+        true
+      ],
+      "minSharePct": 0.4,
+      "likelySharePct": 2.0,
+      "priority": 100,
+      "subsumes": [
+        "Fused QK RMSNorm + RoPE",
+        "Fused QK RoPE reshape + KV cache write",
+        "Fused RoPE + KV cache store"
+      ],
+      "modelInclude": [
+        "qwen3.5",
+        "qwen3_5"
+      ],
+      "modelExclude": [],
+      "requireTp": false,
+      "minTpSize": 1,
+      "rationaleHint": "Open SGLang ROCm PR wires a fused QK-norm plus RoPE plus KV-cache family for Qwen3.5."
+    },
+    {
+      "id": "pr_22392_cutlass_fp8_scaled_mm_replacing_nvjet",
+      "pattern": "PR #22392 CUTLASS FP8 scaled MM replacing nvjet",
+      "patternZh": "PR #22392 CUTLASS FP8 scaled MM 替换 nvjet",
+      "origin": "inflight",
+      "activeKeywords": [
+        "cutlass_scaled_mm",
+        "fp8_scaled_mm"
+      ],
+      "splitGroups": [
+        [
+          "nvjet",
+          "_scaled_mm"
+        ],
+        [
+          "memset",
+          "memcpy128"
+        ]
+      ],
+      "candidatePaths": [
+        "PR #22392",
+        "python/sglang/kernels/aot/python/sgl_kernel/gemm.py",
+        "python/sglang/srt/layers/quantization/fp8_utils.py"
+      ],
+      "candidatePathsPresentLocally": [
+        false,
+        true,
+        true
+      ],
+      "minSharePct": 0.2,
+      "likelySharePct": 1.0,
+      "priority": 90,
+      "subsumes": [],
+      "modelInclude": [],
+      "modelExclude": [],
+      "requireTp": false,
+      "minTpSize": 1,
+      "rationaleHint": "Open SGLang PR replaces nvjet FP8 GEMM with CUTLASS to remove memset bubbles and extra copies."
+    },
+    {
+      "id": "sglang_ltx2_fused_ada_values",
+      "pattern": "SGLang LTX2 fused Ada values",
+      "patternZh": "SGLang LTX2 Ada 值融合",
+      "origin": "upstream",
+      "activeKeywords": [
+        "ltx2_ada_values9",
+        "ltx2_ada_values",
+        "LTX2TransformerBlock"
+      ],
+      "splitGroups": [
+        [
+          "scale_shift_table",
+          "timestep",
+          "reshape"
+        ],
+        [
+          "get_ada_values",
+          "ada",
+          "adaln"
+        ],
+        [
+          "slice",
+          "split",
+          "unbind"
+        ]
+      ],
+      "candidatePaths": [
+        "PR #29390",
+        "python/sglang/kernels/ops/diffusion/triton/ltx2_ada_values.py",
+        "python/sglang/multimodal_gen/runtime/models/dits/ltx_2.py"
+      ],
+      "candidatePathsPresentLocally": [
+        false,
+        true,
+        true
+      ],
+      "minSharePct": 0.2,
+      "likelySharePct": 1.0,
+      "priority": 0,
+      "subsumes": [],
+      "modelInclude": [
+        "ltx",
+        "ltx-2",
+        "ltx2"
+      ],
+      "modelExclude": [],
+      "requireTp": false,
+      "minTpSize": 1,
+      "rationaleHint": "SGLang mainline fuses LTX-2.3 Ada value materialization for video/audio streams; split Ada table add/reshape/slice ladders should be checked against this diffusion Triton kernel first."
+    },
+    {
+      "id": "sglang_ltx2_residual_gate_add_cuda_fast_path",
+      "pattern": "SGLang LTX2 residual-gate add CUDA fast path",
+      "patternZh": "SGLang LTX2 residual-gate 加法 CUDA 快路径",
+      "origin": "upstream",
+      "activeKeywords": [
+        "diffusion_residual_gate_add",
+        "residual_gate_add",
+        "_ltx2_residual_gate_add"
+      ],
+      "splitGroups": [
+        [
+          "add",
+          "mul",
+          "gate"
+        ],
+        [
+          "residual",
+          "update",
+          "gate"
+        ],
+        [
+          "hidden_states",
+          "attn_hidden_states",
+          "gate"
+        ]
+      ],
+      "candidatePaths": [
+        "PR #29361",
+        "python/sglang/kernels/ops/diffusion/residual_gate_add.py",
+        "python/sglang/kernels/jit/csrc/diffusion/residual_gate_add.cuh",
+        "python/sglang/multimodal_gen/runtime/models/dits/ltx_2.py"
+      ],
+      "candidatePathsPresentLocally": [
+        false,
+        true,
+        true,
+        true
+      ],
+      "minSharePct": 0.2,
+      "likelySharePct": 1.0,
+      "priority": 0,
+      "subsumes": [],
+      "modelInclude": [
+        "ltx",
+        "ltx-2",
+        "ltx2"
+      ],
+      "modelExclude": [],
+      "requireTp": false,
+      "minTpSize": 1,
+      "rationaleHint": "SGLang mainline fuses LTX2 residual + update * gate sites into a CUDA custom op; split add/mul gate ladders should be checked against this path before proposing a new diffusion elementwise fusion."
+    },
+    {
+      "id": "tokenspeed_cute_dsl_mla_prefill_decode",
+      "pattern": "TokenSpeed CuTe DSL MLA prefill / decode",
+      "patternZh": "TokenSpeed CuTe DSL MLA prefill / decode 融合",
+      "origin": "upstream",
+      "activeKeywords": [
+        "tokenspeed_mla_decode",
+        "tokenspeed_mla_prefill",
+        "BlackwellMultiHeadLatentAttentionForward"
+      ],
+      "splitGroups": [
+        [
+          "mla",
+          "flashmla",
+          "attention",
+          "fmha"
+        ],
+        [
+          "prefill",
+          "decode",
+          "verify"
+        ],
+        [
+          "fp8",
+          "kv_cache",
+          "page_table"
+        ]
+      ],
+      "candidatePaths": [
+        "python/tokenspeed/runtime/layers/attention/backends/tokenspeed_mla.py",
+        "tokenspeed-mla/python/tokenspeed_mla/mla_decode.py",
+        "tokenspeed-mla/python/tokenspeed_mla/mla_prefill.py",
+        "tokenspeed-kernel/python/tokenspeed_kernel/ops/attention/tokenspeed_mla/__init__.py"
+      ],
+      "candidatePathsPresentLocally": [
+        false,
+        false,
+        false,
+        false
+      ],
+      "minSharePct": 0.4,
+      "likelySharePct": 2.0,
+      "priority": 0,
+      "subsumes": [],
+      "modelInclude": [
+        "deepseek",
+        "kimi",
+        "qwen3.5",
+        "qwen3_5"
+      ],
+      "modelExclude": [],
+      "requireTp": false,
+      "minTpSize": 1,
+      "rationaleHint": "TokenSpeed ships Blackwell CuTe DSL MLA prefill/decode kernels; split MLA support kernels should be checked against backend selection before being called novel."
+    },
+    {
+      "id": "tokenspeed_mla_kv_pack_fp8_quantize",
+      "pattern": "TokenSpeed MLA KV pack + FP8 quantize",
+      "patternZh": "TokenSpeed MLA KV 打包 + FP8 量化融合",
+      "origin": "upstream",
+      "activeKeywords": [
+        "_mla_kv_pack_quantize_fp8_kernel",
+        "mla_kv_pack_quantize_fp8"
+      ],
+      "splitGroups": [
+        [
+          "k_nope",
+          "k_pe",
+          "cat",
+          "concat",
+          "pack"
+        ],
+        [
+          "quant",
+          "fp8",
+          "float8"
+        ],
+        [
+          "v",
+          "kv",
+          "cache"
+        ]
+      ],
+      "candidatePaths": [
+        "tokenspeed-mla/python/tokenspeed_mla/mla_kv_pack_quantize_fp8.py",
+        "tokenspeed-kernel/python/tokenspeed_kernel/ops/attention/tokenspeed_mla/__init__.py"
+      ],
+      "candidatePathsPresentLocally": [
+        false,
+        false
+      ],
+      "minSharePct": 0.2,
+      "likelySharePct": 1.0,
+      "priority": 0,
+      "subsumes": [],
+      "modelInclude": [
+        "deepseek",
+        "kimi",
+        "qwen3.5",
+        "qwen3_5"
+      ],
+      "modelExclude": [],
+      "requireTp": false,
+      "minTpSize": 1,
+      "rationaleHint": "TokenSpeed fuses MLA K/V pack, concat, and FP8 quantization into one Triton kernel for chunked prefill."
+    },
+    {
+      "id": "tokenspeed_fused_top_k_top_p_sampling",
+      "pattern": "TokenSpeed fused top-k + top-p sampling",
+      "patternZh": "TokenSpeed top-k + top-p 采样融合",
+      "origin": "upstream",
+      "activeKeywords": [
+        "fused_topk_topp",
+        "fused_topk_topp_renorm"
+      ],
+      "splitGroups": [
+        [
+          "topk",
+          "top_k"
+        ],
+        [
+          "topp",
+          "top_p"
+        ],
+        [
+          "sampling",
+          "renorm",
+          "softmax"
+        ]
+      ],
+      "candidatePaths": [
+        "tokenspeed-kernel/python/tokenspeed_kernel/thirdparty/cuda/fused_topk_topp.py",
+        "tokenspeed-kernel/python/tokenspeed_kernel/thirdparty/cuda/csrc/fused_topk_topp/fused_topk_topp.cu"
+      ],
+      "candidatePathsPresentLocally": [
+        false,
+        false
+      ],
+      "minSharePct": 0.1,
+      "likelySharePct": 0.8,
+      "priority": 0,
+      "subsumes": [],
+      "modelInclude": [],
+      "modelExclude": [],
+      "requireTp": false,
+      "minTpSize": 1,
+      "rationaleHint": "TokenSpeed has a fused top-k/top-p renormalization path for decode sampling."
+    },
+    {
+      "id": "tokenspeed_persistent_lm_head_gemm",
+      "pattern": "TokenSpeed persistent lm_head GEMM",
+      "patternZh": "TokenSpeed 常驻 lm_head GEMM",
+      "origin": "upstream",
+      "activeKeywords": [
+        "lm_head_gemm"
+      ],
+      "splitGroups": [
+        [
+          "lm_head",
+          "logits",
+          "vocab"
+        ],
+        [
+          "gemm",
+          "matmul",
+          "linear"
+        ]
+      ],
+      "candidatePaths": [
+        "tokenspeed-kernel/python/tokenspeed_kernel/thirdparty/cuda/lm_head_gemm.py",
+        "tokenspeed-kernel/python/tokenspeed_kernel/thirdparty/cuda/csrc/lm_head_gemm.cu"
+      ],
+      "candidatePathsPresentLocally": [
+        false,
+        false
+      ],
+      "minSharePct": 0.2,
+      "likelySharePct": 1.0,
+      "priority": 0,
+      "subsumes": [],
+      "modelInclude": [
+        "kimi",
+        "qwen"
+      ],
+      "modelExclude": [],
+      "requireTp": false,
+      "minTpSize": 1,
+      "rationaleHint": "TokenSpeed has a shape-gated persistent lm_head GEMM path; visible lm_head matmul ladders should be compared against it."
+    },
+    {
+      "id": "tokenspeed_nvfp4_gemm_swiglu_quant",
+      "pattern": "TokenSpeed NVFP4 GEMM + SwiGLU + quant",
+      "patternZh": "TokenSpeed NVFP4 GEMM + SwiGLU + 量化融合",
+      "origin": "upstream",
+      "activeKeywords": [
+        "nvfp4_gemm_swiglu_nvfp4_quant"
+      ],
+      "splitGroups": [
+        [
+          "gemm",
+          "nvfp4",
+          "fp4"
+        ],
+        [
+          "swiglu",
+          "silu",
+          "activation",
+          "mul"
+        ],
+        [
+          "quant",
+          "scale",
+          "sfc"
+        ]
+      ],
+      "candidatePaths": [
+        "tokenspeed-kernel/python/tokenspeed_kernel/thirdparty/cute_dsl/nvfp4_gemm_swiglu_nvfp4_quant.py"
+      ],
+      "candidatePathsPresentLocally": [
+        false
+      ],
+      "minSharePct": 0.3,
+      "likelySharePct": 1.5,
+      "priority": 0,
+      "subsumes": [],
+      "modelInclude": [],
+      "modelExclude": [],
+      "requireTp": false,
+      "minTpSize": 1,
+      "rationaleHint": "TokenSpeed's CuTe DSL kernel fuses NVFP4 GEMM, SwiGLU, and optional output quantization in one expert-style path."
+    },
+    {
+      "id": "vllm_origin_attention_quantization",
+      "pattern": "vLLM-origin Attention + Quantization",
+      "patternZh": "vLLM 源流：attention + 量化融合",
+      "origin": "upstream",
+      "activeKeywords": [
+        "merge_attn_states",
+        "attn_quant_fusion",
+        "output_scale",
+        "output_group_scale"
+      ],
+      "splitGroups": [
+        [
+          "attention",
+          "flash_attn",
+          "flashattention",
+          "mla"
+        ],
+        [
+          "quant",
+          "fp8",
+          "nvfp4",
+          "group_scale"
+        ]
+      ],
+      "candidatePaths": [
+        "vllm/compilation/passes/fusion/attn_quant_fusion.py",
+        "vllm/v1/attention/ops/merge_attn_states.py",
+        "vllm/csrc/attention/merge_attn_states.cu",
+        "vllm/docs/design/fusions.md"
+      ],
+      "candidatePathsPresentLocally": [
+        false,
+        false,
+        false,
+        false
+      ],
+      "minSharePct": 0.3,
+      "likelySharePct": 1.5,
+      "priority": 0,
+      "subsumes": [],
+      "modelInclude": [],
+      "modelExclude": [],
+      "requireTp": false,
+      "minTpSize": 1,
+      "rationaleHint": "vLLM combines attention merge with attention-epilogue quantization."
+    },
+    {
+      "id": "vllm_origin_dsv3_2_fused_indexer_projections",
+      "pattern": "vLLM-origin DSV3.2 fused indexer projections",
+      "patternZh": "vLLM 源流：DSV3.2 indexer 投影融合",
+      "origin": "upstream",
+      "activeKeywords": [
+        "wk_weights_proj"
+      ],
+      "splitGroups": [
+        [
+          "wk_weights_proj",
+          "wk",
+          "weights_proj"
+        ],
+        [
+          "mergedcolumnparallellinear",
+          "gemm",
+          "matmul"
+        ]
+      ],
+      "candidatePaths": [
+        "vllm/model_executor/models/deepseek_v2.py",
+        "vllm/model_executor/models/deepseek_mtp.py"
+      ],
+      "candidatePathsPresentLocally": [
+        false,
+        false
+      ],
+      "minSharePct": 0.2,
+      "likelySharePct": 1.0,
+      "priority": 0,
+      "subsumes": [],
+      "modelInclude": [],
+      "modelExclude": [],
+      "requireTp": false,
+      "minTpSize": 1,
+      "rationaleHint": "vLLM already fuses the paired `wk` and `weights_proj` indexer projections into one DSV3.2 linear family."
+    },
+    {
+      "id": "vllm_origin_rmsnorm_quantization",
+      "pattern": "vLLM-origin RMSNorm + Quantization",
+      "patternZh": "vLLM 源流：RMSNorm + 量化融合",
+      "origin": "upstream",
+      "activeKeywords": [
+        "fused_add_rms_norm_static_fp8_quant",
+        "rms_quant_fusion",
+        "norm_quant"
+      ],
+      "splitGroups": [
+        [
+          "rmsnorm",
+          "layernorm",
+          "fused_add_rms_norm"
+        ],
+        [
+          "quant",
+          "fp8",
+          "fp4",
+          "per-group"
+        ]
+      ],
+      "candidatePaths": [
+        "vllm/compilation/passes/fusion/rms_quant_fusion.py",
+        "vllm/docs/design/fusions.md"
+      ],
+      "candidatePathsPresentLocally": [
+        false,
+        false
+      ],
+      "minSharePct": 0.3,
+      "likelySharePct": 1.5,
+      "priority": 0,
+      "subsumes": [],
+      "modelInclude": [],
+      "modelExclude": [],
+      "requireTp": false,
+      "minTpSize": 1,
+      "rationaleHint": "vLLM already has a compile-time norm-plus-quant fusion family."
+    },
+    {
+      "id": "vllm_origin_silu_mul_quantization",
+      "pattern": "vLLM-origin SiLU+Mul + Quantization",
+      "patternZh": "vLLM 源流：SiLU+Mul + 量化融合",
+      "origin": "upstream",
+      "activeKeywords": [
+        "silu_mul_quant_fp4",
+        "fused_silu_mul_block_quant",
+        "act_quant_fusion"
+      ],
+      "splitGroups": [
+        [
+          "silu",
+          "gelu",
+          "act_and_mul"
+        ],
+        [
+          "quant",
+          "fp8",
+          "fp4",
+          "block_quant"
+        ]
+      ],
+      "candidatePaths": [
+        "vllm/compilation/passes/fusion/act_quant_fusion.py",
+        "vllm/docs/design/fusions.md"
+      ],
+      "candidatePathsPresentLocally": [
+        false,
+        false
+      ],
+      "minSharePct": 0.3,
+      "likelySharePct": 1.5,
+      "priority": 0,
+      "subsumes": [],
+      "modelInclude": [],
+      "modelExclude": [],
+      "requireTp": false,
+      "minTpSize": 1,
+      "rationaleHint": "vLLM has an activation-plus-quant fusion family."
+    },
+    {
+      "id": "vllm_origin_dsv3_router_gemm",
+      "pattern": "vLLM-origin DSV3 router GEMM",
+      "patternZh": "vLLM 源流：DSV3 router GEMM",
+      "origin": "upstream",
+      "activeKeywords": [
+        "dsv3_router_gemm",
+        "fp32_router_gemm"
+      ],
+      "splitGroups": [
+        [
+          "router",
+          "gate",
+          "router logits"
+        ],
+        [
+          "gemm",
+          "matmul",
+          "cublas",
+          "cutlass"
+        ]
+      ],
+      "candidatePaths": [
+        "vllm/model_executor/layers/fused_moe/router/gate_linear.py",
+        "vllm/csrc/moe/dsv3_router_gemm_entry.cu"
+      ],
+      "candidatePathsPresentLocally": [
+        false,
+        false
+      ],
+      "minSharePct": 0.3,
+      "likelySharePct": 1.5,
+      "priority": 0,
+      "subsumes": [],
+      "modelInclude": [],
+      "modelExclude": [],
+      "requireTp": false,
+      "minTpSize": 1,
+      "rationaleHint": "vLLM has a specialized DeepSeek router GEMM family for small decode batches."
+    },
+    {
+      "id": "vllm_origin_gpt_oss_router_gemm",
+      "pattern": "vLLM-origin GPT-OSS router GEMM",
+      "patternZh": "vLLM 源流：GPT-OSS router GEMM",
+      "origin": "upstream",
+      "activeKeywords": [
+        "gpt_oss_router_gemm"
+      ],
+      "splitGroups": [
+        [
+          "router",
+          "gate",
+          "router logits",
+          "gpt_oss"
+        ],
+        [
+          "gemm",
+          "matmul",
+          "cublas",
+          "cutlass"
+        ]
+      ],
+      "candidatePaths": [
+        "vllm/_custom_ops.py",
+        "vllm/model_executor/layers/fused_moe/router/gate_linear.py",
+        "vllm/csrc/moe/gpt_oss_router_gemm.cu"
+      ],
+      "candidatePathsPresentLocally": [
+        false,
+        false,
+        false
+      ],
+      "minSharePct": 0.3,
+      "likelySharePct": 1.5,
+      "priority": 0,
+      "subsumes": [],
+      "modelInclude": [
+        "gpt-oss",
+        "gpt_oss"
+      ],
+      "modelExclude": [],
+      "requireTp": false,
+      "minTpSize": 1,
+      "rationaleHint": "vLLM has a GPT-OSS-specific router GEMM path."
+    },
+    {
+      "id": "vllm_origin_deepseek_min_latency_fused_qkv_a_projection",
+      "pattern": "vLLM-origin DeepSeek min-latency fused QKV-A projection",
+      "patternZh": "vLLM 源流：DeepSeek 低延迟 QKV-A 投影融合",
+      "origin": "upstream",
+      "activeKeywords": [
+        "dsv3_fused_a_gemm",
+        "fused_qkv_a_proj"
+      ],
+      "splitGroups": [
+        [
+          "q_a_proj",
+          "kv_a_proj",
+          "weights_proj"
+        ],
+        [
+          "gemm",
+          "matmul",
+          "cutlass",
+          "cublas"
+        ]
+      ],
+      "candidatePaths": [
+        "vllm/model_executor/models/deepseek_v2.py",
+        "vllm/csrc/dsv3_fused_a_gemm.cu"
+      ],
+      "candidatePathsPresentLocally": [
+        false,
+        false
+      ],
+      "minSharePct": 0.3,
+      "likelySharePct": 1.5,
+      "priority": 0,
+      "subsumes": [],
+      "modelInclude": [
+        "deepseek",
+        "glm"
+      ],
+      "modelExclude": [],
+      "requireTp": false,
+      "minTpSize": 1,
+      "rationaleHint": "vLLM has a fused DeepSeek QKV-A projection family for decode latency reduction."
+    },
+    {
+      "id": "pr_38621_fused_qk_norm_rope_cache_quant",
+      "pattern": "PR #38621 fused QK norm + RoPE + cache + quant",
+      "patternZh": "PR #38621 Q/K norm + RoPE + cache + 量化融合",
+      "origin": "inflight",
+      "activeKeywords": [
+        "fused_qk_norm_rope_cache_quant"
+      ],
+      "splitGroups": [
+        [
+          "qknorm",
+          "q_norm",
+          "k_norm"
+        ],
+        [
+          "rope",
+          "rotary",
+          "mrope"
+        ],
+        [
+          "cache",
+          "kv_buffer",
+          "cache write"
+        ],
+        [
+          "quant",
+          "fp8",
+          "nvfp4"
+        ]
+      ],
+      "candidatePaths": [
+        "PR #38621",
+        "vllm/csrc/fused_qk_norm_rope_cache_quant.cu",
+        "vllm/compilation/passes/fusion/qk_norm_rope_cache_quant_fusion.py"
+      ],
+      "candidatePathsPresentLocally": [
+        false,
+        false,
+        false
+      ],
+      "minSharePct": 0.4,
+      "likelySharePct": 2.0,
+      "priority": 100,
+      "subsumes": [
+        "vLLM-origin Attention + Quantization"
+      ],
+      "modelInclude": [],
+      "modelExclude": [],
+      "requireTp": false,
+      "minTpSize": 1,
+      "rationaleHint": "Open vLLM PR covers QK-norm plus RoPE plus cache plus quant as one fusion family."
+    },
+    {
+      "id": "vllm_origin_minimax_allreduce_rms_kernels",
+      "pattern": "vLLM-origin MiniMax allreduce_rms kernels",
+      "patternZh": "vLLM 源流：MiniMax allreduce_rms 融合",
+      "origin": "upstream",
+      "activeKeywords": [
+        "minimax_allreduce_rms",
+        "minimax_allreduce_rmsnorm"
+      ],
+      "splitGroups": [
+        [
+          "q_norm",
+          "k_norm",
+          "rmsnorm",
+          "minimax"
+        ],
+        [
+          "allreduce",
+          "all_reduce",
+          "cross_device_reduce"
+        ]
+      ],
+      "candidatePaths": [
+        "vllm/model_executor/models/minimax_m2.py"
+      ],
+      "candidatePathsPresentLocally": [
+        false
+      ],
+      "minSharePct": 0.3,
+      "likelySharePct": 1.5,
+      "priority": 0,
+      "subsumes": [],
+      "modelInclude": [
+        "minimax"
+      ],
+      "modelExclude": [],
+      "requireTp": false,
+      "minTpSize": 1,
+      "rationaleHint": "vLLM includes the TRTLLM-derived MiniMax allreduce-plus-RMSNorm kernel family."
+    },
+    {
+      "id": "vllm_fused_residual_add_rmsnorm",
+      "pattern": "vLLM fused residual add + RMSNorm",
+      "patternZh": "vLLM 残差加 + RMSNorm 融合",
+      "origin": "upstream",
+      "activeKeywords": [
+        "fused_add_rms_norm",
+        "fused_add_rms_norm_static_fp8_quant"
+      ],
+      "splitGroups": [],
+      "candidatePaths": [
+        "vllm/_custom_ops.py",
+        "vllm/compilation/passes/fusion/rms_quant_fusion.py"
+      ],
+      "candidatePathsPresentLocally": [
+        false,
+        false
+      ],
+      "minSharePct": 0.1,
+      "likelySharePct": 1.0,
+      "priority": 0,
+      "subsumes": [],
+      "modelInclude": [],
+      "modelExclude": [],
+      "requireTp": false,
+      "minTpSize": 1,
+      "rationaleHint": "vLLM exposes fused residual-add-plus-RMSNorm kernels and matching compile-time hooks."
+    },
+    {
+      "id": "vllm_fused_activation_and_mul",
+      "pattern": "vLLM fused activation-and-mul",
+      "patternZh": "vLLM 激活与逐元素乘融合",
+      "origin": "upstream",
+      "activeKeywords": [
+        "silu_and_mul",
+        "silu_and_mul_quant",
+        "silu_and_mul_per_block_quant",
+        "act_and_mul"
+      ],
+      "splitGroups": [],
+      "candidatePaths": [
+        "vllm/_custom_ops.py",
+        "vllm/compilation/passes/fusion/act_quant_fusion.py"
+      ],
+      "candidatePathsPresentLocally": [
+        false,
+        false
+      ],
+      "minSharePct": 0.1,
+      "likelySharePct": 1.0,
+      "priority": 0,
+      "subsumes": [],
+      "modelInclude": [],
+      "modelExclude": [],
+      "requireTp": false,
+      "minTpSize": 1,
+      "rationaleHint": "vLLM ships fused activation-and-multiply kernels plus quantized variants for the MLP epilogue."
+    },
+    {
+      "id": "tensorrt_llm_flashinfer_residual_add_rmsnorm",
+      "pattern": "TensorRT-LLM FlashInfer residual add + RMSNorm",
+      "patternZh": "TensorRT-LLM FlashInfer 残差加 + RMSNorm 融合",
+      "origin": "upstream",
+      "activeKeywords": [
+        "flashinfer_fused_add_rmsnorm",
+        "flashinfer_gemma_fused_add_rmsnorm",
+        "flashinfer::norm::FusedAddRMSNormKernel",
+        "FusedAddRMSNormKernel",
+        "auto_deploy::flashinfer_fused_add_rms_norm_inplace"
+      ],
+      "splitGroups": [],
+      "candidatePaths": [
+        "tensorrt_llm/_torch/custom_ops/flashinfer_custom_ops.py",
+        "tensorrt_llm/_torch/modules/rms_norm.py",
+        "tensorrt_llm/_torch/auto_deploy/transform/library/fused_add_rms_norm.py"
+      ],
+      "candidatePathsPresentLocally": [
+        false,
+        false,
+        false
+      ],
+      "minSharePct": 0.1,
+      "likelySharePct": 1.0,
+      "priority": 0,
+      "subsumes": [],
+      "modelInclude": [],
+      "modelExclude": [],
+      "requireTp": false,
+      "minTpSize": 1,
+      "rationaleHint": "TensorRT-LLM exposes a FlashInfer fused residual-add plus RMSNorm family, including AutoDeploy rewrites."
+    },
+    {
+      "id": "tensorrt_llm_triton_fused_residual_add_rmsnorm_fp8_quant",
+      "pattern": "TensorRT-LLM Triton fused residual add + RMSNorm + FP8 quant",
+      "patternZh": "TensorRT-LLM Triton 残差加 + RMSNorm + FP8 量化融合",
+      "origin": "upstream",
+      "activeKeywords": [
+        "triton_fused_add_rms_norm_quant_fp8",
+        "fuse_rmsnorm_quant_fp8"
+      ],
+      "splitGroups": [],
+      "candidatePaths": [
+        "tensorrt_llm/_torch/auto_deploy/custom_ops/normalization/triton_fused_add_rms_norm_quant_fp8.py",
+        "tensorrt_llm/_torch/auto_deploy/transform/library/fuse_rmsnorm_quant_fp8.py"
+      ],
+      "candidatePathsPresentLocally": [
+        false,
+        false
+      ],
+      "minSharePct": 0.2,
+      "likelySharePct": 1.0,
+      "priority": 20,
+      "subsumes": [],
+      "modelInclude": [],
+      "modelExclude": [],
+      "requireTp": false,
+      "minTpSize": 1,
+      "rationaleHint": "TensorRT-LLM mainline has a Triton residual-add plus RMSNorm plus FP8-quant family in AutoDeploy."
+    },
+    {
+      "id": "tensorrt_llm_flashinfer_rmsnorm_family",
+      "pattern": "TensorRT-LLM FlashInfer RMSNorm family",
+      "patternZh": "TensorRT-LLM FlashInfer RMSNorm 家族",
+      "origin": "upstream",
+      "activeKeywords": [
+        "flashinfer_rmsnorm",
+        "flashinfer_gemma_rmsnorm",
+        "auto_deploy::flashinfer_rms_norm"
+      ],
+      "splitGroups": [],
+      "candidatePaths": [
+        "tensorrt_llm/_torch/custom_ops/flashinfer_custom_ops.py",
+        "tensorrt_llm/_torch/modules/rms_norm.py",
+        "tensorrt_llm/_torch/auto_deploy/custom_ops/normalization/rms_norm.py"
+      ],
+      "candidatePathsPresentLocally": [
+        false,
+        false,
+        false
+      ],
+      "minSharePct": 0.1,
+      "likelySharePct": 1.0,
+      "priority": 0,
+      "subsumes": [],
+      "modelInclude": [],
+      "modelExclude": [],
+      "requireTp": false,
+      "minTpSize": 1,
+      "rationaleHint": "TensorRT-LLM lowers RMSNorm-style ladders to FlashInfer kernels and AutoDeploy custom ops."
+    },
+    {
+      "id": "tensorrt_llm_flashinfer_activation_gate_epilogues",
+      "pattern": "TensorRT-LLM FlashInfer activation / gate epilogues",
+      "patternZh": "TensorRT-LLM FlashInfer 激活 / gate epilogue",
+      "origin": "upstream",
+      "activeKeywords": [
+        "flashinfer_silu_and_mul",
+        "flashinfer_gelu_tanh_and_mul",
+        "auto_deploy::silu_and_mul"
+      ],
+      "splitGroups": [],
+      "candidatePaths": [
+        "tensorrt_llm/_torch/custom_ops/flashinfer_custom_ops.py",
+        "tensorrt_llm/_torch/auto_deploy/transform/library/fuse_silu_mul.py",
+        "tensorrt_llm/_torch/models/modeling_gemma3.py"
+      ],
+      "candidatePathsPresentLocally": [
+        false,
+        false,
+        false
+      ],
+      "minSharePct": 0.1,
+      "likelySharePct": 1.0,
+      "priority": 0,
+      "subsumes": [],
+      "modelInclude": [],
+      "modelExclude": [],
+      "requireTp": false,
+      "minTpSize": 1,
+      "rationaleHint": "TensorRT-LLM already rewrites gate activation plus multiply ladders into FlashInfer epilogue kernels."
+    }
+  ]
+}

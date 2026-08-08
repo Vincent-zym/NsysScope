@@ -92,6 +92,119 @@ def portable_json(
     return value if isinstance(value, dict) else {}
 
 
+FORWARD_PIPELINE_FIELDS = (
+    "环节", "环节类型", "层数", "子步数", "单次耗时(us)", "总耗时(us)",
+    "占forward步(%)", "占父环节(%)", "样本数", "min_us", "max_us", "备注",
+)
+FORWARD_PIPELINE_TYPES = {"total", "phase", "variant", "stage", "other", "gap"}
+
+
+def validate_forward_pipeline(path: Path, errors: list[str]) -> None:
+    """Check the optional forward-pipeline table's structure and closures.
+
+    The closures are the correctness test for step segmentation: a boundary marker
+    that fires at the wrong place shows up here as a sum that does not add up.
+    """
+    if not path.is_file():
+        return
+    rows = read_csv(path)
+    fields = read_fields(path)
+    if list(fields) != list(FORWARD_PIPELINE_FIELDS):
+        errors.append(
+            f"forward pipeline columns must be exactly {list(FORWARD_PIPELINE_FIELDS)}"
+        )
+        return
+    if not rows:
+        errors.append("forward pipeline table has no rows")
+        return
+
+    bad = sorted({r.get("环节类型", "") for r in rows} - FORWARD_PIPELINE_TYPES)
+    if bad:
+        errors.append(f"forward pipeline has unknown 环节类型: {bad}")
+        return
+
+    totals = [r for r in rows if r["环节类型"] == "total"]
+    if len(totals) != 1:
+        errors.append("forward pipeline needs exactly one total row")
+        return
+    step_us = number(totals[0].get("总耗时(us)"))
+    if not step_us or step_us <= 0:
+        errors.append("forward pipeline total row needs a positive 总耗时(us)")
+        return
+    tol = step_us * 0.005
+
+    # Nesting is positional: rows after a phase row belong to it until the next one.
+    phases: list[tuple[dict[str, str], list[dict[str, str]]]] = []
+    for row in rows:
+        kind = row["环节类型"]
+        if kind == "phase":
+            phases.append((row, []))
+        elif kind in {"variant", "stage", "other"}:
+            if not phases:
+                errors.append(f"forward pipeline row '{row['环节']}' has no parent phase")
+                return
+            phases[-1][1].append(row)
+    if not phases:
+        errors.append("forward pipeline needs at least one phase row")
+        return
+
+    phase_sum = 0.0
+    for phase, children in phases:
+        value = number(phase.get("总耗时(us)"))
+        if value is None:
+            errors.append(f"forward pipeline phase '{phase['环节']}' has no 总耗时(us)")
+            return
+        phase_sum += value
+        if not children:
+            continue
+        child_sum = 0.0
+        for child in children:
+            cv = number(child.get("总耗时(us)"))
+            if cv is None:
+                errors.append(
+                    f"forward pipeline row '{child['环节']}' has no 总耗时(us)"
+                )
+                return
+            child_sum += cv
+        if abs(child_sum - value) > tol:
+            errors.append(
+                f"forward pipeline phase '{phase['环节']}' does not close: "
+                f"children {child_sum:.1f}us vs phase {value:.1f}us "
+                f"(tolerance {tol:.1f}us) -- re-derive the boundaries instead of "
+                f"adjusting the 其他 row"
+            )
+
+    if abs(phase_sum - step_us) > tol:
+        errors.append(
+            f"forward pipeline phases do not close: sum {phase_sum:.1f}us vs step "
+            f"{step_us:.1f}us (tolerance {tol:.1f}us)"
+        )
+
+    # prep draft / prep verify are folded into the target phase's 其他 row, so the gap
+    # can only be bounded by the rows that carry them.
+    prep_total = sum(
+        number(r.get("总耗时(us)")) or 0.0
+        for r in rows
+        if r["环节类型"] == "other" or r["环节"].startswith("prep")
+    )
+    for row in rows:
+        if row["环节类型"] != "gap":
+            continue
+        gap = number(row.get("总耗时(us)"))
+        if gap is None:
+            errors.append("forward pipeline gap row has no 总耗时(us)")
+        elif gap > prep_total + tol:
+            errors.append(
+                f"forward pipeline gap {gap:.1f}us exceeds the prep phases "
+                f"{prep_total:.1f}us; the gap must be measured inside them only"
+            )
+        if not row.get("备注"):
+            errors.append(
+                "forward pipeline gap row needs 备注 stating the threshold and hole "
+                "count, so a 0.0 result is distinguishable from 'not measured'"
+            )
+
+
 def main() -> None:
     args = parse_args()
     root = args.package
@@ -110,6 +223,10 @@ def main() -> None:
         "classes": root / f"{args.prefix}_op_classification_table.csv",
         "stages": root / f"{args.prefix}_stage_table.csv",
     }
+    # Optional seventh table: absent for captures without two complete forward steps.
+    validate_forward_pipeline(
+        root / f"{args.prefix}_forward_pipeline_table.csv", errors,
+    )
     origin = read_csv(paths["origin"])
     overview_all = read_csv(paths["overview"])
     core_all = read_csv(paths["core"])
@@ -163,10 +280,12 @@ def main() -> None:
         category = CATEGORY_LABELS.get(row.get("算子类型", ""))
         if not category:
             continue
-        if int(number(row.get("算子数量")) or -1) != totals[category]["count"]:
+        row_count = number(row.get("算子数量"))
+        if row_count is None or int(row_count) != totals[category]["count"]:
             errors.append(f"{row['算子类型']} count disagrees with operator membership")
-        if not math.isclose(
-            number(row.get("总耗时(us)")) or -1,
+        row_duration = number(row.get("总耗时(us)"))
+        if row_duration is None or not math.isclose(
+            row_duration,
             totals[category]["duration"],
             abs_tol=0.01,
         ):
@@ -244,8 +363,10 @@ def main() -> None:
             actual = number(rows[0].get(field))
             if actual is None or not math.isclose(actual, expected, abs_tol=0.01):
                 errors.append(f"{name} total {field} disagrees with data rows")
-            if count_field and int(number(rows[0].get(count_field)) or -1) != expected_count:
-                errors.append(f"{name} total {count_field} disagrees with data rows")
+            if count_field:
+                actual_count = number(rows[0].get(count_field))
+                if actual_count is None or int(actual_count) != expected_count:
+                    errors.append(f"{name} total {count_field} disagrees with data rows")
 
         check_total("overview", "算子耗时(us)", accumulated_duration)
         check_total("overview", "模块耗时(us)", accumulated_duration)

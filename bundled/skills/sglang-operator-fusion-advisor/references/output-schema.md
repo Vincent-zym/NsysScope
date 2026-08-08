@@ -3,111 +3,166 @@
 ## Contents
 
 1. Top-level shape
-2. `suggestions[]` fields
-3. `options[]` fields
-4. Validation invariants
+2. `activePatterns[]` fields
+3. `suggestions[]` fields
+4. `options[]` fields
+5. Verdict vocabulary
+6. Validation invariants
 
 ## Top-level shape
 
 ```json
 {
-  "schemaVersion": "1.0",
-  "generatedAt": "2026-08-07T10:00:00Z",
+  "schemaVersion": "1.1",
+  "generatedAt": "2026-08-08T10:00:00Z",
   "scope": {
     "unitPosition": 1,
-    "unitId": "layer.4",
-    "unitVariant": "KDA+LatentMoE"
+    "unitId": "layer.5",
+    "unitVariant": "KDA-MoE",
+    "unitTotalDurationUs": 31381.326
   },
-  "suggestions": []
+  "prescan": {
+    "candidatesFile": "candidates.json",
+    "registryProvenance": { "derivedFrom": "...", "importedAt": "2026-08-08", "sglangHead": "..." },
+    "registryActionable": 1,
+    "registryActive": 0,
+    "unexplainedClusters": 5
+  },
+  "activePatterns": [],
+  "suggestions": [],
+  "limits": []
 }
 ```
 
-- `schemaVersion` is always the literal string `"1.0"` for this version of
-  the skill.
-- `generatedAt` is an ISO-8601 UTC timestamp.
-- `scope` states exactly which repeating unit was analyzed. If the
-  analyzed job's repeating unit is homogeneous (single variant across all
-  positions), `unitVariant` may be a single shared value; never merge two
-  genuinely different variants into one scope object.
-- `suggestions` is `[]` when no candidate group cleared the bar in
-  candidate-selection.md — this is a valid, expected result, not an error.
+- `schemaVersion` is the literal string `"1.1"`.
+- `scope` states exactly which repeating unit was analyzed, copied from
+  `candidates.json`'s `scope`. Never merge two genuinely different variants.
+- `prescan` carries provenance from the deterministic prescan so a reader can
+  tell which registry snapshot produced the verdicts. `registryProvenance` is
+  copied verbatim from `candidates.json` → `inputs.registryProvenance`.
+- `activePatterns` records registry patterns that are **already in effect** in
+  this unit (`* direct` status). These are not optimization targets; they exist
+  so a reader can see what is already covered and does not need re-proposing.
+- `suggestions` is `[]` when nothing cleared the bar — a valid, expected result.
+- `limits` is copied from `candidates.json` → `limits`, plus any additional
+  caveat specific to this run (for example: no web search was available).
+
+## `activePatterns[]` fields
+
+```json
+{
+  "registryPattern": "Fused MoE grouped-topk / gate kernels",
+  "registryPatternZh": "MoE grouped-topk / gate 融合",
+  "verdict": "已有实现已生效",
+  "matchedOperators": [34, 35],
+  "familySharePctOfUnit": 5.46
+}
+```
 
 ## `suggestions[]` fields
-
-Each entry:
 
 ```json
 {
   "id": "s1",
-  "targetOperators": [11, 12, 13],
-  "targetOperatorNames": ["per_token_group_quant_flat_kernel", "..."],
+  "source": "registry",
+  "verdict": "已有实现未启用",
+  "registryPattern": "Fused MoE grouped-topk / gate kernels",
+  "registryPatternZh": "MoE grouped-topk / gate 融合",
+  "candidatePaths": ["python/sglang/srt/layers/moe/topk.py"],
+  "targetOperators": [32, 34],
+  "targetOperatorNames": ["route_radix_kernel<...>", "_pack_topk_ids_triton_kernel"],
   "unitPosition": 1,
-  "unitId": "layer.4",
-  "unitVariant": "KDA+LatentMoE",
+  "unitId": "layer.5",
+  "unitVariant": "KDA-MoE",
   "groupDurationUs": 8.4,
-  "groupDurationPctOfUnit": 1.6,
+  "groupDurationPctOfUnit": 0.23,
+  "familySharePctOfUnit": 5.46,
+  "witnessSpreadOps": 2,
   "options": []
 }
 ```
 
 - `id`: short stable string unique within this file (`s1`, `s2`, ...).
-- `targetOperators`: the exact `index` values from `analysis.json` for
-  every kernel in the candidate group, in timeline order.
-- `targetOperatorNames`: the corresponding `kernelName` values, for human
-  readability — must stay in the same order as `targetOperators`.
-- `unitPosition`/`unitId`/`unitVariant`: copied from `scope` for
-  convenience when suggestions from multiple runs are later merged by
-  the frontend; must match `scope` exactly in this version (single-unit
-  scope only).
-- `groupDurationUs`: sum of the group's `durationUs` values from
-  `analysis.json`.
-- `groupDurationPctOfUnit`: that sum divided by
-  `summary.normalizedLayerDurationUs` (or the equivalent total available
-  in the manifest), as a percentage.
+- `source`: `"registry"` when a registry pattern explained the group,
+  `"cluster"` when it came from an unexplained adjacency cluster.
+- `verdict`: one value from the closed vocabulary below. This is the single most
+  important field for a reader: it separates "upstream already did this, you are
+  not using it" from "this is a genuinely new idea".
+- `registryPattern` / `registryPatternZh`: the matched registry family, or
+  `null` for `source: "cluster"`. Never name a pattern the prescan did not report.
+- `candidatePaths`: where the fused implementation lives, taken from the
+  prescan's resolved paths. This is what makes a suggestion actionable — a
+  reader should be able to open the file. Empty list is allowed only for
+  `source: "cluster"`.
+- `targetOperators`: exact `index` values from `analysis.json`, timeline order.
+- `targetOperatorNames`: matching `kernelName` values, same order.
+- `groupDurationUs` / `groupDurationPctOfUnit`: the concrete group's own cost.
+- `familySharePctOfUnit`: for registry matches, the share of every operator the
+  pattern's keyword groups matched in this unit. This is the number the
+  registry's `minSharePct` / `likelySharePct` thresholds are evaluated against,
+  and it is usually larger than `groupDurationPctOfUnit`.
+- `witnessSpreadOps`: operator-position distance across the matched witnesses,
+  from the prescan. A small number means the split kernels really do run
+  back-to-back.
 - `options`: 1 to 3 entries, sorted by `estimatedGainPct` descending.
 
 ## `options[]` fields
 
-Each entry:
-
 ```json
 {
-  "approach": "将量化算子融合进后续 GEMM 的 epilogue",
-  "rationale": "同代码库 moe/fused_moe_kernel.py 的 use_fp8_w8a8 分支已实现相同融合，参见 sglang/kernels/moe/fused_moe_kernel.py:210-245",
+  "approach": "将 route_radix 与 _pack_topk_ids 合并进 grouped-topk 融合实现",
+  "rationale": "同代码库 python/sglang/srt/layers/moe/topk.py 已提供 grouped-topk 融合入口，当前 trace 走的是拆分路径",
   "estimatedGainPct": 12.5,
-  "estimatedGainBasis": "访存字节数估算：量化算子读写共 X MB，融合后省去一次中间写回和读取，按显存带宽估算减少约 12.5% 组内耗时",
-  "referenceLinks": ["sglang/kernels/moe/fused_moe_kernel.py:210-245"],
+  "estimatedGainBasis": "访存字节数估算：两个 kernel 共读写约 X MB，融合后省去一次中间写回和读取，按显存带宽估算减少约 12.5% 组内耗时",
+  "referenceLinks": ["python/sglang/srt/layers/moe/topk.py:820"],
   "confidence": "high"
 }
 ```
 
-- `approach`: one sentence, concrete, naming the actual fusion/optimization
-  (not "optimize this operator").
-- `rationale`: the mechanism, per research-and-estimation.md — must name
-  either a source citation, a web citation, or an explicit first-principles
-  argument.
-- `estimatedGainPct`: a number, 0–100. Must not exceed what the group's own
-  `groupDurationUs` allows.
-- `estimatedGainBasis`: the arithmetic or citation behind the number — never
-  leave this generic ("会更快").
-- `referenceLinks`: file:line citations from the supplied source tree,
-  and/or URLs actually retrieved via web search this run. Empty array when
-  the option is pure first-principles reasoning (do not invent a link to
-  fill this field).
-- `confidence`: one of `high` (existing implementation found, same
-  codebase or verified upstream), `medium` (web-search-confirmed pattern
-  in a different but comparable context), `low` (first-principles only).
+- `approach`: one sentence, concrete, naming the actual fusion. Write in Chinese.
+- `rationale`: the mechanism, per research-and-estimation.md — a source
+  citation, a web citation, or an explicit first-principles argument.
+- `estimatedGainPct`: number in 0–100, a reduction of the **group's own**
+  duration. Must not exceed what `groupDurationUs` allows.
+- `estimatedGainBasis`: the arithmetic or citation behind the number.
+- `referenceLinks`: file:line citations from the supplied source tree and/or
+  URLs actually retrieved this run. Empty array for pure first-principles.
+- `confidence`: `high` (implementation found in the analysed tree or verified
+  upstream), `medium` (comparable context confirmed), `low` (first-principles
+  only). Note this describes **evidence strength for the mechanism**, not the
+  size of the win — a high-confidence suggestion can still be a small win.
+
+## Verdict vocabulary
+
+Actionable (may appear in `suggestions`):
+
+- `已有实现未启用` — registry `mainline split`: SGLang mainline has this fusion
+  and the path resolved in the analysed tree, but this trace ran the split form.
+- `上游已实现待迁移` — registry `upstream split`: another framework
+  (vLLM / TensorRT-LLM / TokenSpeed) ships it; migrating is the work.
+- `在飞PR待跟进` — registry `inflight split`: an open upstream PR covers it.
+- `疑似新机会` — an adjacency cluster no registry row explains.
+- `需人工确认` — matched, but the registry's implementation path could not be
+  resolved in the analysed source tree, so "just enable it" cannot be asserted.
+
+Informational (may appear only in `activePatterns`):
+
+- `已有实现已生效` / `上游实现已生效` / `在飞PR已生效`
 
 ## Validation invariants
 
-- `suggestions[].options` has between 1 and 3 entries.
-- `options[]` within one suggestion are sorted by `estimatedGainPct`
-  descending.
-- Every `targetOperators` index actually exists in the source
-  `analysis.json`'s `operators[].index` for the stated
-  `unitPosition`/`unitId`/`unitVariant`.
-- No suggestion targets a `category: communication` operator as its sole
-  member.
+Checked by `scripts/validate_optimization_package.py`:
+
+- `schemaVersion` is `"1.1"`; `limits` is non-empty; `prescan.registryProvenance`
+  is present.
+- `suggestions[].verdict` is in the actionable set; informational verdicts in
+  `suggestions` are an error.
+- `suggestions[].source` is `registry` or `cluster`.
+- `source: "registry"` requires a non-empty `registryPattern`, and that pattern
+  must appear in the prescan's `registryMatches` when `--candidates-json` is
+  supplied. Inventing a registry match is an error.
+- `source: "cluster"` requires `registryPattern` to be null.
+- `suggestions[].options` has between 1 and 3 entries, sorted by
+  `estimatedGainPct` descending.
+- Every `targetOperators` index exists in the source `analysis.json`.
 - Every option has a non-empty `estimatedGainBasis`.
-- `referenceLinks` entries, when present, correspond to citations actually
-  used in that option's `rationale`.

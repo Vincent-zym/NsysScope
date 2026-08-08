@@ -300,6 +300,37 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         runner.submit_conversion_retry(job_id)
         return view(queued)
 
+    @app.post(
+        "/api/jobs/{job_id}/optimize",
+        response_model=JobView,
+        dependencies=[Depends(authorize)],
+    )
+    def optimize_job(job_id: str) -> JobView:
+        try:
+            job = store.get(job_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="job not found") from exc
+        job_dir = Path(job["output_dir"])
+        if not (job_dir / "analysis.json").exists():
+            raise HTTPException(
+                status_code=409,
+                detail="analysis.json is missing; run or import a completed analysis first",
+            )
+        prefix = JobCreate.model_validate(job["request"]).prefix
+        try:
+            runner.find_package(job_dir, prefix)
+        except RuntimeError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail="this job has no complete six-table package",
+            ) from exc
+        queued = store.update(
+            job_id, status="validating", progress=96,
+            message="算子优化建议已进入队列", error="",
+        )
+        runner.submit_operator_advisor(job_id)
+        return view(queued)
+
     app.state.settings = settings
     app.state.store = store
     app.state.runner = runner

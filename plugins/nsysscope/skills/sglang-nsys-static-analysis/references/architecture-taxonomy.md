@@ -48,6 +48,10 @@ not sufficient when better evidence exists.
   ],
   "repeating_unit": {
     "kind": "composite",
+    "boundary_evidence": {
+      "layer_start_kernel": ["layer_start_kernel_name"],
+      "layer_start_marker": "prose description of the same boundary"
+    },
     "positions": [
       {
         "position": 1,
@@ -68,6 +72,7 @@ not sufficient when better evidence exists.
       "name": "Variant-A",
       "source_evidence": "ModelLayer selects VariantA when ...",
       "discriminators": ["config.variant_a_layers", "variant_a_kernel"],
+      "trace_marker_kernels": ["variant_a_core_kernel"],
       "ordered_functional_modules": [
         "Input aggregation",
         "Variant-A core",
@@ -91,6 +96,29 @@ Positions must be contiguous from 1. Resolve each selected kernel to exactly one
 position by `layer_id`, a narrow `module_regex`, or explicit semantic-map fields.
 Use `unit_id` for the concrete occurrence and `unit_variant` for the
 architecture-defined subtype.
+
+## Machine-readable trace markers
+
+`repeating_unit.boundary_evidence.layer_start_kernel` and
+`variants[].trace_marker_kernels` are the machine-readable form of the boundary and
+variant evidence: bare kernel **shortName substrings** from this capture, no prose,
+no wildcards, no negations. Write them whenever the evidence is available.
+
+They exist because `build_forward_pipeline_table.py` needs to cut a forward step
+into layers. Without them it falls back to parsing kernel names out of the prose
+`layer_start_marker` / `discriminators` strings, which is unreliable — a sentence
+like "absence of xKernel in the layer span" is a *negative* discriminator and gets
+dropped, leaving that variant unidentifiable. The builder then refuses to publish
+because the detected layer counts do not reproduce the declared repeating unit.
+
+Rules:
+
+- one entry per variant is enough, and it should be the variant's **core** kernel
+  (the attention/state-update kernel that fires once per layer of that variant)
+- the substring must appear in the trace being analysed — never copy markers from
+  another capture's taxonomy, prefill and decode use different kernels
+- a positive marker only: if the variant is distinguished by the *absence* of a
+  kernel, name a kernel it does run instead
 
 ## Functional-module granularity
 

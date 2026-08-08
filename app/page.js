@@ -96,11 +96,14 @@ function calculateOverlapPct(operators) {
 }
 
 function Metric({ label, value, suffix, note, accent }) {
+  const lines = Array.isArray(note) ? note.filter(Boolean) : [note];
   return (
     <article className="metric">
       <span>{label}</span>
       <strong className={accent ? "accent" : ""}>{value}<small>{suffix}</small></strong>
-      <p>{note}</p>
+      {lines.length > 1
+        ? <div className="metric-notes">{lines.map((line, i) => <p key={i}>{line}</p>)}</div>
+        : <p>{lines[0]}</p>}
     </article>
   );
 }
@@ -437,7 +440,7 @@ function JobDialog({ open, onClose, onLoaded }) {
 
   useEffect(() => {
     const ready = health.providers?.[form.agent_provider]?.ready;
-    if (!open || !api || form.mode !== "codex_skill" || !ready) {
+    if (!open || !api || !ready) {
       setModelCatalog({
         state: "idle", default_model: "", models: [], message: "",
       });
@@ -495,7 +498,7 @@ function JobDialog({ open, onClose, onLoaded }) {
           if (!result.ok) throw new Error("分析产物读取失败");
           const payload = await result.json();
           analysisLoaded.current = true;
-          onLoaded(payload, { api, token, optimizationUrl: next.optimization_url });
+          onLoaded(payload, { api, token, jobId: next.id, optimizationUrl: next.optimization_url });
         }
       } catch (cause) {
         setError(cause.message);
@@ -643,8 +646,7 @@ function JobDialog({ open, onClose, onLoaded }) {
         <div className="form-grid">
           <label>执行模式<select value={form.mode} onChange={set("mode")}><option value="codex_skill">Agent 静态分析</option><option value="existing_package">导入结果目录（无需 Agent）</option></select></label>
           <label>阶段<select value={form.stage} onChange={set("stage")}><option value="prefill">Prefill</option><option value="decode">Decode</option></select></label>
-          {form.mode === "codex_skill" && <>
-            <label>Agent Provider<select value={form.agent_provider} onChange={setProvider}>
+          <label>Agent Provider<select value={form.agent_provider} onChange={setProvider}>
               <option value="codex" disabled={health.providers && !health.providers.codex?.ready}>Codex CLI{health.providers && !health.providers.codex?.ready ? "（未就绪）" : ""}</option>
               <option value="comate" disabled={health.providers && !health.providers.comate?.ready}>Comate Zulu{health.providers && !health.providers.comate?.ready ? "（未登录或未就绪）" : ""}</option>
             </select></label>
@@ -672,13 +674,12 @@ function JobDialog({ open, onClose, onLoaded }) {
                 </button>
               </span>
               {modelCatalog.state === "ready" && modelCatalog.models.length > 0 &&
-                <small>已从 {form.agent_provider === "codex" ? "Codex CLI" : "Comate Zulu"} 自动读取</small>}
+                <small>已从 {form.agent_provider === "codex" ? "Codex CLI" : "Comate Zulu"} 自动读取{importingPackage ? "（导入模式仅用于算子优化建议）" : ""}</small>}
             </label>
             {provider && !provider.ready && <div className="provider-warning span-2">{provider.message}</div>}
             {modelCatalog.state === "error" && <div className="provider-warning span-2">模型列表读取失败，将使用 Provider 默认模型：{modelCatalog.message}</div>}
             {modelCatalog.state === "ready" && modelCatalog.models.length === 0 &&
               <div className="provider-warning span-2">Provider 已就绪，但没有返回可选模型；可点击“刷新”重试。</div>}
-          </>}
           <label>模型<select required value={form.model_name} onChange={set("model_name")}>
             <option value="GLM5.2">GLM5.2</option>
             <option value="DeepSeekV4">DeepSeekV4</option>
@@ -695,7 +696,7 @@ function JobDialog({ open, onClose, onLoaded }) {
             <p className="package-hint span-2">目录内有 analysis.json 时直接展示；只有六张规范 CSV 也能自动转换，不要求额外 sidecar。支持 csv/ 子目录和旧版平铺目录。</p>
           </> : <>
             <label className="span-2">Nsight 报告<input required value={form.report_path} onChange={set("report_path")} placeholder="/path/to/report.nsys-rep" /></label>
-            <label>Model config<input required value={form.config_path} onChange={set("config_path")} placeholder="/path/to/config.json" /></label>
+            <label>Model config.json<input required value={form.config_path} onChange={set("config_path")} placeholder="/path/to/config.json" /></label>
             <label>部署 YAML / 脚本<input required value={form.launch_path} onChange={set("launch_path")} placeholder="/path/to/launch.yaml" /></label>
             <label className="span-2">模型源码根目录<input required value={form.source_path} onChange={set("source_path")} placeholder="/path/to/sglang/source" /></label>
             <label className="span-2">设计说明（可选）<input value={form.design_path} onChange={set("design_path")} placeholder="/path/to/design.md" /></label>
@@ -703,7 +704,7 @@ function JobDialog({ open, onClose, onLoaded }) {
           </>}
           <label>输出前缀<input required value={form.prefix} onChange={set("prefix")} pattern="[a-zA-Z0-9_-]+" /></label>
           {!importingPackage && <label className="span-2">分析范围与硬性要求<textarea value={form.notes} onChange={set("notes")} placeholder="例如：只分析 GLM5.2 的单个非 shared Indexer 层，不要扩展为 4 层周期。" /><small>Agent 必须按这里限定重复单元和分支；无法满足时任务应失败，不能静默改用其他范围。</small></label>}
-          {!importingPackage && <label className="span-2 checkbox-row"><input type="checkbox" checked={form.enable_operator_advisor} onChange={setCheckbox("enable_operator_advisor")} /> 开启算子优化建议（实验性）<small>主分析完成后追加一次分析，识别可融合/优化的辅助算子并给出方案；不影响主分析结果。</small></label>}
+          <label className="span-2 checkbox-row"><input type="checkbox" checked={form.enable_operator_advisor} onChange={setCheckbox("enable_operator_advisor")} /> 开启算子优化建议（实验性）<small>{importingPackage ? "导入完成后追加一次分析，识别可融合/优化的辅助算子并给出方案；不勾选也可以之后在结果页按需触发。" : "主分析完成后追加一次分析，识别可融合/优化的辅助算子并给出方案；不影响主分析结果。"}</small></label>
         </div>
         {error && <div className="error">{error}</div>}
         <div className="dialog-actions"><button type="button" onClick={onClose}>取消</button><button className="primary" type="submit">提交分析</button></div>
@@ -711,10 +712,6 @@ function JobDialog({ open, onClose, onLoaded }) {
         <div className="job-status"><span>{job.status.toUpperCase()}</span><b>{job.message}</b><em>{job.progress}%</em></div>
         <div className="progress-track"><i style={{ width: `${job.progress}%` }} /></div>
         {job.status === "succeeded" && <div className="result-location"><span>结果目录</span><code>{job.output_dir}</code></div>}
-        {job.status === "succeeded" && (job.popo_url
-          ? <div className="popo-share"><span>分享链接</span><a href={job.popo_url} target="_blank" rel="noreferrer">{job.popo_url}</a></div>
-          : <div className="popo-share"><button onClick={publishJob} disabled={publishing}>{publishing ? "发布中…" : "发布到 popo"}</button></div>
-        )}
         {job.idle_seconds > 180 && <div className="activity-warning">执行器超过 {Math.floor(job.idle_seconds / 60)} 分钟没有新输出，请检查日志；任务仍在运行，可随时取消。</div>}
         <div className="job-log">{logs.length ? logs.map((line, index) => <code key={`${index}-${line}`}>{line}</code>) : <code>等待执行器输出…</code>}</div>
         {(error || job.error) && <div className="error">{error || job.error}</div>}
@@ -777,11 +774,95 @@ function PublishAccountPrompt({ prompt, onClose }) {
 }
 
 const CONFIDENCE_LABEL = { high: "高", medium: "中", low: "低" };
+const CONFIDENCE_ORDER = { high: 0, medium: 1, low: 2 };
 
-function OptimizationView({ optimization, error, onBack }) {
-  if (error) return <section className="shell"><div className="optimization-empty error">{error}</div></section>;
-  if (!optimization) return <section className="shell"><div className="optimization-empty">正在载入算子优化建议…</div></section>;
-  const { scope, suggestions } = optimization;
+// Closed verdict vocabulary from optimization.json schemaVersion 1.1. `rank`
+// orders the operator table so "upstream already has it, you are not using it"
+// sorts above speculative ideas.
+const VERDICT_META = {
+  "已有实现未启用": { short: "未启用", tone: "actionable", rank: 0, hint: "SGLang 主干已有该融合实现，本次 trace 走的是拆分形态" },
+  "上游已实现待迁移": { short: "待迁移", tone: "upstream", rank: 1, hint: "其他框架已实现，需要迁移到本代码库" },
+  "在飞PR待跟进": { short: "在飞PR", tone: "upstream", rank: 2, hint: "上游有未合入的 PR 覆盖该融合" },
+  "疑似新机会": { short: "新机会", tone: "new", rank: 3, hint: "注册表未覆盖，来自相邻细碎算子聚簇" },
+  "需人工确认": { short: "待确认", tone: "review", rank: 4, hint: "注册表声称有实现，但未能在所给源码树中定位" },
+  "已有实现已生效": { short: "已生效", tone: "active", rank: 9, hint: "该融合已在本单元生效" },
+  "上游实现已生效": { short: "已生效", tone: "active", rank: 9, hint: "该融合已在本单元生效" },
+  "在飞PR已生效": { short: "已生效", tone: "active", rank: 9, hint: "该融合已在本单元生效" },
+};
+
+function verdictRank(verdict) {
+  return VERDICT_META[verdict]?.rank ?? 5;
+}
+
+function OptimizationView({ optimization, error, analysisData }) {
+  const [selectedSuggestionId, setSelectedSuggestionId] = useState(null);
+  const [query, setQuery] = useState("");
+
+  const scope = optimization?.scope;
+  const suggestions = optimization?.suggestions || [];
+  const activePatterns = optimization?.activePatterns || [];
+  const limits = optimization?.limits || [];
+
+  // Map every targeted operator index -> its most decisive suggestion. Verdict
+  // rank wins over estimated gain: "mainline has this and you are not using it"
+  // is more useful to surface than a bigger but speculative number.
+  const suggestionByOperatorIndex = useMemo(() => {
+    const map = new Map();
+    for (const suggestion of suggestions) {
+      for (const index of suggestion.targetOperators || []) {
+        const existing = map.get(index);
+        if (!existing) { map.set(index, suggestion); continue; }
+        const bestOption = (s) => (s.options || [])[0]?.estimatedGainPct ?? -1;
+        const rankDelta = verdictRank(suggestion.verdict) - verdictRank(existing.verdict);
+        if (rankDelta < 0 || (rankDelta === 0 && bestOption(suggestion) > bestOption(existing))) {
+          map.set(index, suggestion);
+        }
+      }
+    }
+    return map;
+  }, [suggestions]);
+
+  // Build the ordered operator list for the scoped unit from the underlying
+  // analysis.json, so the layout mirrors the main dashboard's operator
+  // table (full unit, in timeline order) instead of only listing the
+  // suggestion groups in isolation.
+  const scopedOperators = useMemo(() => {
+    if (!analysisData || !scope) return [];
+    return analysisData.operators
+      .filter((op) => (
+        op.unitPosition === scope.unitPosition
+        && op.unitId === scope.unitId
+        && op.unitVariant === scope.unitVariant
+      ))
+      .sort((a, b) => a.index - b.index);
+  }, [analysisData, scope]);
+
+  const filteredOperators = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    if (!needle) return scopedOperators;
+    return scopedOperators.filter((op) => (
+      operatorDisplayName(op).toLowerCase().includes(needle)
+      || String(op.module || "").toLowerCase().includes(needle)
+      || String(op.stage || "").toLowerCase().includes(needle)
+    ));
+  }, [scopedOperators, query]);
+
+  const selectedSuggestion = suggestions.find((s) => s.id === selectedSuggestionId) || null;
+  const fusableCount = suggestionByOperatorIndex.size;
+
+  if (error) {
+    return <section className="shell optimization-shell">
+      <div className="optimization-empty error">
+        <p>{error}</p>
+      </div>
+    </section>;
+  }
+  if (!optimization) {
+    return <section className="shell optimization-shell">
+      <div className="optimization-empty"><div className="pulse" />正在生成算子优化建议…</div>
+    </section>;
+  }
+
   return (
     <section className="shell optimization-shell">
       <div className="title-row compact-title">
@@ -791,46 +872,157 @@ function OptimizationView({ optimization, error, onBack }) {
           <p>范围：位置 {scope?.unitPosition ?? "—"} · {scope?.unitId ?? "—"} · {scope?.unitVariant ?? "—"}（单个重复单元内）</p>
         </div>
       </div>
-      {suggestions.length === 0
-        ? <div className="optimization-empty">该重复单元内没有找到符合最低标准的融合/优化候选。</div>
-        : <div className="optimization-list">
-          {suggestions.map((suggestion) => (
-            <article key={suggestion.id} className="optimization-card">
-              <header>
-                <div className="optimization-card-title">
-                  <b>{(suggestion.targetOperatorNames || []).join(" + ")}</b>
-                  <span>算子序号 #{(suggestion.targetOperators || []).join(", #")}</span>
-                </div>
-                <div className="optimization-card-meta">
-                  <span>组耗时 {fmt(suggestion.groupDurationUs)} us</span>
-                  <span>占单元 {fmt(suggestion.groupDurationPctOfUnit)}%</span>
-                </div>
-              </header>
-              <div className="optimization-options">
-                {(suggestion.options || []).map((option, index) => (
-                  <div key={index} className="optimization-option">
-                    <div className="optimization-option-head">
-                      <b>{option.approach}</b>
-                      <span className={`confidence confidence-${option.confidence}`}>
-                        置信度：{CONFIDENCE_LABEL[option.confidence] || option.confidence}
-                      </span>
-                      <em>预估收益 {fmt(option.estimatedGainPct)}%</em>
-                    </div>
-                    <p className="optimization-rationale">{option.rationale}</p>
-                    <p className="optimization-basis"><span>收益依据</span>{option.estimatedGainBasis}</p>
-                    {option.referenceLinks?.length > 0 && (
-                      <div className="optimization-links">
-                        {option.referenceLinks.map((link, linkIndex) => (
-                          <code key={linkIndex}>{link}</code>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                ))}
+
+      <section className="metrics">
+        <Metric label="重复单元内算子数" value={scopedOperators.length} suffix="" note="来自主分析结果" />
+        <Metric label="可优化算子数" value={fusableCount} suffix="" note={`${suggestions.length} 组融合候选`} accent />
+        <Metric
+          label="最高预估收益"
+          value={fmt(Math.max(0, ...suggestions.flatMap((s) => (s.options || []).map((o) => o.estimatedGainPct))))}
+          suffix="%"
+          note="单个候选组的组内耗时占比"
+        />
+      </section>
+
+      {scopedOperators.length === 0
+        ? <div className="optimization-empty">没有找到该重复单元对应的算子明细（可能 analysis.json 与 optimization.json 不匹配）。</div>
+        : <section className="operator-workbench optimization-workbench">
+          <article className="panel table-panel">
+            <div className="panel-head table-tools">
+              <div><span>OPERATORS</span><h2>算子列表</h2></div>
+              <div className="filters">
+                <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="搜索算子、功能模块…" />
               </div>
-            </article>
-          ))}
-        </div>}
+            </div>
+            <div className="table-wrap">
+              <table className="operator-table optimization-table">
+                <colgroup>
+                  <col className="col-index" />
+                  <col className="col-operator" />
+                  <col className="col-category" />
+                  <col className="col-duration" />
+                  <col className="col-mfu" />
+                  <col className="col-mbu" />
+                  <col className="col-optimize" />
+                </colgroup>
+                <thead><tr><th className="center">#</th><th>算子名</th><th>分类</th><th className="numeric">耗时(us)</th><th className="numeric">MFU(%)</th><th className="numeric">MBU(%)</th><th>优化建议</th></tr></thead>
+                <tbody>
+                  {filteredOperators.map((op) => {
+                    const suggestion = suggestionByOperatorIndex.get(op.index);
+                    const isSelected = suggestion?.id === selectedSuggestionId;
+                    return (
+                      <tr
+                        key={op.index}
+                        className={[
+                          suggestion ? "fusable" : "",
+                          isSelected ? "selected" : "",
+                        ].filter(Boolean).join(" ")}
+                        onClick={() => suggestion && setSelectedSuggestionId(suggestion.id)}
+                      >
+                        <td className="mono muted center">{op.index}</td>
+                        <td><div className="op-title"><i style={{ background: CATEGORY[op.category]?.color }} /><div><b title={operatorDisplayName(op)}>{operatorDisplayName(op)}</b><span>{op.unitVariant ? `${op.unitVariant} · ` : ""}{op.stage}</span></div></div></td>
+                        <td><span className={`category ${op.category}`}>{CATEGORY[op.category]?.label}</span></td>
+                        <td className="mono numeric">{fmt(op.durationUs)}</td>
+                        <td className="mono numeric">{op.mfu != null ? fmt(op.mfu) : "—"}</td>
+                        <td className="mono numeric" title={op.mbuLabel || ""}>{op.mbu != null ? fmt(op.mbu) : (op.mbuLabel || "—")}</td>
+                        <td>{suggestion
+                          ? <span
+                            className={`fusable-badge verdict-${VERDICT_META[suggestion.verdict]?.tone || "review"}`}
+                            title={VERDICT_META[suggestion.verdict]?.hint || suggestion.verdict}
+                          >
+                            {VERDICT_META[suggestion.verdict]?.short || suggestion.verdict} · {fmt((suggestion.options || [])[0]?.estimatedGainPct)}%
+                          </span>
+                          : <span className="muted">—</span>}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </article>
+          <aside className="panel evidence-panel optimization-evidence">
+            <div className="panel-head"><div><span>SUGGESTION</span><h2>优化方案</h2></div><small>{selectedSuggestion ? `#${selectedSuggestion.id}` : "选择高亮算子"}</small></div>
+            {selectedSuggestion ? <div className="evidence-body">
+              <div className="evidence-title">
+                <i style={{ background: "#5b8cff" }}>{selectedSuggestion.targetOperators.length}</i>
+                <div><b>{(selectedSuggestion.targetOperatorNames || []).join(" + ")}</b><span>算子序号 #{(selectedSuggestion.targetOperators || []).join(", #")}</span></div>
+              </div>
+              <div className="evidence-summary">
+                <div><span>组耗时</span><b>{fmt(selectedSuggestion.groupDurationUs)} us</b></div>
+                <div><span>占单元</span><b>{fmt(selectedSuggestion.groupDurationPctOfUnit)}%</b></div>
+                {selectedSuggestion.familySharePctOfUnit != null && (
+                  <div><span>同族占比</span><b>{fmt(selectedSuggestion.familySharePctOfUnit)}%</b></div>
+                )}
+                {selectedSuggestion.witnessSpreadOps != null && (
+                  <div><span>算子间距</span><b>{selectedSuggestion.witnessSpreadOps}</b></div>
+                )}
+              </div>
+              <div className="verdict-block">
+                <span className={`fusable-badge verdict-${VERDICT_META[selectedSuggestion.verdict]?.tone || "review"}`}>
+                  {selectedSuggestion.verdict}
+                </span>
+                <p>{VERDICT_META[selectedSuggestion.verdict]?.hint || ""}</p>
+                {selectedSuggestion.registryPatternZh && (
+                  <p className="verdict-pattern">
+                    <span>已知融合家族</span>{selectedSuggestion.registryPatternZh}
+                  </p>
+                )}
+                {selectedSuggestion.candidatePaths?.length > 0 && (
+                  <div className="optimization-links">
+                    <span className="links-label">候选实现位置</span>
+                    {selectedSuggestion.candidatePaths.map((path, i) => <code key={i}>{path}</code>)}
+                  </div>
+                )}
+              </div>
+              <div className="optimization-options">
+                {[...(selectedSuggestion.options || [])]
+                  .sort((a, b) => (CONFIDENCE_ORDER[a.confidence] ?? 9) - (CONFIDENCE_ORDER[b.confidence] ?? 9))
+                  .map((option, index) => (
+                    <div key={index} className="optimization-option">
+                      <div className="optimization-option-head">
+                        <b>{option.approach}</b>
+                        <span className={`confidence confidence-${option.confidence}`}>
+                          置信度：{CONFIDENCE_LABEL[option.confidence] || option.confidence}
+                        </span>
+                        <em>预估收益 {fmt(option.estimatedGainPct)}%</em>
+                      </div>
+                      <p className="optimization-rationale">{option.rationale}</p>
+                      <p className="optimization-basis"><span>收益依据</span>{option.estimatedGainBasis}</p>
+                      {option.referenceLinks?.length > 0 && (
+                        <div className="optimization-links">
+                          {option.referenceLinks.map((link, linkIndex) => (
+                            <code key={linkIndex}>{link}</code>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+              </div>
+            </div> : <div className="evidence-empty">从左侧表格点击一个高亮为“可融合”的算子，查看具体优化方案。</div>}
+          </aside>
+        </section>}
+
+      {activePatterns.length > 0 && (
+        <article className="panel active-patterns">
+          <div className="panel-head"><div><span>ALREADY ACTIVE</span><h2>本单元已生效的融合</h2></div><small>不是优化目标，仅用于说明已覆盖范围</small></div>
+          <div className="active-pattern-list">
+            {activePatterns.map((pattern, i) => (
+              <div key={i} className="active-pattern">
+                <span className="fusable-badge verdict-active">{VERDICT_META[pattern.verdict]?.short || "已生效"}</span>
+                <b>{pattern.registryPatternZh || pattern.registryPattern}</b>
+                {pattern.familySharePctOfUnit != null && <em>同族占比 {fmt(pattern.familySharePctOfUnit)}%</em>}
+              </div>
+            ))}
+          </div>
+        </article>
+      )}
+
+      {limits.length > 0 && (
+        <article className="panel optimization-limits">
+          <div className="panel-head"><div><span>LIMITS</span><h2>结论边界</h2></div></div>
+          <ul>{limits.map((line, i) => <li key={i}>{line}</li>)}</ul>
+        </article>
+      )}
     </section>
   );
 }
@@ -985,6 +1177,8 @@ export default function Dashboard() {
     }
   }, []);
 
+  // 算子优化分析只在新建/导入分析任务时勾选触发，页面上不提供按需触发入口。
+
   if (!data) return <main className="loading"><div className="pulse" />正在载入分析数据…</main>;
 
   const topStage = [...visibleStages].sort((a, b) => b.durationUs - a.durationUs)[0];
@@ -1032,7 +1226,8 @@ export default function Dashboard() {
         <div className="report-chip"><span className="status-dot" />{displayModel}</div>
         <div className="top-actions">
           {view === "dashboard"
-            ? (optimization && <button className="ghost-action" onClick={() => setView("optimization")}>算子优化建议</button>)
+            ? (optimization?.suggestions?.length > 0
+              && <button className="ghost-action" onClick={() => setView("optimization")}>算子优化建议</button>)
             : <button className="ghost-action" onClick={() => setView("dashboard")}>返回分析</button>}
           <button className="ghost-action" onClick={() => fileRef.current?.click()}>导入 JSON</button>
           <button className="import" onClick={() => setJobOpen(true)}>新建分析</button>
@@ -1044,7 +1239,11 @@ export default function Dashboard() {
       </header>
 
       {view === "optimization"
-        ? <OptimizationView optimization={optimization} error={optimizationError} onBack={() => setView("dashboard")} />
+        ? <OptimizationView
+          optimization={optimization}
+          error={optimizationError}
+          analysisData={data}
+        />
         : <section className="shell">
         <div className="title-row compact-title">
           <div>
@@ -1060,6 +1259,69 @@ export default function Dashboard() {
           </div>
         </div>
         {error && <div className="error">{error}</div>}
+
+        {data.forwardPipeline?.summary?.stepDurationUs > 0 && (() => {
+          const fp = data.forwardPipeline.summary;
+          const rows = data.forwardPipeline.rows || [];
+          const ms = (v) => (v == null ? "—" : fmt(v / 1000, 2));
+          // 单卡 batch 来自 marker 的 gridX；整机 batch 由 trace 里的 GPU 数放大
+          const gpus = fp.gpuCount || 0;
+          const clusterBatch = fp.clusterBatchSize ?? null;
+          const variants = rows.filter((row) => row.kind === "variant");
+          // prep draft / prep verify 已并入 target 的「其他」，draft 的层 forward 按名字取
+          const draftStage = rows.find(
+            (row) => row.kind === "stage" && row.name.includes("forward"),
+          );
+          return <section className="metrics forward-pipeline-metrics">
+            <Metric
+              label="Forward step 耗时"
+              value={ms(fp.stepDurationUs)}
+              suffix=" ms"
+              note={[
+                data.metadata.stage
+                  ? `${data.metadata.stage.charAt(0).toUpperCase()}${data.metadata.stage.slice(1)} 阶段`
+                  : null,
+                data.metadata.hardware || null,
+              ]}
+              accent
+            />
+            <Metric
+              label="单卡 Batch Size"
+              value={fp.batchSize ?? "—"}
+              suffix=""
+              note={clusterBatch != null
+                ? `单机 Batch Size ${clusterBatch}（${gpus} 卡）` : ""}
+            />
+            <Metric
+              label="Target 模型总耗时"
+              value={ms(fp.targetUs)}
+              suffix=" ms"
+              note={[
+                `占比 ${fmt(fp.targetUs / fp.stepDurationUs * 100)}%`,
+                ...variants.map((row) =>
+                  `${row.name} ${ms(row.durationUs)} ms（占比 ${fmt(row.stepPct)}%）`
+                ),
+              ]}
+            />
+            <Metric
+              label="Draft 模型总耗时"
+              value={fp.draftUs != null ? ms(fp.draftUs) : "—"}
+              suffix={fp.draftUs != null ? " ms" : ""}
+              note={fp.draftUs == null ? "无 draft 模型" : [
+                `占比 ${fmt(fp.draftUs / fp.stepDurationUs * 100)}%`,
+                draftStage?.perUnitUs != null
+                  ? `单层 ${ms(draftStage.perUnitUs)} ms × ${draftStage.layers ?? "—"} 层`
+                  : null,
+              ]}
+            />
+            <Metric
+              label="Token 间间隔耗时"
+              value={ms(fp.gapUs)}
+              suffix=" ms"
+              note={`占比 ${fmt(fp.gapUs / fp.stepDurationUs * 100)}%`}
+            />
+          </section>;
+        })()}
 
         {data.units?.length > 1 && <section className="unit-selector">
           <div><span>STRUCTURAL UNITS</span><b>结构周期</b><small>先选 KDA / MLA 等真实单元，再查看各自模块</small></div>
@@ -1087,7 +1349,21 @@ export default function Dashboard() {
             accent
           />
           <Metric label="算子数量" value={visibleOperators.length} suffix="" note={`${visibleStages.length} 个功能阶段`} />
-          <Metric label="最高耗时功能模块" value={fmt(topStage?.durationUs)} suffix=" μs" note={topStage ? `${topStage.name} · ${topStage.unitVariant || "通用"}` : "—"} />
+          <Metric
+            label="功能模块最高耗时"
+            value={fmt((topStage?.durationUs ?? 0) / 1000, 3)}
+            suffix=" ms"
+            note={topStage
+              ? [
+                  `${topStage.name} · ${topStage.unitVariant || "通用"}`,
+                  // 选中单个结构单元时，模块耗时与该单元的 wall span 不同源，
+                  // 比值没有意义，直接不写
+                  selectedUnit
+                    ? null
+                    : `占比 ${fmt(topStage.durationUs / primaryDurationUs * 100)}%`,
+                ]
+              : "—"}
+          />
           <Metric label="核心计算占比" value={fmt(computePct)} suffix="%" note={`${compute?.count || 0} 个核心算子`} />
           <Metric label="Overlap 率" value={fmt(overlapPct)} suffix="%" note="基于算子时间区间并集" />
         </section>
@@ -1140,8 +1416,9 @@ export default function Dashboard() {
                   <col className="col-share" />
                   <col className="col-shape" />
                   <col className="col-mfu" />
+                  <col className="col-mbu" />
                 </colgroup>
-                <thead><tr><th className="center">#</th><th>算子名</th><th>分类</th><th className="numeric">耗时(us)</th><th className="numeric">占比(%)</th><th>Shape</th><th className="numeric">MFU(%)</th></tr></thead>
+                <thead><tr><th className="center">#</th><th>算子名</th><th>分类</th><th className="numeric">耗时(us)</th><th className="numeric">占比(%)</th><th>Shape</th><th className="numeric">MFU(%)</th><th className="numeric">MBU(%)</th></tr></thead>
                 <tbody>
                   {filtered.map((op) => (
                     <tr key={op.index} className={selectedOp?.index === op.index ? "selected" : ""} onClick={() => selectOperator(op)}>
@@ -1152,6 +1429,7 @@ export default function Dashboard() {
                       <td className="mono numeric">{fmt(op.durationPct)}</td>
                       <td className="mono shape-cell" title={op.shape || ""}>{op.shape || "—"}</td>
                       <td className="mono numeric">{op.mfu != null ? fmt(op.mfu) : "—"}</td>
+                      <td className="mono numeric" title={op.mbuLabel || ""}>{op.mbu != null ? fmt(op.mbu) : (op.mbuLabel || "—")}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -1170,7 +1448,7 @@ export default function Dashboard() {
                 <div><span>平均耗时</span><b>{fmt(selectedOp.durationUs)} us</b></div>
                 <div><span>最小 / 最大</span><b>{fmt(selectedOp.minUs)} / {fmt(selectedOp.maxUs)} us</b></div>
                 <div><span>MFU</span><b>{selectedOp.mfu != null ? `${fmt(selectedOp.mfu)}%` : "N/A"}</b></div>
-                <div><span>MBU（估算）</span><b>{selectedOp.mbu || "N/A"}</b></div>
+                <div><span>MBU（估算）</span><b>{selectedOp.mbu != null ? `${fmt(selectedOp.mbu)}%` : (selectedOp.mbuLabel || "N/A")}</b></div>
                 <div><span>Shape</span><b>{selectedOp.shape || "N/A"}</b></div>
                 <div><span>设备 / Stream</span><b>GPU {selectedOp.device} / Stream {selectedOp.stream}</b></div>
                 <div><span>结构单元</span><b>{selectedOp.unitPosition || "—"}. {selectedOp.unitVariant || selectedOp.unitId || "N/A"}</b></div>

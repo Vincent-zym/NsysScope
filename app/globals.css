@@ -60,6 +60,8 @@ button { color: inherit; }
 .metric strong.accent { color: #91adff; }
 .metric strong small { font-size: 14px; color: #9aa7ba; letter-spacing: 0; }
 .metric p { min-height: 2.8em; margin: 0; font-size: 13px; line-height: 1.4; color: #8d9aaf; }
+.metric-notes { min-height: 2.8em; }
+.metric-notes p { min-height: 0; }
 .analysis-grid { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); gap: 16px; margin-bottom: 16px; }
 .panel { border: 1px solid var(--line); background: linear-gradient(145deg,rgba(20,25,35,.97),rgba(13,17,24,.97)); border-radius: 13px; overflow: hidden; }
 .panel-head { display: flex; align-items: flex-end; justify-content: space-between; padding: 18px 20px; border-bottom: 1px solid var(--line); }
@@ -139,14 +141,20 @@ button { color: inherit; }
 table { width: 100%; border-collapse: collapse; font-size: 13px; }
 th { position: sticky; top: 0; z-index: 2; background: #131822; color: #91a0b5; font: 13px ui-monospace, monospace; letter-spacing: .03em; text-align: left; padding: 13px 12px; border-bottom: 1px solid var(--line); }
 td { padding: 12px; border-bottom: 1px solid #1d232d; white-space: nowrap; }
-.operator-table { min-width: 930px; table-layout: fixed; }
-.operator-table .col-index { width: 48px; }
-.operator-table .col-operator { width: 275px; }
-.operator-table .col-category { width: 92px; }
-.operator-table .col-duration { width: 105px; }
-.operator-table .col-share { width: 92px; }
-.operator-table .col-shape { width: 220px; }
-.operator-table .col-mfu { width: 85px; }
+/* Column widths are sized to content and sum to 822px, which fits the workbench's
+   left panel (~970px of table area at the shell's 1580px max width) without
+   horizontal scrolling. Do not add a narrower max-width to .shape-cell -- that is
+   what truncated the Shape column before; the column width alone governs it. */
+.operator-table { min-width: 822px; table-layout: fixed; }
+.operator-table th, .operator-table td { padding: 10px 8px; }
+.operator-table .col-index { width: 36px; }
+.operator-table .col-operator { width: 240px; }
+.operator-table .col-category { width: 70px; }
+.operator-table .col-duration { width: 78px; }
+.operator-table .col-share { width: 66px; }
+.operator-table .col-shape { width: 200px; }
+.operator-table .col-mfu { width: 66px; }
+.operator-table .col-mbu { width: 66px; }
 .operator-table th, .operator-table td { vertical-align: middle; }
 .operator-table .center { text-align: center; }
 .operator-table .numeric { text-align: right; font-variant-numeric: tabular-nums; }
@@ -161,7 +169,7 @@ tbody tr.selected { background: rgba(92,129,220,.12); box-shadow: inset 3px 0 #6
 .op-title b { color: #edf2f8; font-size: 14px; line-height: 1.3; font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .op-title span { font-size: 13px; color: #9aa7ba; margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .category { display: inline-flex; align-items: center; justify-content: center; padding: 5px 9px; border-radius: 20px; border: 1px solid; font-size: 12px; white-space: nowrap; }
-.shape-cell { max-width: 220px; overflow: hidden; text-overflow: ellipsis; color: #9eabc0; }
+.shape-cell { overflow: hidden; text-overflow: ellipsis; color: #9eabc0; }
 .category.core { color: #8eabff; border-color: #334b8f; background: #182650; }
 .category.communication { color: #f4be70; border-color: #6b4e27; background: #382919; }
 .category.auxiliary { color: #9aa6b8; border-color: #3d4654; background: #242a34; }
@@ -265,6 +273,33 @@ tbody tr.selected { background: rgba(92,129,220,.12); box-shadow: inset 3px 0 #6
 .optimization-basis span { color: #6f7d92; margin-right: 6px; }
 .optimization-links { margin-top: 8px; display: grid; gap: 5px; }
 .optimization-links code { background: #090d13; border: 1px solid #263140; padding: 6px 8px; border-radius: 7px; color: #9aa7ba; font: 11px/1.5 ui-monospace, monospace; overflow-wrap: anywhere; }
+.optimization-workbench { align-items: stretch; }
+.optimization-table tr.fusable { cursor: pointer; }
+.optimization-table tr.fusable:hover { background: rgba(94,124,226,.08); }
+.optimization-table tr.selected { background: rgba(94,124,226,.16); }
+.fusable-badge { display: inline-flex; align-items: center; padding: 3px 9px; border-radius: 20px; font-size: 11px; color: #8eabff; border: 1px solid #334b8f; background: #182650; white-space: nowrap; }
+.col-optimize { width: 150px; }
+.optimization-evidence .optimization-options { margin-top: 14px; }
+
+/* Verdict tones: colour says whether a suggestion is "mainline already has this
+   and it is not in effect" (blue), a cross-framework migration (amber), a
+   speculative new idea (purple), unresolved (grey), or already active (green). */
+.verdict-actionable { color: #8eabff; border-color: #334b8f; background: #182650; }
+.verdict-upstream { color: #f0c07a; border-color: #7d5c2a; background: #33260f; }
+.verdict-new { color: #c9a2ff; border-color: #5c3f8f; background: #241a3a; }
+.verdict-review { color: #9aa4b8; border-color: #3c4457; background: #1b202b; }
+.verdict-active { color: #7fd6a6; border-color: #2f6a4c; background: #122a1f; }
+.verdict-block { margin-top: 14px; padding: 12px 14px; border: 1px solid #26303f; border-radius: 10px; background: #131824; }
+.verdict-block > p { margin: 8px 0 0; font-size: 12px; color: #9aa4b8; line-height: 1.6; }
+.verdict-pattern span { display: inline-block; margin-right: 8px; padding: 1px 7px; border-radius: 4px; font-size: 11px; color: #cbd3e1; background: #222a38; }
+.optimization-links .links-label { display: block; margin-bottom: 6px; font-size: 11px; color: #9aa4b8; }
+.active-patterns { margin-top: 18px; }
+.active-pattern-list { display: flex; flex-direction: column; gap: 8px; padding: 4px 0 6px; }
+.active-pattern { display: flex; align-items: center; gap: 10px; font-size: 13px; }
+.active-pattern em { font-style: normal; font-size: 12px; color: #9aa4b8; }
+.optimization-limits { margin-top: 18px; }
+.optimization-limits ul { margin: 0; padding: 0 0 4px 18px; }
+.optimization-limits li { font-size: 12px; color: #9aa4b8; line-height: 1.8; }
 .publish-prompt { width: min(420px, 92vw); }
 .publish-account-list { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
 .publish-account-list button { border: 1px solid #2c3544; border-radius: 8px; background: #171d27; color: #a8b4c5; padding: 8px 13px; font-size: 12px; cursor: pointer; }

@@ -62,21 +62,24 @@ invent expert padding.
 ## MBU evidence (approximate)
 
 For each eligible GEMM record, alongside MFU, also estimate accessed bytes and
-report a coarse `mbu`:
+report `mbu` as a peak-relative percentage, in the same form as MFU:
 
 ```text
 accessed_bytes = (M*K + K*N + M*N) * dtype_bytes
-mbu = accessed_bytes / duration_seconds
+achieved_gb_per_s = accessed_bytes / duration_seconds / 1e9
+mbu = achieved_gb_per_s / hbm_bandwidth_gb_per_s * 100
 ```
 
 `dtype_bytes` comes from the GEMM's operand dtypes (same source as MFU's
-`compute_dtype`). This ignores cache reuse, tiling, and intermediate
-quantization/dequantization traffic, so treat it as a rough bytes/second
-estimate, not a peak-relative utilization percentage. There is currently no
-registered memory-bandwidth peak (`references/hardware-peaks.json` only lists
-compute TFLOPS), so `mbu` cannot yet be expressed as `% of peak bandwidth`.
-Once a bandwidth peak registry exists, switch this to a true utilization
-ratio like MFU's.
+`compute_dtype`). `hbm_bandwidth_gb_per_s` is the matched profile's per-GPU HBM
+peak in `references/hardware-peaks.json`; if the matched profile has no bandwidth
+peak, leave `mbu` empty rather than emitting raw bytes/second.
+
+The byte estimate ignores cache reuse, tiling, and intermediate
+quantization/dequantization traffic, so MBU is a coarse read on whether a kernel
+is bandwidth-bound — not an exact utilization. Unlike MFU, do not treat an MBU
+above 100% as a hard error, since the byte estimate can overshoot on
+cache-friendly shapes; report it and note the shape in the evidence sidecar.
 
 ## CPU attribution
 
