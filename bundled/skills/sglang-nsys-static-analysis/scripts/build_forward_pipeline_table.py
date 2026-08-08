@@ -63,6 +63,9 @@ def parse_args() -> argparse.Namespace:
                    help="only holes longer than this count as inter-token gap")
     p.add_argument("--max-steps", type=int, default=40,
                    help="how many consecutive steps to sample for per-layer work")
+    p.add_argument("--chunk-size", type=int, default=None,
+                   help="chunked prefill size from the launch command; prefill steps run "
+                        "with a full chunk, so this is the step's token count")
     p.add_argument("--ignore-cuda-graphs", action="store_true",
                    help="pretend the capture has no graphId, forcing the marker + layer "
                         "segmentation path; useful to cross-check that path against a "
@@ -150,6 +153,7 @@ def holes(intervals: Sequence[Tuple[int, int]], a: int, b: int) -> List[Tuple[in
 
 def auto_step_marker(
     cur: sqlite3.Cursor, device: int, min_steps: int = 3,
+    avoid_count: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Pick a once-per-forward marker kernel from the timeline itself.
 
@@ -180,6 +184,10 @@ def auto_step_marker(
         mean = sum(gaps) / len(gaps)
         spread = (sum((g - mean) ** 2 for g in gaps) / len(gaps)) ** 0.5 / mean
         if spread > 0.05:  # not evenly spaced -> not once per step
+            continue
+        # A kernel firing once per repeating unit is even *more* regular than a
+        # per-forward one, so exclude that launch count explicitly when it is known.
+        if avoid_count and abs(len(values) - avoid_count) <= max(1.0, avoid_count * 0.1):
             continue
         candidates.append({"name": name, "count": len(values), "cv": spread})
     if not candidates:
@@ -604,7 +612,8 @@ def build_rows(
 
     add("forward step 总计", "total", series("period"),
         note=f"锚点 {info['marker_pattern']}，共 {len(info['target_starts'])} 步，"
-             f"取样 {step_n} 步")
+             f"取样 {step_n} 步"
+             + (f"；{info['shard_note']}" if info.get("shard_note") else ""))
 
     variant_counts: Dict[str, int] = {}
     for s in steps:
@@ -749,6 +758,67 @@ def markers_from_taxonomy(
     return boundaries, variants, expected_variant_ratio(tax)
 
 
+def unit_cycle_count(
+    cur: sqlite3.Cursor, device: int,
+    variant_cores: Dict[str, List[str]], expected_ratio: Dict[str, int],
+) -> Optional[float]:
+    """How many repeating units the capture contains, from the variant core counts."""
+    unit_layers = sum(expected_ratio.values())
+    if not variant_cores or unit_layers <= 0:
+        return None
+    total_cores = 0
+    for needles in variant_cores.values():
+        for needle in needles:
+            total_cores += cur.execute(
+                "select count(*) from CUPTI_ACTIVITY_KIND_KERNEL k "
+                "join StringIds s on s.id = k.shortName "
+                "where k.deviceId = ? and s.value like ?",
+                (device, f"%{needle}%"),
+            ).fetchone()[0]
+    return total_cores / unit_layers
+
+
+def marks_repeating_unit(info: Dict[str, Any], cycles: Optional[float]) -> bool:
+    """Is the marker firing once per repeating unit rather than once per forward?
+
+    The uniformity test that picks a marker automatically is happy with a kernel
+    that runs once per structural cycle (KDA,KDA,KDA,MLA for example) -- such a
+    kernel is *more* regular than a real per-forward one. The variant-ratio check
+    does not catch it either, because one cycle reproduces the declared ratio
+    exactly, just with a repeat count of 1. The give-away is arithmetic: the number
+    of cycles in the capture equals the marker's launch count.
+    """
+    if not cycles or cycles <= 1:
+        return False
+    return abs(info["marker_launches"] - cycles) <= max(1.0, cycles * 0.1)
+
+
+def layer_shard_note(
+    cur: sqlite3.Cursor, device: int, gpus: int, layers_per_step: int,
+) -> Optional[str]:
+    """Warn when this device only carries part of the model's layers.
+
+    Point-to-point NCCL traffic (SendRecv) is the fingerprint of activations being
+    handed between devices, i.e. the layers are split across ranks. The table is then
+    written from one rank's viewpoint: the variant rows cover this rank's layers only,
+    not the whole model, even though the step period is the whole forward's.
+    """
+    if gpus <= 1 or layers_per_step <= 0:
+        return None
+    sendrecv = cur.execute(
+        "select count(*) from CUPTI_ACTIVITY_KIND_KERNEL k "
+        "join StringIds s on s.id = k.shortName "
+        "where k.deviceId = ? and s.value like '%SendRecv%'",
+        (device,),
+    ).fetchone()[0]
+    if not sendrecv:
+        return None
+    return (
+        f"层切分：本表为 device {device} 视角，层级行仅覆盖本卡承载的 {layers_per_step} 层"
+        f"（共 {gpus} 卡），不是整模型；步耗时本身是整次 forward 的周期"
+    )
+
+
 def main() -> None:
     args = parse_args()
     variant_cores: Dict[str, List[str]] = {}
@@ -775,9 +845,30 @@ def main() -> None:
     info = detect_markers(cur, device, args.step_marker)
     if args.ignore_cuda_graphs:
         info["target_graph"] = info["draft_graph"] = None
+    cycles = unit_cycle_count(cur, device, variant_cores, expected_ratio)
+    if marks_repeating_unit(info, cycles):
+        # Re-pick, excluding the per-unit launch count, so a per-cycle kernel cannot
+        # be reported as the forward step boundary.
+        retry = auto_step_marker(cur, device, avoid_count=cycles)
+        info = detect_markers(cur, device, retry["name"])
+        info["marker_auto_selected"] = dict(retry, reason="previous marker was per-unit")
+        if marks_repeating_unit(info, cycles):
+            raise SystemExit(
+                f"every candidate step marker fires about {cycles:.1f} times, which is "
+                "the repeating-unit count, not the forward-step count; a forward "
+                "boundary cannot be established from this capture -- pass "
+                "--step-marker explicitly"
+            )
     steps, gap_holes = segment_steps(
         cur, device, info, args.max_steps, layer_boundary, variant_cores,
         args.gap_threshold_us,
+    )
+    layers_per_step = max(
+        (sum((s["target_children"].get("_counts") or {}).values()) for s in steps),
+        default=0,
+    )
+    info["shard_note"] = layer_shard_note(
+        cur, device, device_count(cur), layers_per_step,
     )
     rows = build_rows(steps, info, args.gap_threshold_us, len(gap_holes))
 
@@ -820,6 +911,8 @@ def main() -> None:
             "trace": trace_fingerprint(args.sqlite),
             "device": device,
             "gpu_count": device_count(cur),
+            "layer_shard_note": info.get("shard_note"),
+            "layers_per_step": layers_per_step,
             "step_marker": {
                 "pattern": info["marker_pattern"],
                 "launches": info["marker_launches"],
@@ -841,6 +934,7 @@ def main() -> None:
             "speculative": info["speculative"],
             "speculative_tokens": info["speculative_tokens"],
             "batch_size": info.get("batch_size"),
+            "chunk_size": args.chunk_size,
             "batch_size_evidence": info.get("batch_size_evidence"),
             "sampled_steps": len(steps),
             # folded into the target phase's 其他 row, so keep the split here where a

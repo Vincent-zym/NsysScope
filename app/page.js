@@ -683,7 +683,7 @@ function JobDialog({ open, onClose, onLoaded }) {
           <label>模型<select required value={form.model_name} onChange={set("model_name")}>
             <option value="GLM5.2">GLM5.2</option>
             <option value="DeepSeekV4">DeepSeekV4</option>
-            <option value="KiMi3">KiMi3</option>
+            <option value="Kimi-K3">Kimi-K3</option>
           </select></label>
           <label>硬件<select required value={form.hardware} onChange={set("hardware")}>
             <option value="Nvidia B200">Nvidia B200</option>
@@ -1193,6 +1193,11 @@ export default function Dashboard() {
   const overlapPct = calculateOverlapPct(visibleOperators);
   const displayModel = String(data.metadata.model || "Unknown model")
     .split(" / ", 1)[0].split(" (", 1)[0].slice(0, 80);
+  // 并行度来自启动命令（--pp-size 等），解析不到就不显示这段括号
+  const parallelEntries = Object.entries(data.metadata.parallel || {});
+  const parallelLabel = parallelEntries.length
+    ? parallelEntries.map(([k, v]) => `${k}=${v}`).join("·")
+    : "";
   const highlightedStage = operatorStageKey(selectedOp) || selectedStage;
 
   const selectStage = (stageName) => {
@@ -1248,12 +1253,13 @@ export default function Dashboard() {
         <div className="title-row compact-title">
           <div>
             <p className="eyebrow">PERFORMANCE REPORT</p>
-            <h1>{displayModel}</h1>
+            <h1>{displayModel} 链路与算子耗时分析</h1>
             <p>{basename(data.metadata.report)} </p>
           </div>
           <div className="run-meta">
             <span>STATUS <b>VALIDATED</b></span>
             <span>STAGE <b>{data.metadata.stage?.toUpperCase()}</b></span>
+            {parallelLabel && <span>PARALLELISM <b>{parallelLabel}</b></span>}
             <span>HARDWARE <b>{data.metadata.hardware}</b></span>
             <span>DEVICES <b>{data.summary.devices.length} × GPU</b></span>
           </div>
@@ -1272,36 +1278,36 @@ export default function Dashboard() {
           const draftStage = rows.find(
             (row) => row.kind === "stage" && row.name.includes("forward"),
           );
+          const isPrefill = String(data.metadata.stage || "").toLowerCase() === "prefill";
           return <section className="metrics forward-pipeline-metrics">
             <Metric
               label="Forward step 耗时"
               value={ms(fp.stepDurationUs)}
               suffix=" ms"
-              note={[
-                data.metadata.stage
-                  ? `${data.metadata.stage.charAt(0).toUpperCase()}${data.metadata.stage.slice(1)} 阶段`
-                  : null,
-                data.metadata.hardware || null,
-              ]}
+              note={fp.layerShardNote
+                ? `PP切分 · device${fp.device ?? "—"} 视角 · ${fp.gpuCount ?? "—"} 卡层切分，本卡${fp.layersPerStep ?? "—"} 层 · 耗时为整次 forward耗时`
+                : ""}
               accent
             />
             <Metric
-              label="单卡 Batch Size"
-              value={fp.batchSize ?? "—"}
+              label={isPrefill ? "Chunk Size" : "单卡 Batch Size"}
+              value={isPrefill ? (fp.chunkSize ?? fp.batchSize ?? "—") : (fp.batchSize ?? "—")}
               suffix=""
-              note={clusterBatch != null
-                ? `单机 Batch Size ${clusterBatch}（${gpus} 卡）` : ""}
+              note={isPrefill
+                ? "默认打满"
+                : (clusterBatch != null
+                  ? `单机 Batch Size ${clusterBatch}（${gpus} 卡）` : "")}
             />
             <Metric
               label="Target 模型总耗时"
               value={ms(fp.targetUs)}
               suffix=" ms"
-              note={[
-                `占比 ${fmt(fp.targetUs / fp.stepDurationUs * 100)}%`,
-                ...variants.map((row) =>
-                  `${row.name} ${ms(row.durationUs)} ms（占比 ${fmt(row.stepPct)}%）`
-                ),
-              ]}
+              note={`占比 ${fmt(fp.targetUs / fp.stepDurationUs * 100)}%`
+                + (variants.length
+                  ? `（${variants.map((row) =>
+                      `${String(row.name).replace(/\s*层$/, "")} ${fmt(row.stepPct)}%`
+                    ).join(" : ")}）`
+                  : "")}
             />
             <Metric
               label="Draft 模型总耗时"

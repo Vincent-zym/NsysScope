@@ -1113,6 +1113,9 @@ Requirements:
         ]
         if taxonomy:
             command += ["--taxonomy", str(taxonomy)]
+        chunk = self.chunked_prefill_size(job_dir)
+        if chunk:
+            command += ["--chunk-size", str(chunk)]
         completed = subprocess.run(command, text=True, capture_output=True)
         if completed.returncode != 0:
             detail = (completed.stderr or completed.stdout or "").strip()[:1500]
@@ -1120,6 +1123,29 @@ Requirements:
             return
         if completed.stdout:
             self.log(job_dir, f"[forward-pipeline] {completed.stdout.strip()}")
+
+    @staticmethod
+    def chunked_prefill_size(job_dir: Path) -> int | None:
+        """Read --chunked-prefill-size out of the job's launch command.
+
+        Prefill steps run with a full chunk, so this is the step's token count --
+        it cannot be derived from the trace the way a decode batch size can.
+        """
+        context_path = job_dir / "metadata" / "context.json"
+        if not context_path.is_file():
+            return None
+        try:
+            launch = json.loads(context_path.read_text()).get("launch_path")
+        except (json.JSONDecodeError, OSError):
+            return None
+        if not launch or not Path(launch).is_file():
+            return None
+        try:
+            text = Path(launch).read_text(errors="ignore")
+        except OSError:
+            return None
+        match = re.search(r"chunked[-_]prefill[-_]size[\s=]+(\d+)", text)
+        return int(match.group(1)) if match else None
 
     def convert(
         self, package: Path, output: Path, prefix: str,

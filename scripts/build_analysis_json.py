@@ -242,6 +242,35 @@ def trace_fingerprint(path: Path) -> dict[str, Any]:
     }
 
 
+def parallel_config(metadata_root: Path) -> dict[str, int]:
+    """Parallelism degrees from the job's launch command (PP/TP/DP/EP)."""
+    context_path = metadata_root / "context.json"
+    if not context_path.is_file():
+        return {}
+    try:
+        launch = json.loads(context_path.read_text()).get("launch_path")
+    except (json.JSONDecodeError, OSError):
+        return {}
+    if not launch or not Path(launch).is_file():
+        return {}
+    try:
+        text = Path(launch).read_text(errors="ignore")
+    except OSError:
+        return {}
+    flags = {
+        "PP": r"(?:pp|pipeline[-_]parallel)[-_]size",
+        "TP": r"(?:tp|tensor[-_]parallel)[-_]size",
+        "DP": r"(?:dp|data[-_]parallel)[-_]size",
+        "EP": r"(?:ep|moe[-_]ep|expert[-_]parallel)[-_]size",
+    }
+    out: dict[str, int] = {}
+    for name, pattern in flags.items():
+        match = re.search(rf"--{pattern}[\s=]+(\d+)", text, re.IGNORECASE)
+        if match:
+            out[name] = int(match.group(1))
+    return out
+
+
 def job_sqlite_path(metadata_root: Path) -> Path | None:
     """Locate this job's own trace, so a foreign table can be detected."""
     context_path = metadata_root / "context.json"
@@ -339,7 +368,11 @@ def build_forward_pipeline(
         "rows": phases,
         "summary": {
             "batchSize": batch,
+            "chunkSize": info.get("chunk_size"),
             "gpuCount": gpus,
+            "layersPerStep": info.get("layers_per_step"),
+            "device": info.get("device"),
+            "layerShardNote": info.get("layer_shard_note"),
             # per-rank batch scaled by the GPUs this capture covers
             "clusterBatchSize": batch * gpus if batch and gpus else None,
             "speculativeTokens": info.get("speculative_tokens"),
@@ -671,7 +704,9 @@ def main() -> None:
     payload = {
         "schemaVersion": "1.0",
         "metadata": {
-            "model": model_label(manifest) or args.model or "Imported analysis",
+            # The job's own model selection wins over the agent-written manifest label,
+            # which tends to carry an architecture blurb ("KiMi3 (KimiK3For...)").
+            "model": args.model or model_label(manifest) or "Imported analysis",
             "stage": manifest.get("stage") or args.stage or "unknown",
             "hardware": manifest.get("hardware") or args.hardware or "Unknown",
             "report": manifest.get("input_report") or first_value(
@@ -689,6 +724,7 @@ def main() -> None:
                 if isinstance(selected_unit, dict) else None
             ),
             "generatedFrom": str(root.parent if root.name == "csv" else root),
+            "parallel": parallel_config(metadata_root),
         },
         "summary": {
             "totalDurationUs": total_duration,
