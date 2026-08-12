@@ -1,0 +1,53 @@
+{
+  "skill_name": "sglang-nsys-static-analysis",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "分析 GLM5.2 的 prefill nsys 报告。输入包括 .nsys-rep、SGLang 源码、config.json、启动 YAML、chunk-size=64 和 Nvidia B200。选择一个非 shared-indexer 的完整重复单元，中间不要停下来询问；在新任务目录中输出完整结果。",
+      "expected_output": "Assistant reads model/design/config/launch evidence first, exports sqlite without overwriting useful data, selects a complete non-shared-indexer repeating unit, builds evidence-backed module/call-chain mappings, and emits exactly six normalized CSV tables plus manifests/stat sidecars in a newly created output directory. Shape/MFU cells are filled only when M/N/K, dtype and verified dense hardware peak are defensible.",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "给定一个已生成的 layer_operator_timings.csv、模型源码和启动参数，生成标准化静态分析结果：原始表、算子总览、核心计算、辅助算子、三分类汇总和功能阶段汇总。功能模块不能直接照抄 module。",
+      "expected_output": "Assistant creates a model-specific ordered semantic map, distinguishes broader Chinese 功能模块 from fine-grained module, runs build_static_analysis_tables.py, preserves full demangled names only in the origin table, simplifies names elsewhere, and validates exact filenames, headers, coverage, totals and descending sorts.",
+      "files": []
+    },
+    {
+      "id": 3,
+      "prompt": "分析一个双流 MoE trace，其中通信和专家计算重叠。输出六张表并给出各类耗时占比。",
+      "expected_output": "Assistant preserves one-stream-per-module-occurrence grouping, uses the sqlite repeating-unit wall-span as denominator, sums per-category kernel durations without serializing overlapping streams, explicitly notes that aggregate percentages may exceed 100%, and emits all three classification rows.",
+      "files": []
+    },
+    {
+      "id": 4,
+      "prompt": "生成 B200 上某层的核心计算表，但提供的材料不能确定 GEMM 的 M 维，也没有注明 dense 或 sparse 理论峰值。",
+      "expected_output": "Assistant completes best-effort analysis without inventing shape or MFU, leaves those cells blank, records the missing evidence in the manifest, and still generates all six required CSV files.",
+      "files": []
+    },
+    {
+      "id": 5,
+      "prompt": "分析一个四层结构周期：前三个结构单元走 KDA，第四个走 MLA，四层都带 MoE。生成标准六表和 NsysScope analysis.json。",
+      "expected_output": "Assistant first writes and validates a current-model architecture taxonomy, records four ordered positions and both KDA/MLA variants with source discriminators, annotates every row with unit position/id/variant, aggregates by position plus variant plus functional module, preserves KDA and MLA as separate stage views, labels the primary duration as a heterogeneous structural-cycle duration, and rejects any output that collapses the two attention variants into a generic single-layer average.",
+      "files": []
+    },
+    {
+      "id": 6,
+      "prompt": "在 PP 中间 rank 的 prefill trace 上生成 forward 链路耗时表。该 rank 没有 embedding kernel，但有一个每个 KDA/KDA/KDA/MLA 结构周期发射一次的 kernel，它的发射间隔比真正每 forward 一次的 kernel 更均匀。",
+      "expected_output": "Assistant refuses the per-cycle kernel as the step marker: it divides the device's total variant-core count by the taxonomy's unit layer count and notices that the resulting cycle count equals that candidate's launch count, then re-picks a marker with that launch count excluded. The published step period covers a whole forward with every repeating unit inside it, the total row states that the layer rows only cover this rank's layers, and the manifest records marker_auto_selected with the reason for the re-pick.",
+      "files": []
+    },
+    {
+      "id": 7,
+      "prompt": "一张 trace 只包含一次完整 forward，或者只能找到每周期一次的锚点，仍然要求输出 forward 链路耗时表。",
+      "expected_output": "Assistant does not publish a table built on an unverifiable boundary: it states that at least two complete forward steps are required, records forward_pipeline.skipped_reason in the manifest, keeps the six mandatory tables intact, and omits the table rather than presenting a structural period as a forward step.",
+      "files": []
+    },
+    {
+      "id": 8,
+      "prompt": "decode trace 带投机采样但没有 CUDA graph（eager 模式），给出 target 与 draft 的耗时拆分。",
+      "expected_output": "Assistant falls back from graphId to the step marker plus layer segmentation: the target forward ends at its last layer before the draft starts, the draft forward starts at the marker's draft gridX population and ends one median layer stride after its last layer core. 备注 states that each forward's tail (lm_head, sampling loop) is counted in the following prep phase, and target + draft still closes against the step within tolerance.",
+      "files": []
+    }
+  ]
+}

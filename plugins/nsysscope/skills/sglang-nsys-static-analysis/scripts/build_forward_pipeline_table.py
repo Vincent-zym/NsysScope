@@ -919,6 +919,7 @@ def main() -> None:
                 "grid_populations": info["marker_grid_populations"],
                 "step_count": len(info["target_starts"]),
             },
+            "marker_auto_selected": info.get("marker_auto_selected"),
             "phase_discriminator": (
                 "CUPTI graphId" if info["target_graph"] is not None
                 else "marker + layer segmentation"
