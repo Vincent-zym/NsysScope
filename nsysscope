@@ -69,9 +69,11 @@ discover_zulu() {
     printf '%s\n' "$COMATE_BIN"
     return
   fi
-  find "${HOME}/.comate-server/bin" \
+  local search_root="${HOME}/.comate-server/bin"
+  [[ -d "$search_root" ]] || return 0
+  find "$search_root" \
     -path '*/extensions/baiducomate.comate/dist/zulu-cli/bin/zulu' \
-    -type f -perm -111 2>/dev/null | sort | tail -1
+    -type f -perm -111 2>/dev/null | sort | tail -1 || return 0
 }
 
 run_comate_cli() {
