@@ -46,7 +46,7 @@ cd /path/to/NsysScope
 ## 核心能力
 
 - **双 Agent Provider**：支持 Codex CLI（`codex exec`）和 Comate Zulu CLI
-  （`zulu run`），两者产出相同的六表分析包并通过统一的确定性校验。
+  （`zulu run`），两者产出相同的七表分析包并通过统一的确定性校验。
 - **架构感知分析**：为每个新模型建立专属的架构分类体系，按
   `(结构位置, unit, 变体, 功能模块)` 聚合，正确处理 KDA/MLA 等异构层混合模式，
   不会被错误折叠成单一平均值。
@@ -82,7 +82,8 @@ result-package/
 ## 导入已有结果
 
 使用「导入结果目录（无需 Agent）」指定包目录或 ZIP：已有 `analysis.json` 则直接
-打开，只有六表 CSV 则自动构建。六张 CSV 是最小可用契约，manifest/语义映射/
+打开，只有 CSV 表则自动构建。七张 CSV 全部为必需契约（第 7 张 forward 链路表
+缺失时会用包内 trace 补齐，补不出则判失败），manifest/语义映射/
 校验报告/统计 sidecar 为可选的可追溯性增强。
 
 ## 常用环境变量
@@ -93,6 +94,8 @@ result-package/
 | `NSYSSCOPE_PERSIST_STATE` / `NSYSSCOPE_DATA_DIR` | 开启持久化任务历史 |
 | `NSYSSCOPE_COMATE_PLATFORM` / `NSYSSCOPE_COMATE_MODEL` | Comate 平台与模型配置 |
 | `NSYSSCOPE_AGENT_HEARTBEAT_SECONDS` | Agent 心跳间隔 |
+| `NSYSSCOPE_AGENT_STALL_TIMEOUT_SECONDS` | 无产出、无输出、无 CPU、无会话更新多久判为停滞（默认 1800） |
+| `NSYSSCOPE_COMATE_STORE_DIR` | Comate 会话目录，用于判断 Agent 是否真的还在跑（默认 `~/.comate-engine/store`） |
 | `NSYSSCOPE_JOB_LOG_MAX_BYTES` | 单任务日志总大小上限 |
 
 ## 发布到 popo

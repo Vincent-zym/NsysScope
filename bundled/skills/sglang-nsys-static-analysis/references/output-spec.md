@@ -1,4 +1,4 @@
-# Six-table output specification
+# Seven-table output specification
 
 ## Contents
 
@@ -20,16 +20,17 @@ Always create:
 - `<prefix>_auxiliary_operator_table.csv`
 - `<prefix>_op_classification_table.csv`
 - `<prefix>_stage_table.csv`
+- `<prefix>_forward_pipeline_table.csv`
 - `<prefix>_analysis_manifest.json`
 - `<prefix>_architecture_taxonomy.json`
 
-Also create `<prefix>_forward_pipeline_table.csv` whenever the capture contains at
-least two complete forward steps (see "Forward pipeline table"). It is a standard
-member of the package and belongs in the same directory as the six tables, so the
-organised result package carries it under `csv/` with an `xlsx/` counterpart. When
-the capture cannot support it — a single-step prefill capture, for example — omit
-the file and record the reason in the manifest under
-`forward_pipeline.skipped_reason`.
+`<prefix>_forward_pipeline_table.csv` is the seventh required table (see "Forward
+pipeline table"), not an extra: it is the only place the package says how the measured
+repeating unit relates to a whole forward step. It lives in the same directory as the
+other tables, so the organised result package carries it under `csv/` with an `xlsx/`
+counterpart. A capture that cannot support it — a single forward step, no usable step
+marker — is not a valid input for this analysis; fix the capture instead of shipping
+six tables.
 
 Use `duration_avg_us` when stable samples exist; otherwise use `duration_us` and
 record the fallback. All percentages use the repeating-unit wall-span. Preserve
@@ -227,8 +228,37 @@ and metadata transforms are auxiliary even inside a core-owning stage.
 - fused kernels use indivisible attribution unless a trace proves separate work
 - frontend unit/variant/category/sample/device data matches package evidence
 
-Legacy six-table packages without taxonomy remain importable, but new composite
+Legacy packages without taxonomy remain importable, but new composite
 analysis must satisfy this contract.
+
+### Hard gates against an evidence-free package
+
+These are checked mechanically, because a package can satisfy every structural
+invariant above and still be useless. Each one was added after a real package
+passed validation while being unusable:
+
+- **call sites**: at least 60% of origin rows carry a `file:line` in
+  `python_function`. Real packages score 80-100%; the rejected one scored 0.
+- **descriptions**: at least 60% of origin rows have a Chinese
+  `function_introduction`. A single English noun phrase (`KDA beta gate
+  projection`) is not a functional description.
+- **snippets**: when `dispatch_code_snippet` exists, at least 60% of rows must
+  contain a real call expression. Prose in that column is not evidence.
+- **shapes**: the core-compute table must have at least one filled `shape`. All
+  three of shape/mfu/mbu blank across every GEMM is a refusal to do the work, not
+  a lack of evidence.
+- **attribution**: no operator may last longer than the repeating unit it is
+  assigned to, and a handoff kernel (`SendRecv`) taking more than 20% of a
+  position is a rank-level wait, not layer work. Small intra-layer collectives
+  (TP all-reduce, DCP all-to-all at a few percent) stay allowed.
+- **window alignment**: positions of the *same* variant must hold within 15% the
+  same operator count. `32 / 41 / 42` for three KDA positions means the unit window
+  is phase-shifted against the layer boundary.
+- **sampling**: `single_sample_fallback` is rejected, and fewer than 3 accepted
+  occurrences is rejected.
+
+None of these are waived by an unverified source commit; see
+[runtime-evidence-and-mfu.md](runtime-evidence-and-mfu.md).
 
 ## Forward pipeline table
 
@@ -304,7 +334,7 @@ and prefill **may still run speculative decoding**, so a graph-free fallback is
 required rather than optional:
 
 - the target forward ends at the end of its **last layer block**, found with the
-  same layer segmentation the six-table pipeline uses (so `--variant-marker` or a
+  same layer segmentation the table pipeline uses (so `--variant-marker` or a
   `--taxonomy` is mandatory in this mode)
 - the draft forward **starts** at the draft population of the step marker, and
   **ends** one median layer stride after the last occurrence of its layer core
@@ -320,6 +350,29 @@ holds; only the boundary semantics differ from graph mode. Record the mode in
 `--ignore-cuda-graphs` forces the fallback on a graph-captured trace, which is how
 this path is cross-checked: layer counts and the draft layer-forward time must
 reproduce the graph-derived ones.
+
+### Step marker and rank selection on a serving capture
+
+A capture taken from a live server is not a benchmark loop, and three of its
+properties broke earlier versions of this table:
+
+- **the period jitters.** Chunk fill and queued requests make the per-forward period
+  vary (a real prefill capture ranged 349–593ms), so the marker's inter-arrival
+  coefficient of variation sits near `0.15`, not `0.01`. The marker search walks
+  `cv <= 0.05 / 0.20 / 0.40` and, past the strict tier, only accepts a launch count
+  that **at least 3 independent kernels agree on**. Record the tier in
+  `forward_pipeline.marker_auto_selected.cv_threshold` / `cv_relaxed`: a relaxed
+  marker is legitimate but must stay visible to the reader.
+- **gridX does not imply speculation.** The marker's `gridX` follows the per-step
+  token count, so prefill shows several populations that have nothing to do with
+  draft/verify. Two populations are read as draft vs verify **only** when they repeat
+  as a fixed pattern (K draft launches then exactly one verify, identical in every
+  period); otherwise all populations are merged into one plain per-forward marker.
+- **each pipeline rank holds a different layer mix.** With a `KDA/KDA/KDA/MLA`
+  pattern one rank can own 9 KDA + 3 MLA while its neighbour owns 8 KDA + 4 MLA, so
+  the busiest device is not necessarily the one the taxonomy describes. Devices are
+  ranked by how closely their variant mix matches the declared unit and tried in that
+  order; `forward_pipeline.device_candidates` and `device_rejected` record the walk.
 
 ### Inter-token gap
 
@@ -356,6 +409,10 @@ shows up as a closure failure, so never "fix" a closure error by adjusting the
 ### Statistics
 
 Every row reports `样本数` / `min_us` / `max_us` over the steps actually measured,
-and `总耗时(us)` is the **median** across steps, not the mean: a single mis-cut
-step skews a mean badly while leaving the median intact. State the step range used
-in `备注` when it is not the whole capture.
+and `总耗时(us)` is the **mean** across those steps. The mean, not the median,
+because the closure invariants above are checked on these numbers: each step closes
+exactly by construction (`其他` is that step's residual), but a median is not
+additive — on a jittery capture every row's median comes from a different step and
+the children overshoot the phase by over 1% with nothing mis-attributed. Robustness
+against one mis-cut step comes from `min_us` / `max_us` and the gap row, not from
+the estimator. State the step range used in `备注` when it is not the whole capture.

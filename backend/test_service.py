@@ -4,12 +4,15 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import textwrap
 import threading
 import time
 import zipfile
 from dataclasses import replace
 from pathlib import Path
+
+import pytest
 
 from fastapi.testclient import TestClient
 
@@ -22,6 +25,7 @@ from scripts.build_analysis_json import (
     build_operator_payload,
     included_devices,
     is_total_row,
+    metadata_directory,
     stable_sample_count,
 )
 
@@ -48,7 +52,9 @@ def settings(tmp_path: Path) -> Settings:
         comate_model="",
         comate_platform="internal",
         comate_timeout_seconds=120,
+        comate_store_dir=tmp_path / "comate-store",
         agent_heartbeat_seconds=30,
+        agent_stall_timeout_seconds=0,
         job_log_max_bytes=1024 * 1024,
         job_log_line_max_bytes=16 * 1024,
         nsys_bin="nsys",
@@ -151,7 +157,7 @@ def test_existing_analysis_json_directory_import(tmp_path: Path) -> None:
 def test_existing_six_tables_import_without_sidecars(tmp_path: Path) -> None:
     if not PACKAGE.exists():
         return
-    package = tmp_path / "six-tables-only"
+    package = tmp_path / "tables-only"
     package.mkdir()
     for source in PACKAGE.glob("glm52_*.csv"):
         shutil.copy2(source, package / source.name)
@@ -262,6 +268,23 @@ def test_converter_accepts_current_stats_schema() -> None:
 def test_converter_recognizes_generated_total_rows() -> None:
     assert is_total_row({"序号": "总计", "算子名称": "总计"})
     assert not is_total_row({"序号": "113", "算子名称": "add3_kernel"})
+
+
+def test_metadata_is_found_whatever_the_agent_named_the_table_dir(tmp_path: Path) -> None:
+    # The agent picks its own layout: tables landed in result/ on one run and in csv/
+    # on another. Inferring the metadata dir from the table dir's name lost PP/TP and
+    # the input report without any error -- the page just stopped showing them.
+    job = tmp_path / "job"
+    (job / "metadata").mkdir(parents=True)
+    (job / "metadata" / "context.json").write_text("{}", encoding="utf-8")
+    for name in ("csv", "result", "tables"):
+        (job / name).mkdir()
+        assert metadata_directory(job / name) == job / "metadata"
+    # Tables straight in the job dir, and a package with no metadata at all.
+    assert metadata_directory(job) == job / "metadata"
+    bare = tmp_path / "bare"
+    bare.mkdir()
+    assert metadata_directory(bare) == bare
 
 
 def test_frontend_payload_repairs_legacy_semantic_operator_alias() -> None:
@@ -777,3 +800,198 @@ def test_cancel_terminates_agent_process_group(tmp_path: Path) -> None:
     thread.join(timeout=3)
     assert stopped.is_set()
     assert not thread.is_alive()
+
+
+def test_stall_timeout_kills_a_silent_agent(tmp_path: Path) -> None:
+    # A dropped model request leaves the agent process alive with nothing pending:
+    # no output, no new artifact. Waiting for comate_timeout_seconds then wastes
+    # hours, so the heartbeat has to notice and fail the job instead.
+    configured = replace(settings(tmp_path), agent_stall_timeout_seconds=1)
+    configured.prepare()
+    runner = JobRunner(configured, JobStore(configured.data_dir / "jobs.sqlite"))
+    job_dir = tmp_path / "stalled"
+    job_dir.mkdir()
+
+    failure: list[str] = []
+    try:
+        runner.run_process(
+            "stall-job", job_dir,
+            ["/bin/sh", "-c", "sleep 30"],
+            heartbeat_seconds=1,
+            heartbeat_message="测试进程仍在运行",
+            stall_timeout_seconds=1,
+        )
+    except RuntimeError as error:
+        failure.append(str(error))
+
+    assert failure and "停滞" in failure[0]
+    log = runner.job_log_path(job_dir).read_text()
+    assert "[stalled]" in log
+    assert "距上次进展" in log
+    assert "stall-job" not in runner.processes
+
+
+def test_new_artifacts_reset_the_stall_timer(tmp_path: Path) -> None:
+    configured = replace(settings(tmp_path), agent_stall_timeout_seconds=3)
+    configured.prepare()
+    runner = JobRunner(configured, JobStore(configured.data_dir / "jobs.sqlite"))
+    job_dir = tmp_path / "working"
+    job_dir.mkdir()
+
+    runner.run_process(
+        "working-job", job_dir,
+        ["/bin/sh", "-c", "for i in 1 2 3 4 5; do touch step_$i; sleep 1; done"],
+        heartbeat_seconds=1,
+        heartbeat_message="测试进程仍在运行",
+        stall_timeout_seconds=3,
+    )
+    assert (job_dir / "step_5").is_file()
+    log = runner.job_log_path(job_dir).read_text()
+    assert "[stalled]" not in log
+    # The heartbeat has to name the artifact, otherwise the log shows no progress.
+    assert "最近产出 step_" in log
+
+
+def test_scratch_dumps_under_logs_count_as_progress(tmp_path: Path) -> None:
+    # The agent drops its own kernel-sequence dumps into logs/ during a long
+    # segmentation pass; only job.log itself must be ignored, or a working agent
+    # gets killed for being quiet.
+    configured = replace(settings(tmp_path), agent_stall_timeout_seconds=3)
+    configured.prepare()
+    runner = JobRunner(configured, JobStore(configured.data_dir / "jobs.sqlite"))
+    job_dir = tmp_path / "scratch"
+    (job_dir / "logs").mkdir(parents=True)
+
+    runner.run_process(
+        "scratch-job", job_dir,
+        ["/bin/sh", "-c", "for i in 1 2 3 4 5; do touch logs/dev4_seq_$i.txt; sleep 1; done"],
+        heartbeat_seconds=1,
+        heartbeat_message="测试进程仍在运行",
+        stall_timeout_seconds=3,
+    )
+    log = runner.job_log_path(job_dir).read_text()
+    assert "[stalled]" not in log
+    assert "最近产出 logs/dev4_seq_" in log
+
+
+def test_cpu_burning_agent_is_not_stalled(tmp_path: Path) -> None:
+    # A long reasoning turn writes nothing and prints nothing while it keeps a core
+    # busy; killing it would throw away the whole run, so CPU counts as progress.
+    configured = replace(settings(tmp_path), agent_stall_timeout_seconds=3)
+    configured.prepare()
+    runner = JobRunner(configured, JobStore(configured.data_dir / "jobs.sqlite"))
+    job_dir = tmp_path / "thinking"
+    job_dir.mkdir()
+
+    runner.run_process(
+        "thinking-job", job_dir,
+        [sys.executable, "-c",
+         "import time\ndeadline = time.time() + 7\nwhile time.time() < deadline: pass"],
+        heartbeat_seconds=2,
+        heartbeat_message="测试进程仍在运行",
+        stall_timeout_seconds=3,
+    )
+    log = runner.job_log_path(job_dir).read_text()
+    assert "[stalled]" not in log
+    assert "累计 CPU" in log
+
+
+def test_live_agent_session_prevents_a_kill(tmp_path: Path) -> None:
+    # The direct liveness signal: the Comate engine keeps one conversation file per
+    # run, keyed by the --cwd we passed, and appends to it on every message and tool
+    # result. An agent whose conversation keeps advancing is working, even when it
+    # writes nothing into the job dir, prints nothing and burns no measurable CPU --
+    # exactly the shape of a long remote tool call that was killed as "stalled".
+    configured = replace(settings(tmp_path), agent_stall_timeout_seconds=3)
+    configured.prepare()
+    runner = JobRunner(configured, JobStore(configured.data_dir / "jobs.sqlite"))
+    job_dir = tmp_path / "conversing"
+    job_dir.mkdir()
+    store = configured.comate_store_dir
+    store.mkdir(parents=True, exist_ok=True)
+    session = store / "chat_session_11111111-2222-3333-4444-555555555555"
+    session.write_text(json.dumps({
+        "sessionUuid": "11111111-2222-3333-4444-555555555555",
+        "workspaceDirectory": str(job_dir),
+        "messages": [],
+    }), encoding="utf-8")
+
+    runner.run_process(
+        "conversing-job", job_dir,
+        ["/bin/sh", "-c", f"for i in 1 2 3 4 5 6 7 8; do sleep 1; touch {session}; done"],
+        heartbeat_seconds=1,
+        heartbeat_message="测试进程仍在运行",
+        stall_timeout_seconds=3,
+        session_store=store,
+    )
+    log = runner.job_log_path(job_dir).read_text()
+    assert "[stalled]" not in log
+    assert f"已定位 Agent 会话 {session.name}" in log
+    assert "会话 0 分钟前更新" in log
+
+
+def test_agent_without_a_session_still_stalls(tmp_path: Path) -> None:
+    # Liveness is an extra reprieve, not an excuse: a run with no conversation file
+    # and no other signal is still killed, and the log says the file was missing so
+    # the cause is visible.
+    configured = replace(settings(tmp_path), agent_stall_timeout_seconds=1)
+    configured.prepare()
+    runner = JobRunner(configured, JobStore(configured.data_dir / "jobs.sqlite"))
+    job_dir = tmp_path / "sessionless"
+    job_dir.mkdir()
+
+    with pytest.raises(RuntimeError):
+        runner.run_process(
+            "sessionless-job", job_dir,
+            ["/bin/sh", "-c", "sleep 30"],
+            heartbeat_seconds=1,
+            heartbeat_message="测试进程仍在运行",
+            stall_timeout_seconds=1,
+            session_store=configured.comate_store_dir,
+        )
+    log = runner.job_log_path(job_dir).read_text()
+    assert "未找到 Agent 会话文件" in log
+    assert "没有会话更新" in log
+
+
+def test_a_foreign_conversation_is_not_taken_for_ours(tmp_path: Path) -> None:
+    # Another job's conversation, and my own transcript quoting this job dir, must
+    # not read as this job's liveness -- otherwise stall detection is defeated by
+    # whatever else happens to be running on the host.
+    configured = settings(tmp_path)
+    store = configured.comate_store_dir
+    store.mkdir(parents=True, exist_ok=True)
+    job_dir = tmp_path / "mine"
+    other = store / "chat_session_aaaaaaaa-0000-0000-0000-000000000000"
+    other.write_text(json.dumps({
+        "workspaceDirectory": str(tmp_path / "theirs"),
+        "messages": [{"content": f"look at {job_dir} for me"}],
+    }), encoding="utf-8")
+    assert JobRunner.find_agent_session(store, job_dir, 0.0) is None
+
+    mine = store / "chat_session_bbbbbbbb-0000-0000-0000-000000000000"
+    mine.write_text(json.dumps({"workspaceDirectory": str(job_dir)}), encoding="utf-8")
+    assert JobRunner.find_agent_session(store, job_dir, 0.0) == mine
+    # A conversation from before this process started belongs to an earlier run.
+    assert JobRunner.find_agent_session(store, job_dir, time.time() + 60) is None
+
+
+def test_forward_pipeline_table_is_required(tmp_path: Path) -> None:
+    # The seventh table is mandatory: without a trace to build it from and without
+    # the table in the package, the job has to fail instead of shipping six tables.
+    configured = settings(tmp_path)
+    configured.prepare()
+    runner = JobRunner(configured, JobStore(configured.data_dir / "jobs.sqlite"))
+    job_dir = tmp_path / "incomplete"
+    package = job_dir / "csv"
+    package.mkdir(parents=True)
+
+    with pytest.raises(RuntimeError) as failure:
+        runner.ensure_forward_pipeline("job", job_dir, package, "analysis", None)
+    assert "forward 链路耗时表" in str(failure.value)
+
+    # A package that ships the table needs no trace.
+    (package / "analysis_forward_pipeline_table.csv").write_text(
+        "环节,总耗时(us)\nforward step 总计,1.0\n", encoding="utf-8",
+    )
+    runner.ensure_forward_pipeline("job", job_dir, package, "analysis", None)

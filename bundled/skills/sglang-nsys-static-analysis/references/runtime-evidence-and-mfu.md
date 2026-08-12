@@ -19,6 +19,30 @@ Keep separate manifest objects for captured runtime, launch intent, supplied
 source identity and conflicts. Never merge them into one apparently consistent
 configuration.
 
+The scope of that downgrade is narrow. An unverified or mismatched commit means
+source **defaults and branch assertions** stop counting as runtime truth; it does
+not make the source tree unusable as call-site evidence. Keep citing `file:line`,
+keep quoting the dispatching statement, and keep deriving GEMM M/N/K from config
+plus captured token counts, marking source-dependent claims unverified. Replacing
+those columns with `source commit unverified` prose is a validation failure, not a
+conservative choice: the package then cannot answer the question it exists for.
+`scripts/validate_analysis_package.py` fails a package whose origin rows mostly
+lack a `file:line` call site, a real dispatch snippet or a Chinese functional
+description, and one whose core-compute table has no shape at all.
+
+## Sampling the repeating unit
+
+Accept at least three complete occurrences from the steady state. A single
+occurrence is rejected: on a serving capture the same layer varies by up to 2x
+between steps (MLA layer 30ms vs 57ms in one prefill trace), and the capture's
+first forward is the least representative of all. `single_sample_fallback` is a
+diagnostic flag, never an acceptable final state.
+
+Pick the rank whose layer mix reproduces the declared unit. Under pipeline
+parallelism each rank owns a different slice, and the first rank additionally
+spends most of its wall time in `SendRecv` waits for its neighbours, so a layer
+window measured there is dominated by a bubble rather than by layer work.
+
 ## Timing scope
 
 Declare one of:

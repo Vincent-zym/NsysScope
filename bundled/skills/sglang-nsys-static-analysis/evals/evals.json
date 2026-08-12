@@ -27,7 +27,7 @@
     },
     {
       "id": 5,
-      "prompt": "分析一个四层结构周期：前三个结构单元走 KDA，第四个走 MLA，四层都带 MoE。生成标准六表和 NsysScope analysis.json。",
+      "prompt": "分析一个四层结构周期：前三个结构单元走 KDA，第四个走 MLA，四层都带 MoE。生成标准七表和 NsysScope analysis.json。",
       "expected_output": "Assistant first writes and validates a current-model architecture taxonomy, records four ordered positions and both KDA/MLA variants with source discriminators, annotates every row with unit position/id/variant, aggregates by position plus variant plus functional module, preserves KDA and MLA as separate stage views, labels the primary duration as a heterogeneous structural-cycle duration, and rejects any output that collapses the two attention variants into a generic single-layer average.",
       "files": []
     },
@@ -48,6 +48,35 @@
       "prompt": "decode trace 带投机采样但没有 CUDA graph（eager 模式），给出 target 与 draft 的耗时拆分。",
       "expected_output": "Assistant falls back from graphId to the step marker plus layer segmentation: the target forward ends at its last layer before the draft starts, the draft forward starts at the marker's draft gridX population and ends one median layer stride after its last layer core. 备注 states that each forward's tail (lm_head, sampling loop) is counted in the following prep phase, and target + draft still closes against the step within tolerance.",
       "files": []
+    },
+    {
+      "id": 9,
+      "prompt": "线上服务抓的 prefill trace：每步 token 数不同，forward 周期在 349~593ms 之间抖动，step marker 的 gridX 有 2~3 种取值。给出 forward 链路耗时表。",
+      "expected_output": "Assistant does not reject the capture for being non-uniform: it relaxes the marker uniformity threshold in tiers and accepts a launch count corroborated by >=3 independent per-forward kernels, recording cv_threshold/cv_relaxed in the manifest. It refuses to read the multiple gridX populations as speculative decoding because they do not repeat as a fixed K-draft-then-one-verify pattern, so the table has no draft phase and speculative_tokens is 0.",
+      "files": []
+    },
+    {
+      "id": 10,
+      "prompt": "PP=8 的 trace，taxonomy 声明的重复单元是 3x(KDA,KDA,KDA,MLA)，但 kernel 数最多的那张卡实际是 8 KDA + 4 MLA。生成 forward 链路耗时表。",
+      "expected_output": "Assistant recognises that each pipeline rank owns a different slice of the layer stack, so it ranks devices by how closely their variant mix matches the declared unit instead of taking the busiest one, and publishes the table for a rank that reproduces 9 KDA + 3 MLA. device_candidates/device_rejected record the walk, the shard note states which rank the layer rows cover, and no table is published against a mismatching rank.",
+      "files": []
+    },
+    {
+      "id": 11,
+      "prompt": "供的源码 commit 与 trace 里 captured SGLANG_BUILD_COMMIT 不一致。给出七表分析。",
+      "expected_output": "Assistant treats the mismatch as narrowly scoped: source defaults and branch assertions are marked unverified, but it still cites file:line call chains, quotes the dispatching statement in dispatch_code_snippet, writes Chinese function_introduction, and derives GEMM M/N/K plus MFU/MBU from config and captured token counts. It never replaces those columns with 'source commit unverified' prose; validate_analysis_package.py rejects such a package.",
+      "files": []
+    },
+    {
+      "id": 12,
+      "prompt": "PP=8 的 prefill trace，只有第一次 forward 完整落在 capture 开头，rank 0 大部分时间在等 SendRecv。给出重复单元的单层算子表。",
+      "expected_output": "Assistant refuses to build the unit from rank 0 or from a single occurrence: it picks a rank whose layer mix reproduces the declared unit, samples at least 3 steady-state occurrences (never the capture's first forward), aligns the window to the real layer-start kernel so positions of one variant hold the same operator count, and never attributes a 400ms pipeline SendRecv wait to a 102ms layer. single_sample_fallback and an operator longer than its unit are validation failures.",
+      "files": []
+    },
+    {
+      "id": 13,
+      "prompt": "这份 capture 只抓到一个 forward step，其他证据齐全。请给出七表分析。",
+      "expected_output": "Assistant states that the seventh table (<prefix>_forward_pipeline_table.csv) cannot be derived from a single forward step, that it is a required table rather than an optional extra, and asks for a capture with repeated steps instead of shipping six tables or inventing a step breakdown."
     }
   ]
 }

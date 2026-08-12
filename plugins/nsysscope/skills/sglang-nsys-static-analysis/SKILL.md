@@ -1,6 +1,6 @@
 ---
 name: sglang-nsys-static-analysis
-description: "Analyze an SGLang Nsight Systems .nsys-rep or .sqlite report, derive a model-specific architecture taxonomy from design/config/runtime/source evidence, preserve heterogeneous layer or block variants, map CUDA kernels to Python dispatch sites, and generate validated six-table timing/MFU packages. Use for repeating-unit timing, module attribution, KDA/MLA/NSA/MoE or other mixed architectures, operator classification, shapes, MFU, and NsysScope-compatible output. Do not use for Nsight Compute .ncu-rep bottleneck diagnosis."
+description: "Analyze an SGLang Nsight Systems .nsys-rep or .sqlite report, derive a model-specific architecture taxonomy from design/config/runtime/source evidence, preserve heterogeneous layer or block variants, map CUDA kernels to Python dispatch sites, and generate validated seven-table timing/MFU packages. Use for repeating-unit timing, module attribution, KDA/MLA/NSA/MoE or other mixed architectures, operator classification, shapes, MFU, and NsysScope-compatible output. Do not use for Nsight Compute .ncu-rep bottleneck diagnosis."
 ---
 
 # SGLang Nsight Systems static analysis
@@ -16,10 +16,15 @@ Generate:
 4. `<prefix>_auxiliary_operator_table.csv`
 5. `<prefix>_op_classification_table.csv`
 6. `<prefix>_stage_table.csv`
-7. `<prefix>_architecture_taxonomy.json`
-8. `<prefix>_analysis_manifest.json`
-9. a position-aware statistics sidecar
-10. `validation_report.json`
+7. `<prefix>_forward_pipeline_table.csv`
+8. `<prefix>_architecture_taxonomy.json`
+9. `<prefix>_analysis_manifest.json`
+10. a position-aware statistics sidecar
+11. `validation_report.json`
+
+All seven tables are required. The seventh relates the measured repeating unit to a
+whole forward step, so a package without it cannot answer what fraction of a step
+the unit is.
 
 Treat the trace as timing authority. Treat current-model design/config/runtime
 and verified source as semantic authority. Never use a previous model's labels
@@ -76,6 +81,14 @@ python scripts/audit_runtime_evidence.py \
 
 Copy resolved fields and conflicts into the manifest. A supplied source tree is
 unverified when its commit cannot be matched to captured build evidence.
+
+An unverified or mismatched commit downgrades exactly one thing: source-derived
+**default values and branch assertions** may no longer be quoted as runtime truth.
+It is not a licence to drop evidence. Call chains with `file:line`, dispatch code
+snippets, Chinese functional descriptions and GEMM shape/MFU/MBU remain required,
+annotated `(source commit unverified)` where a claim depends on the source. A
+package whose evidence columns hold boilerplate is rejected by
+`scripts/validate_analysis_package.py`, not accepted with a disclaimer.
 
 ### 2. Establish the architecture taxonomy
 

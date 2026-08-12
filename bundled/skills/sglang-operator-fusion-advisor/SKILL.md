@@ -1,6 +1,6 @@
 ---
 name: sglang-operator-fusion-advisor
-description: "Analyze an existing sglang-nsys-static-analysis six-table/analysis.json package plus the model's source tree, and propose operator-fusion/optimization opportunities for auxiliary kernels within a single repeating unit. Use only as an optional follow-up to a completed static-analysis job. Do not use for producing the six-table package itself, and do not use for cross-layer or cross-model comparisons."
+description: "Analyze an existing sglang-nsys-static-analysis seven-table/analysis.json package plus the model's source tree, and propose operator-fusion/optimization opportunities for auxiliary kernels within a single repeating unit. Use only as an optional follow-up to a completed static-analysis job. Do not use for producing the seven-table package itself, and do not use for cross-layer or cross-model comparisons."
 ---
 
 # SGLang operator fusion advisor
@@ -41,7 +41,7 @@ Write two files at the job directory root, next to `analysis.json`:
   appear in the input package's origin table. Do not suggest fusing a kernel
   that isn't in the analyzed window.
 - **Not a substitute for the static-analysis skill.** This skill never
-  regenerates or edits the six-table package, `analysis.json`, or any of
+  regenerates or edits the seven-table package, `analysis.json`, or any of
   their sidecars. Treat them as read-only input evidence.
 - **Read-only on user materials.** Never edit the model source tree,
   config, or any supplied evidence file.

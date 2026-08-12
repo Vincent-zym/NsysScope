@@ -105,7 +105,7 @@ doctor() {
   if command -v nsys >/dev/null 2>&1; then
     printf '  ✓ %-9s %s\n' "nsys" "$(command -v nsys)"
   else
-    printf '  - nsys 未安装；仍可导入已有六表，不能分析 .nsys-rep\n'
+    printf '  - nsys 未安装；仍可导入已有七表包，不能分析 .nsys-rep\n'
   fi
   if command -v codex >/dev/null 2>&1 && codex login status >/dev/null 2>&1; then
     printf '  ✓ Codex 已登录\n'
@@ -150,7 +150,7 @@ doctor() {
     fail "环境检查未通过"
   fi
   if [[ "$provider_ready" -eq 0 ]]; then
-    printf '  - Codex 和 Comate 均不可用；仍可导入已有六表\n'
+    printf '  - Codex 和 Comate 均不可用；仍可导入已有七表包\n'
   fi
   say "环境检查通过"
 }

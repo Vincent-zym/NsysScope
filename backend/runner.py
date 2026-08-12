@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import tomllib
 import traceback
 import zipfile
@@ -24,7 +25,7 @@ from .models import JobCreate
 from .store import JobStore
 
 
-CSV_SUFFIXES = (
+AGENT_CSV_SUFFIXES = (
     "_operator_origin_table.csv",
     "_opreator_table.csv",
     "_core_compute_table.csv",
@@ -33,11 +34,18 @@ CSV_SUFFIXES = (
     "_stage_table.csv",
 )
 
-# Part of the standard package, but only produced when the capture actually has the
-# forward steps to measure, so its absence must not fail package detection.
-OPTIONAL_CSV_SUFFIXES = (
-    "_forward_pipeline_table.csv",
-)
+# The seventh table carries the forward-step breakdown -- the only place the package
+# says how the measured unit relates to a whole forward step -- so a package without it
+# is incomplete. It is generated from the trace after the agent's six tables exist,
+# which is why package detection keys off AGENT_CSV_SUFFIXES while completeness checks
+# use CSV_SUFFIXES.
+FORWARD_PIPELINE_SUFFIX = "_forward_pipeline_table.csv"
+CSV_SUFFIXES = AGENT_CSV_SUFFIXES + (FORWARD_PIPELINE_SUFFIX,)
+
+# CPU time an agent must burn between two heartbeats to count as working. A dropped
+# model request leaves the process parked on a socket at roughly one clock tick per
+# 20 seconds, while a long reasoning turn keeps at least one core busy.
+CPU_PROGRESS_SECONDS = 1.0
 
 
 class JobRunner:
@@ -131,7 +139,7 @@ class JobRunner:
 
         Unlike the follow-up pass inside run(), this can be invoked for any
         job whose directory already has analysis.json and a complete
-        six-table package — including jobs imported via existing_package
+        seven-table package — including jobs imported via existing_package
         mode, not just ones that just finished the codex_skill pipeline.
         """
         job = self.store.get(job_id)
@@ -211,7 +219,7 @@ class JobRunner:
                 package = self.settings.resolve_allowed(
                     request.existing_package_path or "", kind="existing package",
                 )
-                self.state(job_id, job_dir, "converting", 70, "正在转换已有六表分析包")
+                self.state(job_id, job_dir, "converting", 70, "正在转换已有七表分析包")
                 if package.is_file():
                     self.import_zip_package(package, job_dir, request, job_id=job_id)
                 else:
@@ -223,6 +231,11 @@ class JobRunner:
                         except RuntimeError:
                             prefix = None
                         if prefix:
+                            self.ensure_forward_pipeline(
+                                job_id, job_dir, csv_package, prefix,
+                                self.package_trace(package),
+                                metadata_root=package / "metadata",
+                            )
                             self.validate_package(
                                 csv_package, prefix, analysis_path=analysis_path,
                                 job_id=job_id,
@@ -230,6 +243,11 @@ class JobRunner:
                             self.ensure_xlsx(csv_package, package / "xlsx", job_id=job_id)
                     else:
                         prefix = self.detect_prefix(csv_package, request.prefix)
+                        self.ensure_forward_pipeline(
+                            job_id, job_dir, csv_package, prefix,
+                            self.package_trace(package),
+                            metadata_root=package / "metadata",
+                        )
                         self.validate_package(csv_package, prefix, job_id=job_id)
                         self.convert(
                             csv_package, package / "analysis.json", prefix, request,
@@ -268,10 +286,10 @@ class JobRunner:
                     return
                 self.state(job_id, job_dir, "converting", 88, "正在构建前端 analysis.json")
                 package = self.find_package(job_dir, request.prefix)
-                self.validate_package(package, request.prefix, job_id=job_id)
-                self.build_forward_pipeline(
+                self.ensure_forward_pipeline(
                     job_id, job_dir, package, request.prefix, sqlite_path,
                 )
+                self.validate_package(package, request.prefix, job_id=job_id)
                 self.convert(
                     package, job_dir / "analysis.json", request.prefix, request,
                     job_id=job_id,
@@ -418,7 +436,7 @@ class JobRunner:
         """Optional follow-up pass: propose operator-fusion suggestions.
 
         Runs the sglang-operator-fusion-advisor skill against the already
-        validated analysis.json/six-table package plus the original
+        validated analysis.json/seven-table package plus the original
         source_path. Writes job_dir/optimization.json. Any failure here is
         caught by the caller and logged as a warning — it must never flip an
         already-succeeded main analysis to failed.
@@ -515,7 +533,7 @@ selected Skill version and overrides any older installed copy.
 This is an optional follow-up to an already-completed
 sglang-nsys-static-analysis job. Treat these as read-only input evidence:
 - analysis.json: {analysis_path}
-- six-table package directory: {package_dir}
+- seven-table package directory: {package_dir}
 - model source root: {source_path or 'not supplied — skip source-tree fusion checks'}
 
 Scope: analyze exactly one repeating unit at a time. If analysis.json
@@ -551,7 +569,7 @@ evidence violation fails the job. You can run the same check yourself:
 Write exactly one output file:
 - {job_dir / "optimization.json"} (final report, schemaVersion 1.1)
 
-Never edit analysis.json, the six-table package, or any file under the
+Never edit analysis.json, the seven-table package, or any file under the
 supplied model source root.
 """
 
@@ -583,6 +601,7 @@ supplied model source root.
         self.run_process(
             job_id, job_dir, command, stdin=prompt,
             heartbeat_seconds=self.settings.agent_heartbeat_seconds,
+            stall_timeout_seconds=self.settings.agent_stall_timeout_seconds,
             heartbeat_message="Codex 算子优化建议 Agent 仍在运行",
         )
 
@@ -620,6 +639,8 @@ supplied model source root.
             environment=self.comate_environment(),
             output_formatter=self.format_comate_output,
             heartbeat_seconds=self.settings.agent_heartbeat_seconds,
+            stall_timeout_seconds=self.settings.agent_stall_timeout_seconds,
+            session_store=self.settings.comate_store_dir,
             heartbeat_message="Comate 算子优化建议 Agent 仍在运行",
         )
 
@@ -707,6 +728,7 @@ supplied model source root.
         self.run_process(
             job_id, job_dir, command, stdin=prompt,
             heartbeat_seconds=self.settings.agent_heartbeat_seconds,
+            stall_timeout_seconds=self.settings.agent_stall_timeout_seconds,
             heartbeat_message="Codex Agent 仍在运行",
         )
 
@@ -743,6 +765,8 @@ supplied model source root.
             environment=self.comate_environment(),
             output_formatter=self.format_comate_output,
             heartbeat_seconds=self.settings.agent_heartbeat_seconds,
+            stall_timeout_seconds=self.settings.agent_stall_timeout_seconds,
+            session_store=self.settings.comate_store_dir,
             heartbeat_message="Comate Agent 仍在运行",
         )
 
@@ -836,7 +860,11 @@ Requirements:
    and `validation_report.json`.
 7. Compute MFU for every eligible GEMM when shape and a bundled verified hardware
    profile exist. Record logical/physical shape, compute dtype, dense per-GPU
-   peak and source; "new model" is not a reason to leave MFU blank.
+   peak and source; "new model" is not a reason to leave MFU blank. A source
+   commit that does not match the captured build only downgrades source-derived
+   defaults and branch claims: keep the `file:line` call chain, the dispatch code
+   snippet, the Chinese functional description and the GEMM shape/MFU/MBU, marked
+   unverified where they depend on the source.
 8. Never infer CPU delay from zero-kernel GPU idle. Require CUDA Runtime launch
    timestamp evidence or label the interval GPU idle/queue/dependency gap.
 9. Run `scripts/validate_analysis_package.py` with the taxonomy and finish only when every required
@@ -844,7 +872,128 @@ Requirements:
    evidence must explicitly show how the selected unit satisfies the acceptance
    criteria.
 10. Never edit input reports, config, launch files, design notes, or model source.
+11. Sample at least three complete steady-state occurrences of the unit, never the
+   capture's first forward, and pick a device whose layer mix reproduces the
+   declared unit. Align the window to the layer-start kernel so positions of one
+   variant hold the same operators, and never attribute a pipeline handoff wait
+   (`SendRecv`) to a layer.
 """
+
+    @staticmethod
+    def newest_artifact(job_dir: Path) -> tuple[float, str | None]:
+        """Newest file the agent produced under the job directory, and its mtime.
+
+        The name is returned so the heartbeat can say *what* was produced last —
+        that is the only progress signal available while the agent is silent.
+        Only the job log itself and the one-shot skill snapshot are excluded: the
+        heartbeat writes the log, so counting it would make a stalled agent look
+        busy forever. Everything else counts, including the agent's own scratch
+        dumps under `logs/`, which are often the only evidence of progress during a
+        long segmentation pass.
+        """
+        newest = 0.0
+        name: str | None = None
+        # Both the structured and the legacy job log locations, see job_log_path.
+        skipped = {job_dir / "logs" / "job.log", job_dir / "job.log"}
+        for path in job_dir.rglob("*"):
+            relative = path.relative_to(job_dir)
+            if relative.parts and relative.parts[0] == ".comate":
+                continue
+            if path in skipped:
+                continue
+            try:
+                if path.is_file():
+                    mtime = path.stat().st_mtime
+                    if mtime > newest:
+                        newest, name = mtime, relative.as_posix()
+            except OSError:
+                continue
+        return newest, name
+
+    @staticmethod
+    def process_group_cpu_seconds(pgid: int) -> float:
+        """CPU seconds burnt by every process in the agent's process group.
+
+        The agent is started with `start_new_session`, so its pid is the group id and
+        the whole engine/child tree is covered. Reading /proc keeps this dependency
+        free; an unreadable or vanished process simply contributes nothing.
+        """
+        ticks = os.sysconf("SC_CLK_TCK") or 100
+        total = 0.0
+        for entry in Path("/proc").iterdir():
+            if not entry.name.isdigit():
+                continue
+            try:
+                stat_line = (entry / "stat").read_text()
+            except OSError:
+                continue
+            head, _, tail = stat_line.rpartition(")")
+            fields = tail.split()
+            if len(fields) < 13:
+                continue
+            try:
+                # tail starts at the state field, so pgrp is index 2 and utime/stime
+                # are 11 and 12.
+                if int(fields[2]) != pgid:
+                    continue
+                total += (int(fields[11]) + int(fields[12])) / ticks
+            except ValueError:
+                continue
+        return total
+
+    @staticmethod
+    def find_agent_session(store_dir: Path, job_dir: Path, since: float) -> Path | None:
+        """The Comate conversation file belonging to this job, if it exists yet.
+
+        The engine writes one `chat_session_<uuid>` file per conversation and stores
+        the `--cwd` we passed in its `workspaceDirectory` field, so the job dir
+        identifies our own conversation without parsing engine logs. Only files
+        touched since the process started are considered, and the path is confirmed
+        by parsing the field rather than by a substring hit, so an unrelated
+        conversation that merely mentions the job dir in its transcript cannot be
+        mistaken for ours. Returns None when the store is missing, unreadable or the
+        conversation has not been persisted yet.
+        """
+        needle = json.dumps(str(job_dir)).encode()
+        # Matching the field name together with the value keeps the scan cheap: an
+        # unrelated conversation that only quotes the path in its transcript fails the
+        # test without paying for a JSON parse of a multi-megabyte file.
+        keyed = [
+            b'"workspaceDirectory":' + prefix + needle for prefix in (b"", b" ")
+        ]
+        newest: Path | None = None
+        newest_mtime = 0.0
+        try:
+            candidates = sorted(store_dir.glob("chat_session_*"))
+        except OSError:
+            return None
+        for path in candidates:
+            try:
+                mtime = path.stat().st_mtime
+                if mtime < since or mtime <= newest_mtime:
+                    continue
+                raw = path.read_bytes()
+                if not any(pattern in raw for pattern in keyed):
+                    continue
+                if json.loads(raw).get("workspaceDirectory") != str(job_dir):
+                    continue
+            except (OSError, ValueError):
+                continue
+            newest, newest_mtime = path, mtime
+        return newest
+
+    @staticmethod
+    def session_activity(path: Path) -> tuple[float, int]:
+        """Modification time and size of a conversation file, zeros if it is gone.
+
+        Either value growing means the engine appended a message or a tool result,
+        which is direct evidence that the agent is still working.
+        """
+        try:
+            stat = path.stat()
+        except OSError:
+            return 0.0, 0
+        return stat.st_mtime, stat.st_size
 
     def run_process(
         self, job_id: str, job_dir: Path, command: list[str], stdin: str | None = None,
@@ -853,10 +1002,15 @@ Requirements:
         output_formatter: Callable[[str], str | None] | None = None,
         heartbeat_seconds: int = 0,
         heartbeat_message: str = "Agent 仍在运行",
+        stall_timeout_seconds: int = 0,
+        session_store: Path | None = None,
     ) -> None:
         hidden = redacted_values or set()
         displayed = ["<prompt>" if item in hidden else item for item in command]
         self.log(job_dir, f"$ {shlex.join(displayed)}")
+        # Conversation files are only created after launch, so remember when that was
+        # (with a little slack for filesystem timestamp granularity).
+        launched_at = time.time() - 5
         process = subprocess.Popen(
             command, stdin=subprocess.PIPE if stdin is not None else None,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -867,13 +1021,77 @@ Requirements:
         with self.lock:
             self.processes[job_id] = process
         heartbeat_stop = threading.Event()
+        stalled = threading.Event()
+        last_output = [time.monotonic()]
         heartbeat_thread: threading.Thread | None = None
         if heartbeat_seconds > 0:
             def emit_heartbeat() -> None:
+                seen, artifact = self.newest_artifact(job_dir)
+                cpu = self.process_group_cpu_seconds(process.pid)
+                progress_at = time.monotonic()
+                session: Path | None = None
+                session_state = (0.0, 0)
                 while not heartbeat_stop.wait(heartbeat_seconds):
                     if process.poll() is not None:
                         return
-                    self.log(job_dir, f"[heartbeat] {heartbeat_message}")
+                    current, name = self.newest_artifact(job_dir)
+                    if current > seen:
+                        seen, artifact = current, name
+                        progress_at = time.monotonic()
+                    # An agent can spend a long turn reading and reasoning without
+                    # writing anything, and `--display task-json` keeps stdout silent
+                    # until the end, so burnt CPU is the third progress signal. Only a
+                    # process that produces nothing AND burns no CPU is really stuck.
+                    busy = self.process_group_cpu_seconds(process.pid)
+                    if busy - cpu >= CPU_PROGRESS_SECONDS:
+                        cpu = busy
+                        progress_at = time.monotonic()
+                    # The strongest signal: the agent's own conversation file. It grows
+                    # on every message and tool result, so while it advances the agent
+                    # is demonstrably still working, whatever the job dir looks like.
+                    if session_store is not None:
+                        if session is None:
+                            session = self.find_agent_session(
+                                session_store, job_dir, launched_at,
+                            )
+                            if session is not None:
+                                session_state = self.session_activity(session)
+                                progress_at = time.monotonic()
+                                self.log(
+                                    job_dir,
+                                    f"[heartbeat] 已定位 Agent 会话 {session.name}，"
+                                    "后续以会话更新判断存活",
+                                )
+                        else:
+                            state = self.session_activity(session)
+                            if state > session_state:
+                                session_state = state
+                                progress_at = time.monotonic()
+                    idle = time.monotonic() - max(progress_at, last_output[0])
+                    produced = f"最近产出 {artifact}" if artifact else "尚未产出任何文件"
+                    if session_store is None:
+                        alive = ""
+                    elif session is None:
+                        alive = "，未找到 Agent 会话文件"
+                    else:
+                        age = max(0.0, time.time() - session_state[0])
+                        alive = f"，会话 {age / 60:.0f} 分钟前更新"
+                    self.log(
+                        job_dir,
+                        f"[heartbeat] {heartbeat_message}（{produced}，"
+                        f"距上次进展 {idle / 60:.0f} 分钟，累计 CPU {busy / 60:.1f} 分钟"
+                        f"{alive}）",
+                    )
+                    if stall_timeout_seconds and idle > stall_timeout_seconds:
+                        stalled.set()
+                        self.log(
+                            job_dir,
+                            f"[stalled] Agent {idle / 60:.0f} 分钟没有输出、没有新产物、"
+                            f"没有会话更新，也几乎没有消耗 CPU（{produced}），"
+                            "判定为停滞并终止（模型请求丢失时进程会活着但无事可做）",
+                        )
+                        self._kill_process_group(process)
+                        return
 
             heartbeat_thread = threading.Thread(
                 target=emit_heartbeat,
@@ -887,11 +1105,16 @@ Requirements:
                 process.stdin.write(stdin)
                 process.stdin.close()
             for line in process.stdout:
+                last_output[0] = time.monotonic()
                 if line.strip():
                     rendered = output_formatter(line) if output_formatter else line
                     if rendered:
                         self.log(job_dir, rendered)
             code = process.wait()
+            if stalled.is_set():
+                raise RuntimeError(
+                    f"agent 停滞超过 {stall_timeout_seconds // 60} 分钟，已终止：{command[0]}"
+                )
             if code:
                 raise RuntimeError(f"process exited with code {code}: {command[0]}")
         finally:
@@ -1084,20 +1307,26 @@ Requirements:
 
     def build_forward_pipeline(
         self, job_id: str, job_dir: Path, package: Path, prefix: str,
-        sqlite_path: Path,
+        sqlite_path: Path, metadata_root: Path | None = None,
     ) -> None:
-        """Generate the optional forward-pipeline table.
+        """Generate the required forward-pipeline table, the package's seventh table.
 
-        Never fails the job: the table is additional context on top of an already
-        validated six-table package, and it legitimately cannot be produced for
-        captures without two complete CUDA-graph forward steps.
+        Fails the job when generation fails: the table is the only place the package
+        relates the measured unit to a whole forward step, so a package without it is
+        incomplete rather than merely thinner.
         """
         script = self.settings.skill_dir / "scripts" / "build_forward_pipeline_table.py"
-        if not script.exists() or not sqlite_path.exists():
-            return
+        if not script.exists():
+            raise RuntimeError(f"analysis Skill is missing the pipeline builder: {script}")
+        if not sqlite_path.exists():
+            raise RuntimeError(
+                f"forward 链路耗时表需要 trace，但 {sqlite_path} 不存在"
+            )
         taxonomy = None
+        metadata_dir = metadata_root or (job_dir / "metadata")
+        metadata_dir.mkdir(parents=True, exist_ok=True)
         for candidate in (
-            job_dir / "metadata" / f"{prefix}_architecture_taxonomy.json",
+            metadata_dir / f"{prefix}_architecture_taxonomy.json",
             package / f"{prefix}_architecture_taxonomy.json",
         ):
             if candidate.exists():
@@ -1109,29 +1338,89 @@ Requirements:
             "--output-dir", str(package),
             "--prefix", prefix,
             "--manifest-out",
-            str(job_dir / "metadata" / f"{prefix}_forward_pipeline.json"),
+            str(metadata_dir / f"{prefix}_forward_pipeline.json"),
         ]
         if taxonomy:
             command += ["--taxonomy", str(taxonomy)]
-        chunk = self.chunked_prefill_size(job_dir)
+        device = self.analysed_device(metadata_dir, package, prefix)
+        if device is not None:
+            # The other tables were measured on one rank; letting this script rank the
+            # devices again would put a different rank's forward in the same package.
+            command += ["--device", str(device)]
+        chunk = self.chunked_prefill_size(metadata_dir)
         if chunk:
             command += ["--chunk-size", str(chunk)]
         completed = subprocess.run(command, text=True, capture_output=True)
         if completed.returncode != 0:
             detail = (completed.stderr or completed.stdout or "").strip()[:1500]
-            self.log(job_dir, f"[forward-pipeline] 跳过 forward 链路耗时表：{detail}")
-            return
+            self.log(job_dir, f"[forward-pipeline] 生成 forward 链路耗时表失败：{detail}")
+            raise RuntimeError(f"forward 链路耗时表生成失败：{detail}")
         if completed.stdout:
             self.log(job_dir, f"[forward-pipeline] {completed.stdout.strip()}")
+        table = package / f"{prefix}{FORWARD_PIPELINE_SUFFIX}"
+        if not table.is_file():
+            raise RuntimeError(f"forward 链路耗时表未生成：{table}")
+
+    def ensure_forward_pipeline(
+        self, job_id: str, job_dir: Path, package: Path, prefix: str,
+        sqlite_path: Path | None, metadata_root: Path | None = None,
+    ) -> None:
+        """Guarantee the seventh table is in the package, regenerating it when possible.
+
+        An imported package may already ship the table without shipping a trace, and a
+        package produced before the table existed can still be completed as long as the
+        trace is available.
+        """
+        table = package / f"{prefix}{FORWARD_PIPELINE_SUFFIX}"
+        if sqlite_path is not None and sqlite_path.is_file():
+            self.build_forward_pipeline(
+                job_id, job_dir, package, prefix, sqlite_path, metadata_root,
+            )
+        if not table.is_file():
+            raise RuntimeError(
+                f"缺少必需的 forward 链路耗时表 {table.name}：包内没有这张表，"
+                "也没有可用的 trace 来生成它"
+            )
 
     @staticmethod
-    def chunked_prefill_size(job_dir: Path) -> int | None:
+    def package_trace(package: Path) -> Path | None:
+        """The trace shipped with a result package, if it kept one."""
+        for candidate in sorted((package / "trace").glob("*.sqlite")):
+            return candidate
+        context_path = package / "metadata" / "context.json"
+        if not context_path.is_file():
+            return None
+        try:
+            recorded = json.loads(context_path.read_text()).get("sqlite_path")
+        except (json.JSONDecodeError, OSError):
+            return None
+        path = Path(recorded) if recorded else None
+        return path if path and path.is_file() else None
+
+    @staticmethod
+    def analysed_device(metadata_dir: Path, package: Path, prefix: str) -> int | None:
+        """The device the other tables were measured on, per the stable statistics."""
+        for candidate in (
+            metadata_dir / f"{prefix}_stable_statistics.json",
+            package / f"{prefix}_stable_statistics.json",
+        ):
+            if not candidate.is_file():
+                continue
+            try:
+                device = json.loads(candidate.read_text()).get("device")
+            except (json.JSONDecodeError, OSError):
+                return None
+            return device if isinstance(device, int) else None
+        return None
+
+    @staticmethod
+    def chunked_prefill_size(metadata_dir: Path) -> int | None:
         """Read --chunked-prefill-size out of the job's launch command.
 
         Prefill steps run with a full chunk, so this is the step's token count --
         it cannot be derived from the trace the way a decode batch size can.
         """
-        context_path = job_dir / "metadata" / "context.json"
+        context_path = metadata_dir / "context.json"
         if not context_path.is_file():
             return None
         try:
@@ -1207,29 +1496,17 @@ Requirements:
             trace_dir = result_dir / "trace"
             for directory in (csv_dir, xlsx_dir, metadata_dir, trace_dir):
                 directory.mkdir(exist_ok=True)
-            for suffix in CSV_SUFFIXES:
+            for suffix in AGENT_CSV_SUFFIXES:
                 shutil.copy2(csv_source / f"{prefix}{suffix}", csv_dir)
-            optional_tables: list[str] = []
-            for suffix in OPTIONAL_CSV_SUFFIXES:
-                name = f"{prefix}{suffix}"
-                # older packages kept this table beside the sidecars, so look there too
-                found = next(
-                    (path for path in (csv_source / name, *source.rglob(name))
-                     if path.is_file()),
-                    None,
-                )
-                if found:
-                    shutil.copy2(found, csv_dir / name)
-                    optional_tables.append(name)
-            source_analysis = source / "analysis.json"
-            if source_analysis.exists():
-                shutil.copy2(source_analysis, result_dir / "analysis.json")
-            else:
-                self.convert(
-                    csv_source, result_dir / "analysis.json", prefix, request,
-                    job_id=job_id,
-                )
-            self.ensure_xlsx(csv_dir, xlsx_dir, job_id=job_id)
+            pipeline_name = f"{prefix}{FORWARD_PIPELINE_SUFFIX}"
+            # older packages kept the pipeline table beside the sidecars
+            found = next(
+                (path for path in (csv_source / pipeline_name, *source.rglob(pipeline_name))
+                 if path.is_file()),
+                None,
+            )
+            if found:
+                shutil.copy2(found, csv_dir / pipeline_name)
             for sidecar in source.rglob("*.json"):
                 if sidecar.name in {"analysis.json", "nsysscope-package.json"}:
                     continue
@@ -1237,6 +1514,20 @@ Requirements:
             traces = [*source.rglob("*.sqlite")]
             for trace in traces:
                 shutil.copy2(trace, trace_dir / trace.name)
+            # A package predating the seventh table can still be completed from its trace.
+            self.ensure_forward_pipeline(
+                job_id or "", result_dir, csv_dir, prefix,
+                self.package_trace(result_dir), metadata_root=metadata_dir,
+            )
+            source_analysis = source / "analysis.json"
+            if source_analysis.exists():
+                shutil.copy2(source_analysis, result_dir / "analysis.json")
+            else:
+                self.convert(
+                    csv_dir, result_dir / "analysis.json", prefix, request,
+                    job_id=job_id,
+                )
+            self.ensure_xlsx(csv_dir, xlsx_dir, job_id=job_id)
             package_manifest = {
                 "schemaVersion": "1.0",
                 "kind": "nsysscope-analysis-package",
@@ -1247,7 +1538,7 @@ Requirements:
                 "log": "logs/job.log",
                 "metadataDirectory": "metadata",
                 "prefix": prefix,
-                "tables": [f"{prefix}{suffix}" for suffix in CSV_SUFFIXES] + optional_tables,
+                "tables": [f"{prefix}{suffix}" for suffix in CSV_SUFFIXES],
                 "importedFrom": str(archive_path),
             }
             (result_dir / "nsysscope-package.json").write_text(
@@ -1269,7 +1560,7 @@ Requirements:
             except RuntimeError:
                 continue
             return candidate
-        raise RuntimeError("ZIP package does not contain one complete six-table directory")
+        raise RuntimeError("ZIP package does not contain one complete table directory")
 
     def organize_result_package(
         self, result_dir: Path, package_dir: Path, prefix: str, sqlite_path: Path,
@@ -1288,11 +1579,6 @@ Requirements:
             target = csv_dir / source.name
             shutil.move(str(source), target)
             csv_files.append(target.name)
-        for suffix in OPTIONAL_CSV_SUFFIXES:
-            source = package_dir / f"{prefix}{suffix}"
-            if source.is_file():
-                shutil.move(str(source), csv_dir / source.name)
-                csv_files.append(source.name)
         for source_dir in dict.fromkeys((package_dir, result_dir)):
             for extra_csv in source_dir.glob("*.csv"):
                 shutil.move(str(extra_csv), metadata_dir / extra_csv.name)
@@ -1518,9 +1804,11 @@ Requirements:
     def find_package(job_dir: Path, prefix: str) -> Path:
         candidates = [job_dir, *[path.parent for path in job_dir.rglob(f"{prefix}_stage_table.csv")]]
         for path in candidates:
-            if all((path / f"{prefix}{suffix}").exists() for suffix in CSV_SUFFIXES):
+            # The forward-pipeline table is generated from the trace afterwards, so only
+            # the agent's own tables can identify the package directory.
+            if all((path / f"{prefix}{suffix}").exists() for suffix in AGENT_CSV_SUFFIXES):
                 return path
-        raise RuntimeError("Agent run did not produce a complete six-table package")
+        raise RuntimeError("Agent run did not produce the six agent tables of the package")
 
     @staticmethod
     def detect_prefix(package: Path, requested: str) -> str:
@@ -1532,7 +1820,7 @@ Requirements:
         ]
         complete = [
             prefix for prefix in candidates
-            if all((package / f"{prefix}{suffix}").exists() for suffix in CSV_SUFFIXES)
+            if all((package / f"{prefix}{suffix}").exists() for suffix in AGENT_CSV_SUFFIXES)
         ]
         if len(complete) == 1:
             return complete[0]

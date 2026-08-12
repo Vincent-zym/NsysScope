@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Convert the six-table package into the stable NsysScope frontend contract."""
+"""Convert the seven-table package into the stable NsysScope frontend contract."""
 
 from __future__ import annotations
 
@@ -57,10 +57,15 @@ def portable_artifact(root: Path, configured: Any, default_name: str) -> Path:
         return local
     if configured:
         candidate = Path(str(configured))
-        if not candidate.is_absolute():
-            candidate = root / candidate
-        if candidate.exists():
-            return candidate
+        if candidate.is_absolute():
+            if candidate.exists():
+                return candidate
+        else:
+            # Manifests record sidecars either relative to the package directory or
+            # relative to the job directory above it ("metadata/..."), so try both.
+            for base in (root, root.parent):
+                if (base / candidate).exists():
+                    return base / candidate
     raise FileNotFoundError(f"required analysis sidecar is missing: {default_name}")
 
 
@@ -149,7 +154,7 @@ def stable_sample_count(stats: dict[str, Any], manifest: dict[str, Any]) -> int:
 def device_id(value: Any) -> int:
     """Parse a device column that may carry a human-readable annotation.
 
-    The six-table spec asks for a bare integer, but real packages have shipped
+    The table spec asks for a bare integer, but real packages have shipped
     values like ``cuda:3 (pp_rank 3)`` or ``GPU 3``. Take the first integer so a
     cosmetic annotation cannot fail the whole conversion; the original string is
     preserved separately as ``deviceLabel``.
@@ -240,6 +245,26 @@ def trace_fingerprint(path: Path) -> dict[str, Any]:
         "size_bytes": path.stat().st_size,
         "sha256_head_1mib": hashlib.sha256(head).hexdigest(),
     }
+
+
+def metadata_directory(root: Path) -> Path:
+    """Where the job keeps context.json and the agent's sidecars.
+
+    The tables can end up in `csv/`, in `result/` or straight in the job dir --
+    the agent chooses its own layout and the runner only tidies up afterwards --
+    so the metadata dir has to be looked for instead of inferred from the table
+    dir's name. Keying off `csv` alone silently degraded every metadata-derived
+    field (parallelism, input report, sampling) for a package laid out as
+    `result/`, and nothing failed, which is the worst possible outcome.
+    """
+    candidates = (root / "metadata", root.parent / "metadata")
+    for candidate in candidates:
+        if (candidate / "context.json").is_file():
+            return candidate
+    for candidate in candidates:
+        if candidate.is_dir():
+            return candidate
+    return root
 
 
 def parallel_config(metadata_root: Path) -> dict[str, int]:
@@ -398,7 +423,7 @@ def build_operator_payload(
     """Build one frontend row, keeping the overview table's human operator name."""
     category = rule.get("category", "auxiliary")
     if category not in {"core", "communication", "auxiliary"}:
-        raise ValueError(f"invalid six-table category: {category}")
+        raise ValueError(f"invalid operator category: {category}")
     unit_position = view.get("单元位置") or raw.get("unit_position") or None
     unit_id = view.get("单元ID") or raw.get("unit_id") or None
     unit_variant = view.get("单元类型") or raw.get("unit_variant") or None
@@ -461,7 +486,7 @@ def table_categories(
     core_rows: list[dict[str, str]],
     auxiliary_rows: list[dict[str, str]],
 ) -> list[str]:
-    """Recover per-operator categories from the normalized six-table contract."""
+    """Recover per-operator categories from the normalized table contract."""
     core = Counter(classification_key(row) for row in core_rows)
     auxiliary = Counter(classification_key(row) for row in auxiliary_rows)
     categories: list[str] = []
@@ -474,7 +499,7 @@ def table_categories(
             auxiliary[key] -= 1
             categories.append("auxiliary")
         else:
-            # The six-table contract has no per-operator communication table.
+            # The table contract has no per-operator communication table.
             # Rows absent from both core and auxiliary tables are communication.
             categories.append("communication")
     unmatched = sum(core.values()) + sum(auxiliary.values())
@@ -496,11 +521,7 @@ def main() -> None:
     args = parser.parse_args()
 
     root, prefix = args.input_dir, args.prefix
-    metadata_root = (
-        root.parent / "metadata"
-        if root.name == "csv" and (root.parent / "metadata").is_dir()
-        else root
-    )
+    metadata_root = metadata_directory(root)
     origin = read_csv(root / f"{prefix}_operator_origin_table.csv")
     overview = [
         row for row in read_csv(root / f"{prefix}_opreator_table.csv")
@@ -522,7 +543,15 @@ def main() -> None:
         row for row in read_csv(root / f"{prefix}_op_classification_table.csv")
         if not is_total_row(row)
     ]
-    manifest_path = metadata_root / f"{prefix}_analysis_manifest.json"
+    # The manifest normally sits in metadata/, but a package whose producer wrote it
+    # next to the tables is still a valid package -- and silently falling back to an
+    # empty manifest costs the unit composition, the sample count and the devices.
+    manifest_name = f"{prefix}_analysis_manifest.json"
+    manifest_path = next(
+        (path for path in (metadata_root / manifest_name, root / manifest_name)
+         if path.exists()),
+        metadata_root / manifest_name,
+    )
     manifest = json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
     stats = optional_json_artifact(
         metadata_root,
@@ -543,7 +572,7 @@ def main() -> None:
     if not validation:
         validation = {
             "status": "not_provided",
-            "message": "Imported from the normalized six-table contract without sidecars.",
+            "message": "Imported from the normalized table contract without sidecars.",
         }
 
     total = next(row for row in origin if row["module"] == "__layer_total__")

@@ -1,21 +1,21 @@
 {
   "name": "nsysscope",
   "version": "0.1.0",
-  "description": "Analyze SGLang Nsight Systems reports and open normalized six-table results in NsysScope.",
+  "description": "Analyze SGLang Nsight Systems reports and open normalized seven-table results in NsysScope.",
   "author": {
     "name": "NsysScope"
   },
   "skills": "./skills/",
   "interface": {
     "displayName": "NsysScope",
-    "shortDescription": "Analyze nsys reports or inspect six-table packages.",
+    "shortDescription": "Analyze nsys reports or inspect seven-table packages.",
     "longDescription": "Generate evidence-backed SGLang GPU performance tables with the bundled analysis Skill, or launch NsysScope to inspect an existing portable result package.",
     "developerName": "NsysScope",
     "category": "Developer Tools",
     "capabilities": ["Interactive", "Read", "Write"],
     "defaultPrompt": [
       "Analyze this SGLang nsys report with NsysScope.",
-      "Open this six-table result package in NsysScope."
+      "Open this seven-table result package in NsysScope."
     ],
     "brandColor": "#6A91FF"
   }

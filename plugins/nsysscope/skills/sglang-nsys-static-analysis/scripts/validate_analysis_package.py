@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate six-table semantics, MFU evidence, manifest, and frontend parity."""
+"""Validate seven-table semantics, MFU evidence, manifest, and frontend parity."""
 
 from __future__ import annotations
 
@@ -20,6 +20,7 @@ SUFFIXES = (
     "_auxiliary_operator_table.csv",
     "_op_classification_table.csv",
     "_stage_table.csv",
+    "_forward_pipeline_table.csv",
 )
 CATEGORY_LABELS = {
     "核心计算": "core",
@@ -205,6 +206,146 @@ def validate_forward_pipeline(path: Path, errors: list[str]) -> None:
             )
 
 
+CJK = re.compile(r"[\u4e00-\u9fff]")
+CALL_SITE = re.compile(r"\.py:\d+")
+# PP activation handoff: a rank's wait for its neighbour, never part of a layer
+PIPELINE_HANDOFF = re.compile(r"SendRecv|Recv|Send", re.IGNORECASE)
+
+
+def validate_evidence_depth(
+    origin_ops: list[dict[str, str]], core: list[dict[str, str]],
+    errors: list[str],
+) -> None:
+    """Reject a package whose evidence columns were filled with boilerplate.
+
+    Failing to match the supplied source tree to the captured build commit is not a
+    licence to drop call sites, code snippets and GEMM shapes: the commit only
+    decides whether source *defaults* may be quoted as runtime truth. A real package
+    cites `file:line` for ~80-100% of rows; the run that triggered this gate cited 0.
+    """
+    if not origin_ops:
+        return
+    total = len(origin_ops)
+
+    def ratio(count: int) -> str:
+        return f"{count}/{total}"
+
+    cited = sum(
+        1 for row in origin_ops if CALL_SITE.search(row.get("python_function", ""))
+    )
+    if cited < total * 0.6:
+        errors.append(
+            f"only {ratio(cited)} origin rows cite a file:line call site; an unverified "
+            "source commit does not remove the call-site requirement"
+        )
+    described = sum(
+        1 for row in origin_ops if CJK.search(row.get("function_introduction", ""))
+    )
+    if described < total * 0.6:
+        errors.append(
+            f"only {ratio(described)} origin rows have a Chinese function_introduction; "
+            "a single English noun phrase is not a functional description"
+        )
+    if "dispatch_code_snippet" in origin_ops[0]:
+        coded = sum(
+            1 for row in origin_ops if "(" in row.get("dispatch_code_snippet", "")
+        )
+        if coded < total * 0.6:
+            errors.append(
+                f"only {ratio(coded)} origin rows carry a real dispatch code snippet "
+                "(prose in this column is not evidence)"
+            )
+    if core and not any(row.get("shape") for row in core):
+        errors.append(
+            "no core-compute row has a shape: GEMM shape/mfu/mbu cannot all be blank "
+            "when config and launch material provide token count and dimensions"
+        )
+
+
+def validate_unit_attribution(
+    origin_ops: list[dict[str, str]], unit_duration: float | None,
+    errors: list[str],
+) -> None:
+    """Catch operators attributed to a layer they cannot belong to.
+
+    Two impossibilities were observed on a package that passed every other check: a
+    400ms pipeline-parallel `SendRecv` wait counted inside a 102ms layer window, and
+    a first position truncated to 32 kernels while its siblings of the same variant
+    had 41-42. Both mean the unit window is misaligned with the real layer boundary.
+
+    Communication kernels are not banned from a layer -- TP all-reduce and DCP
+    all-to-all legitimately run inside one, at a few percent of its span. What cannot
+    belong to a layer is a rank-level wait that dwarfs it.
+    """
+    if not origin_ops:
+        return
+    for row in origin_ops:
+        duration = number(row.get("duration_us"))
+        if not (unit_duration and duration):
+            continue
+        if duration > unit_duration * 1.001:
+            errors.append(
+                f"operator {row.get('operator_name', '')[:60]} lasts {duration:.1f}us, "
+                f"longer than the whole repeating unit ({unit_duration:.1f}us): it is "
+                "not inside this unit"
+            )
+        elif (
+            row.get("unit_position")
+            and PIPELINE_HANDOFF.search(row.get("operator_name", ""))
+            and duration > unit_duration * 0.2
+        ):
+            errors.append(
+                f"handoff kernel {row.get('operator_name', '')[:60]} takes "
+                f"{duration / unit_duration:.0%} of unit position "
+                f"{row.get('unit_position')}; that is a rank-level wait, not layer work"
+            )
+
+    per_position: Counter[tuple[str, str]] = Counter(
+        (row.get("unit_variant", ""), row.get("unit_position", ""))
+        for row in origin_ops
+        if row.get("unit_position")
+    )
+    by_variant: dict[str, list[int]] = {}
+    for (variant, _), count in per_position.items():
+        by_variant.setdefault(variant, []).append(count)
+    for variant, counts in by_variant.items():
+        if len(counts) > 1 and max(counts) > min(counts) * 1.15:
+            errors.append(
+                f"variant {variant} positions hold {min(counts)}-{max(counts)} "
+                "operators; positions of one variant execute the same kernels, so the "
+                "unit window is phase-shifted against the layer boundary"
+            )
+
+
+def validate_sampling(manifest: dict[str, Any], errors: list[str]) -> None:
+    """A single occurrence cannot represent a repeating unit."""
+    if not manifest:
+        errors.append(
+            "<prefix>_analysis_manifest.json was not found next to the tables or "
+            "in metadata/: sampling, unit composition and device selection cannot be "
+            "verified, and the frontend then falls back to 1 sample / 1 unit"
+        )
+        return
+    stable = manifest.get("stable_statistics") or manifest.get("stable_stats") or {}
+    if not isinstance(stable, dict):
+        return
+    if stable.get("single_sample_fallback"):
+        errors.append(
+            "stable_statistics.single_sample_fallback is set: one occurrence cannot "
+            "represent the repeating unit (per-step spans vary by up to 2x on a "
+            "serving capture)"
+        )
+    accepted = (
+        stable.get("accepted_sample_count")
+        or stable.get("accepted_full_template_sample_count")
+    )
+    if accepted is not None and int(accepted) < 3:
+        errors.append(
+            f"only {accepted} unit occurrence(s) accepted; sample at least 3 from the "
+            "steady state, and never the capture's first forward"
+        )
+
+
 def main() -> None:
     args = parse_args()
     root = args.package
@@ -223,7 +364,7 @@ def main() -> None:
         "classes": root / f"{args.prefix}_op_classification_table.csv",
         "stages": root / f"{args.prefix}_stage_table.csv",
     }
-    # Optional seventh table: absent for captures without two complete forward steps.
+    # The seventh table is required, and its presence is already enforced above.
     validate_forward_pipeline(
         root / f"{args.prefix}_forward_pipeline_table.csv", errors,
     )
@@ -299,12 +440,24 @@ def main() -> None:
         if mfu is not None and not 0 <= mfu <= 100:
             errors.append(f"MFU outside [0,100]: {row.get('算子名称')}={mfu}")
 
-    metadata_root = (
-        root.parent / "metadata"
-        if root.name == "csv" and (root.parent / "metadata").is_dir()
-        else root
+    # The tables can sit in csv/, in result/ or in the job dir itself -- the layout is
+    # the agent's choice -- so look for the metadata dir instead of inferring it from
+    # the table dir's name, which made every metadata-derived check silently vacuous
+    # for any layout that was not csv/.
+    metadata_candidates = (root / "metadata", root.parent / "metadata")
+    metadata_root = next(
+        (path for path in metadata_candidates if (path / "context.json").is_file()),
+        next((path for path in metadata_candidates if path.is_dir()), root),
     )
-    manifest_path = metadata_root / f"{args.prefix}_analysis_manifest.json"
+    manifest_name = f"{args.prefix}_analysis_manifest.json"
+    # Accept the manifest either in metadata/ or beside the tables; the converter
+    # reads it the same way, and an unread manifest silently drops the unit
+    # composition and the sample count from the frontend.
+    manifest_path = next(
+        (path for path in (metadata_root / manifest_name, root / manifest_name)
+         if path.exists()),
+        metadata_root / manifest_name,
+    )
     manifest = json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
     total_rows_required = bool(
         (manifest.get("total_rows") or {}).get("required")
@@ -512,6 +665,15 @@ def main() -> None:
             distinctive = set(definition.get("distinctive_functional_modules") or [])
             if len(taxonomy_variants) > 1 and distinctive and not distinctive & present_modules:
                 errors.append(f"variant {variant} has no distinguishing module in stage output")
+
+    validate_evidence_depth(origin_ops, core, errors)
+    unit_duration = (
+        number(total_rows["origin"][0].get("duration_avg_us"))
+        or number(total_rows["origin"][0].get("duration_us"))
+        if total_rows["origin"] else None
+    )
+    validate_unit_attribution(origin_ops, unit_duration, errors)
+    validate_sampling(manifest, errors)
 
     analysis = None
     if args.analysis_json and args.analysis_json.exists():

@@ -36,7 +36,9 @@ class Settings:
     comate_model: str
     comate_platform: str
     comate_timeout_seconds: int
+    comate_store_dir: Path
     agent_heartbeat_seconds: int
+    agent_stall_timeout_seconds: int
     job_log_max_bytes: int
     job_log_line_max_bytes: int
     nsys_bin: str
@@ -86,8 +88,24 @@ class Settings:
             comate_timeout_seconds=max(
                 60, int(os.getenv("NSYSSCOPE_COMATE_TIMEOUT_SECONDS", "7200")),
             ),
+            # Where the Comate engine keeps one `chat_session_<uuid>` file per
+            # conversation. The file records `workspaceDirectory`, which equals the
+            # `--cwd` we pass, so a job can find its own conversation and watch it
+            # advance -- the only signal that says the agent itself is still working
+            # rather than that something under the job dir happened to change.
+            comate_store_dir=Path(os.getenv(
+                "NSYSSCOPE_COMATE_STORE_DIR", Path.home() / ".comate-engine" / "store",
+            )).expanduser(),
             agent_heartbeat_seconds=max(
                 5, int(os.getenv("NSYSSCOPE_AGENT_HEARTBEAT_SECONDS", "30")),
+            ),
+            # An agent that produces nothing, prints nothing and burns no CPU for this
+            # long is stalled, not thinking: a dropped model request leaves the process
+            # alive with no work pending, and waiting for comate_timeout_seconds then
+            # burns hours for nothing. Long reasoning turns are covered by the CPU
+            # signal, so this only has to outlast one slow tool call.
+            agent_stall_timeout_seconds=max(
+                0, int(os.getenv("NSYSSCOPE_AGENT_STALL_TIMEOUT_SECONDS", "1800")),
             ),
             job_log_max_bytes=max(
                 1_048_576, int(os.getenv("NSYSSCOPE_JOB_LOG_MAX_BYTES", str(2 * 1024 * 1024))),

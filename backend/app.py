@@ -291,7 +291,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except RuntimeError as exc:
             raise HTTPException(
                 status_code=409,
-                detail="the failed job has no complete six-table package",
+                detail="the failed job has no complete table package",
             ) from exc
         queued = store.update(
             job_id, status="converting", progress=85,
@@ -322,7 +322,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except RuntimeError as exc:
             raise HTTPException(
                 status_code=409,
-                detail="this job has no complete six-table package",
+                detail="this job has no complete table package",
             ) from exc
         queued = store.update(
             job_id, status="validating", progress=96,

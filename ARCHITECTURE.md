@@ -40,7 +40,7 @@ NsysScope separates report analysis from visualization.
 - exposes cursor-paginated logs, activity timestamps and the resulting
   `analysis.json`;
 - can retry only the deterministic conversion/validation stage when a completed
-  six-table package survives an agent-side failure.
+  seven-table package survives an agent-side failure.
 
 The one-command launcher uses an ephemeral jobs database by default and removes
 it together with the operational log on normal shutdown. Persistent state is an
@@ -103,7 +103,7 @@ The Analyzer selects a provider from each job's `agent_provider` field:
 Provider-specific event output is written to the same job log. Cancellation
 terminates the active provider subprocess. After the provider exits, both paths
 share `find_package`, conversion and validation, so a provider cannot bypass
-the six-table or `analysis.json` contracts.
+the seven-table or `analysis.json` contracts.
 
 On success, provider staging files are removed and the package is normalized as
 `csv/`, `xlsx/`, `trace/`, `logs/`, `metadata/`, `analysis.json`, and

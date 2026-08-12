@@ -11,7 +11,7 @@ distinct graphs (and ``NULL`` for the non-captured bookkeeping). That is model
 agnostic -- no kernel-name list is needed to find the phase boundaries.
 
 Captures without CUDA graphs (prefill, eager decode -- with or without speculative
-decoding) fall back to the step marker plus the layer segmentation the six-table
+decoding) fall back to the step marker plus the layer segmentation the table
 pipeline already does: the target forward ends at its last layer, the draft forward
 starts at the marker's draft population and ends one layer stride after its last
 layer core. Each forward's tail then lands in the following prep phase; see
@@ -104,18 +104,6 @@ def device_count(cur: sqlite3.Cursor) -> int:
     return int(row[0]) if row and row[0] else 0
 
 
-def pick_device(cur: sqlite3.Cursor, requested: Optional[int]) -> int:
-    if requested is not None:
-        return requested
-    row = cur.execute(
-        "select deviceId, count(*) n from CUPTI_ACTIVITY_KIND_KERNEL "
-        "group by deviceId order by n desc limit 1"
-    ).fetchone()
-    if not row:
-        raise SystemExit("trace has no CUDA kernels")
-    return int(row[0])
-
-
 def union_busy(intervals: Sequence[Tuple[int, int]]) -> int:
     if not intervals:
         return 0
@@ -154,6 +142,7 @@ def holes(intervals: Sequence[Tuple[int, int]], a: int, b: int) -> List[Tuple[in
 def auto_step_marker(
     cur: sqlite3.Cursor, device: int, min_steps: int = 3,
     avoid_count: Optional[float] = None,
+    cv_tiers: Sequence[float] = (0.05, 0.20, 0.40),
 ) -> Dict[str, Any]:
     """Pick a once-per-forward marker kernel from the timeline itself.
 
@@ -162,6 +151,11 @@ def auto_step_marker(
     kernels whose launches are evenly spaced: a kernel that fires exactly once per
     forward step has a near-constant inter-arrival time, while everything else
     (per-layer kernels, bursts) does not.
+
+    A server capture is not a tight benchmark loop: chunk sizes and request arrivals
+    make the per-step period jitter, so uniformity alone can reject every candidate.
+    Walk `cv_tiers` from strict to loose and, past the strict tier, only accept a
+    launch count that several independent kernels agree on.
 
     Returns the chosen marker plus a second, independent candidate for cross-checking.
     """
@@ -183,8 +177,6 @@ def auto_step_marker(
             continue
         mean = sum(gaps) / len(gaps)
         spread = (sum((g - mean) ** 2 for g in gaps) / len(gaps)) ** 0.5 / mean
-        if spread > 0.05:  # not evenly spaced -> not once per step
-            continue
         # A kernel firing once per repeating unit is even *more* regular than a
         # per-forward one, so exclude that launch count explicitly when it is known.
         if avoid_count and abs(len(values) - avoid_count) <= max(1.0, avoid_count * 0.1):
@@ -192,26 +184,43 @@ def auto_step_marker(
         candidates.append({"name": name, "count": len(values), "cv": spread})
     if not candidates:
         raise SystemExit(
-            "could not auto-detect a once-per-forward marker: no kernel has evenly "
-            "spaced launches. Pass --step-marker with an explicit LIKE pattern."
+            "could not auto-detect a once-per-forward marker: no kernel has more than "
+            f"{min_steps} launches with positive spacing. Pass --step-marker with an "
+            "explicit LIKE pattern."
         )
 
-    # The step count is the launch count shared by most evenly spaced kernels; a
-    # kernel firing twice per step would otherwise be mistaken for the boundary.
-    counts: Dict[int, int] = {}
-    for item in candidates:
-        counts[item["count"]] = counts.get(item["count"], 0) + 1
-    step_count = max(counts, key=lambda c: (counts[c], c))
-    same = sorted(
-        (c for c in candidates if c["count"] == step_count), key=lambda c: c["cv"],
+    best_cv = min(c["cv"] for c in candidates)
+    for tier, limit in enumerate(cv_tiers):
+        pool = [c for c in candidates if c["cv"] <= limit]
+        if not pool:
+            continue
+        # The step count is the launch count shared by most evenly spaced kernels; a
+        # kernel firing twice per step would otherwise be mistaken for the boundary.
+        counts: Dict[int, int] = {}
+        for item in pool:
+            counts[item["count"]] = counts.get(item["count"], 0) + 1
+        step_count = max(counts, key=lambda c: (counts[c], c))
+        same = sorted(
+            (c for c in pool if c["count"] == step_count), key=lambda c: c["cv"],
+        )
+        # Jitter is only trustworthy when independent kernels land on the same count.
+        if tier and len(same) < 3:
+            continue
+        return {
+            "name": same[0]["name"],
+            "count": step_count,
+            "cv": same[0]["cv"],
+            "cross_check": same[1]["name"] if len(same) > 1 else None,
+            "agreeing_kernels": len(same),
+            "cv_threshold": limit,
+            "cv_relaxed": bool(tier),
+        }
+    raise SystemExit(
+        "could not auto-detect a once-per-forward marker: the most evenly spaced "
+        f"kernel has cv={best_cv:.3f} (limit {max(cv_tiers):.2f}) and no launch count "
+        "is corroborated by 3 independent kernels. Pass --step-marker with an "
+        "explicit LIKE pattern."
     )
-    return {
-        "name": same[0]["name"],
-        "count": step_count,
-        "cv": same[0]["cv"],
-        "cross_check": same[1]["name"] if len(same) > 1 else None,
-        "agreeing_kernels": len(same),
-    }
 
 
 def detect_markers(cur: sqlite3.Cursor, device: int, pattern: str) -> Dict[str, Any]:
@@ -261,12 +270,26 @@ def detect_markers(cur: sqlite3.Cursor, device: int, pattern: str) -> Dict[str, 
             target_starts=[s for s, _ in by_grid[grids[0]]], draft_starts=[],
         )
         return info
-    if len(grids) != 2:
-        raise SystemExit(
-            f"step marker has {len(grids)} gridX populations ({grids}); expected 1 or 2"
-        )
 
-    draft_grid, target_grid = grids
+    split = _speculative_grids(rows)
+    if split is None:
+        # Several gridX populations that do not repeat as a draft/verify pattern: in
+        # prefill the marker's gridX follows the per-step token count, which varies
+        # with the chunk fill and the number of queued requests. Those launches are
+        # still one-per-forward, so keep them as a single plain marker population.
+        entries = sorted(e for values in by_grid.values() for e in values)
+        info.update(
+            speculative=False, target_grid=None, draft_grid=None,
+            batch_size=None, speculative_tokens=0,
+            marker_grid_note=(
+                "gridX populations follow the per-step token count, not draft/verify"
+            ),
+            target_graph=_dominant_graph(entries), draft_graph=None,
+            target_starts=[s for s, _ in entries], draft_starts=[],
+        )
+        return info
+
+    draft_grid, target_grid = split
     batch = target_grid - draft_grid
     if batch <= 0 or draft_grid % batch:
         batch = None
@@ -285,6 +308,33 @@ def detect_markers(cur: sqlite3.Cursor, device: int, pattern: str) -> Dict[str, 
     return info
 
 
+def _speculative_grids(
+    rows: Sequence[Tuple[int, int, Optional[int]]]
+) -> Optional[Tuple[int, int]]:
+    """Return (draft_grid, target_grid) when the gridX populations are draft/verify.
+
+    Speculative decoding launches the marker in a fixed per-step pattern: K draft
+    forwards then one verify forward, forever. Anything else -- unequal periods, a
+    third population, a period without exactly one verify -- is gridX tracking the
+    per-step token count instead, which is normal for prefill.
+    """
+    grids = sorted({int(g) for _, g, _ in rows})
+    if len(grids) != 2:
+        return None
+    draft_grid, target_grid = grids
+    seq = [int(g) for _, g, _ in rows]
+    verifies = seq.count(target_grid)
+    if not verifies or len(seq) % verifies:
+        return None
+    period = len(seq) // verifies
+    first = seq[:period]
+    if first.count(target_grid) != 1:
+        return None
+    if any(seq[i * period:(i + 1) * period] != first for i in range(verifies)):
+        return None
+    return draft_grid, target_grid
+
+
 def _dominant_graph(entries: Sequence[Tuple[int, Optional[int]]]) -> Optional[int]:
     counts: Dict[Optional[int], int] = {}
     for _, graph in entries:
@@ -300,7 +350,7 @@ def last_layer_end(
 
     This is the no-CUDA-graph substitute for "where does the forward end": prefill
     and eager decode have no graphId to key on, but the layer segmentation that the
-    six-table pipeline already relies on does know where the last layer stops.
+    table pipeline already relies on does know where the last layer stops.
     Everything after it is inter-step bookkeeping.
     """
     if not variant_cores:
@@ -362,7 +412,7 @@ def segment_steps(
     graph_mode = target_graph is not None
     if not graph_mode:
         # prefill and eager decode are not CUDA-graph captured, so fall back to the
-        # layer segmentation the six-table pipeline already does. With speculative
+        # layer segmentation the table pipeline already does. With speculative
         # decoding on top of that, the step marker's own draft population supplies the
         # draft phase start and the draft layer stride supplies its end.
         if not variant_cores:
@@ -570,10 +620,20 @@ def draft_children(
 
 
 def stat(values: Sequence[float]) -> Tuple[float, float, float, int]:
+    """Mean, min, max and sample count of a per-step series.
+
+    The mean, not the median. Each step closes exactly by construction -- 其他 is
+    that step's residual, `phase_us - covered` -- but a median is not additive: on a
+    jittery capture every row's median comes from a different step and the children
+    then overshoot their phase (1.4% on the 0812 prefill trace) even though nothing
+    is mis-attributed. The mean is linear, so the reported numbers close as well.
+    `min_us` / `max_us` keep the spread, and the gap row keeps the capture holes,
+    visible instead.
+    """
     clean = [v for v in values if v is not None]
     if not clean:
         return 0.0, 0.0, 0.0, 0
-    return st.median(clean), min(clean), max(clean), len(clean)
+    return st.fmean(clean), min(clean), max(clean), len(clean)
 
 
 def build_rows(
@@ -583,36 +643,36 @@ def build_rows(
     def series(key: str) -> List[float]:
         return [s[key] for s in steps if s.get(key) is not None]
 
-    step_med, step_min, step_max, step_n = stat(series("period"))
+    step_avg, step_min, step_max, step_n = stat(series("period"))
     rows: List[Dict[str, str]] = []
 
     def add(name: str, kind: str, values: Sequence[float], *, layers: Any = "",
             substeps: Any = "", parent: Optional[float] = None, note: str = "") -> float:
-        med, lo, hi, n = stat(values)
+        avg, lo, hi, n = stat(values)
         per_unit = ""
         if isinstance(layers, int) and layers > 0:
-            per_unit = f"{med / layers:.1f}"
+            per_unit = f"{avg / layers:.1f}"
         elif kind == "stage" and isinstance(substeps, int) and substeps > 0:
-            per_unit = f"{med / substeps:.1f}"
+            per_unit = f"{avg / substeps:.1f}"
         rows.append({
             "环节": name,
             "环节类型": kind,
             "层数": str(layers) if layers not in ("", None) else "",
             "子步数": str(substeps) if substeps not in ("", None) else "",
             "单次耗时(us)": per_unit,
-            "总耗时(us)": f"{med:.1f}",
-            "占forward步(%)": f"{med / step_med * 100:.2f}" if step_med else "",
-            "占父环节(%)": f"{med / parent * 100:.1f}" if parent else "",
+            "总耗时(us)": f"{avg:.1f}",
+            "占forward步(%)": f"{avg / step_avg * 100:.2f}" if step_avg else "",
+            "占父环节(%)": f"{avg / parent * 100:.1f}" if parent else "",
             "样本数": str(n),
             "min_us": f"{lo:.1f}",
             "max_us": f"{hi:.1f}",
             "备注": note,
         })
-        return med
+        return avg
 
     add("forward step 总计", "total", series("period"),
         note=f"锚点 {info['marker_pattern']}，共 {len(info['target_starts'])} 步，"
-             f"取样 {step_n} 步"
+             f"取样 {step_n} 步；总耗时列为取样步均值（均值可加，各环节之和严格闭合）"
              + (f"；{info['shard_note']}" if info.get("shard_note") else ""))
 
     variant_counts: Dict[str, int] = {}
@@ -633,32 +693,32 @@ def build_rows(
         s["target"] + (s.get("prep_draft") or 0.0) + (s.get("prep_verify") or 0.0)
         for s in steps
     ]
-    target_med = add(
+    target_avg = add(
         "target 主模型", "phase", target_total, layers=total_layers or "",
         note="含 prep draft / prep verify" + ("；" + tail_note if no_graph else ""),
     )
     for name in [n for n in variant_counts if variant_counts[n]]:
         add(f"{name} 层", "variant",
             [s["target_children"].get(name, 0.0) for s in steps],
-            layers=variant_counts[name], parent=target_med)
+            layers=variant_counts[name], parent=target_avg)
     add("其他", "other",
         [s["target_children"].get("其他", 0.0)
          + (s.get("prep_draft") or 0.0) + (s.get("prep_verify") or 0.0)
          for s in steps],
-        parent=target_med,
+        parent=target_avg,
         note="embedding / lm_head / 输出聚合 + prep draft / prep verify"
              "（verify 判定、KV 记账、投机 token 拼接），不随层数变化")
 
     if info["speculative"]:
         layers = max((s["draft_children"].get("_layers") or 0) for s in steps)
-        draft_med = add("draft 模型", "phase", series("draft"),
+        draft_avg = add("draft 模型", "phase", series("draft"),
                         layers=layers or "", substeps=info["speculative_tokens"] or "",
                         note=tail_note if no_graph else "")
         key = f"draft {layers} 层 forward"
         add(key, "stage", [s["draft_children"].get(key, 0.0) for s in steps],
-            layers=layers or "", parent=draft_med)
+            layers=layers or "", parent=draft_avg)
         add("其他", "other", [s["draft_children"].get("其他", 0.0) for s in steps],
-            substeps=info["speculative_tokens"] or "", parent=draft_med,
+            substeps=info["speculative_tokens"] or "", parent=draft_avg,
             note="draft 前导 / lm_head / 投机采样循环")
 
     # Spell the measurement windows out: prep draft / prep verify are folded into 其他,
@@ -819,29 +879,71 @@ def layer_shard_note(
     )
 
 
-def main() -> None:
-    args = parse_args()
-    variant_cores: Dict[str, List[str]] = {}
-    for item in args.variant_marker:
-        if "=" not in item:
-            raise SystemExit(f"--variant-marker needs NAME=SUBSTRING, got {item!r}")
-        name, needle = item.split("=", 1)
-        variant_cores.setdefault(name.strip(), []).append(needle.strip())
+def variant_core_counts(
+    cur: sqlite3.Cursor, device: int, variant_cores: Dict[str, List[str]],
+) -> Dict[str, int]:
+    """Launch count of every variant's core kernels on one device."""
+    counts: Dict[str, int] = {}
+    for name, needles in variant_cores.items():
+        total = 0
+        for needle in needles:
+            total += cur.execute(
+                "select count(*) from CUPTI_ACTIVITY_KIND_KERNEL k "
+                "join StringIds s on s.id = k.shortName "
+                "where k.deviceId = ? and s.value like ?",
+                (device, f"%{needle}%"),
+            ).fetchone()[0]
+        counts[name] = total
+    return counts
 
-    layer_boundary = args.layer_boundary
-    marker_source = "cli"
-    expected_ratio: Dict[str, int] = {}
-    if args.taxonomy and os.path.exists(args.taxonomy):
-        boundaries, tax_variants, expected_ratio = markers_from_taxonomy(args.taxonomy)
-        if not variant_cores and tax_variants:
-            variant_cores = tax_variants
-            marker_source = "taxonomy"
-        if boundaries:
-            layer_boundary = ",".join(boundaries)
 
-    con = sqlite3.connect(f"file:{args.sqlite}?mode=ro", uri=True)
-    cur = con.cursor()
-    device = pick_device(cur, args.device)
+def device_candidates(
+    cur: sqlite3.Cursor, requested: Optional[int],
+    variant_cores: Dict[str, List[str]], expected_ratio: Dict[str, int],
+) -> List[int]:
+    """Devices to try, best first.
+
+    Under pipeline parallelism each rank owns a different slice of the layer stack,
+    so the variant mix differs per rank: with a KDA/KDA/KDA/MLA pattern one rank can
+    hold 9 KDA + 3 MLA while its neighbour holds 8 KDA + 4 MLA. Only a rank whose mix
+    reproduces the taxonomy's declared unit can be labelled with that taxonomy, so
+    rank the devices by how closely their variant mix matches it instead of blindly
+    taking the busiest one.
+    """
+    rows = cur.execute(
+        "select deviceId, count(*) n from CUPTI_ACTIVITY_KIND_KERNEL "
+        "group by deviceId order by n desc"
+    ).fetchall()
+    if not rows:
+        raise SystemExit("trace has no CUDA kernels")
+    if requested is not None:
+        return [requested]
+    devices = [(int(d), int(n)) for d, n in rows]
+    if not (variant_cores and expected_ratio):
+        return [d for d, _ in devices]
+    wanted_total = sum(expected_ratio.values()) or 1
+    ranked = []
+    for index, (device, n) in enumerate(devices):
+        counts = variant_core_counts(cur, device, variant_cores)
+        total = sum(counts.values())
+        if total:
+            deviation = sum(
+                abs(counts.get(k, 0) / total - v / wanted_total)
+                for k, v in expected_ratio.items()
+            )
+        else:
+            deviation = float("inf")
+        ranked.append((round(deviation, 3), index, device))
+    ranked.sort()
+    return [device for _, _, device in ranked]
+
+
+def analyse_device(
+    cur: sqlite3.Cursor, device: int, args: argparse.Namespace,
+    variant_cores: Dict[str, List[str]], expected_ratio: Dict[str, int],
+    marker_source: str, layer_boundary: str,
+) -> Dict[str, Any]:
+    """Segment one device's timeline into forward steps and build the table rows."""
     info = detect_markers(cur, device, args.step_marker)
     if args.ignore_cuda_graphs:
         info["target_graph"] = info["draft_graph"] = None
@@ -895,6 +997,56 @@ def main() -> None:
                 "capture than this trace. Pass --variant-marker NAME=SUBSTRING "
                 "explicitly instead of publishing a mislabelled table."
             )
+    return {
+        "device": device, "info": info, "steps": steps, "rows": rows,
+        "layers_per_step": layers_per_step, "gap_holes": gap_holes,
+    }
+
+
+def main() -> None:
+    args = parse_args()
+    variant_cores: Dict[str, List[str]] = {}
+    for item in args.variant_marker:
+        if "=" not in item:
+            raise SystemExit(f"--variant-marker needs NAME=SUBSTRING, got {item!r}")
+        name, needle = item.split("=", 1)
+        variant_cores.setdefault(name.strip(), []).append(needle.strip())
+
+    layer_boundary = args.layer_boundary
+    marker_source = "cli"
+    expected_ratio: Dict[str, int] = {}
+    if args.taxonomy and os.path.exists(args.taxonomy):
+        boundaries, tax_variants, expected_ratio = markers_from_taxonomy(args.taxonomy)
+        if not variant_cores and tax_variants:
+            variant_cores = tax_variants
+            marker_source = "taxonomy"
+        if boundaries:
+            layer_boundary = ",".join(boundaries)
+
+    con = sqlite3.connect(f"file:{args.sqlite}?mode=ro", uri=True)
+    cur = con.cursor()
+    candidates = device_candidates(cur, args.device, variant_cores, expected_ratio)
+    rejected: List[str] = []
+    result: Optional[Dict[str, Any]] = None
+    for device in candidates:
+        try:
+            result = analyse_device(
+                cur, device, args, variant_cores, expected_ratio, marker_source,
+                layer_boundary,
+            )
+            break
+        except SystemExit as exc:
+            rejected.append(f"device {device}: {exc}")
+    if result is None:
+        raise SystemExit(
+            "no device could be segmented into forward steps:\n" + "\n".join(rejected)
+        )
+    device = result["device"]
+    info = result["info"]
+    steps = result["steps"]
+    rows = result["rows"]
+    layers_per_step = result["layers_per_step"]
+    gap_holes = result["gap_holes"]
 
     os.makedirs(args.output_dir, exist_ok=True)
     out_path = os.path.join(
@@ -910,6 +1062,8 @@ def main() -> None:
         "forward_pipeline": {
             "trace": trace_fingerprint(args.sqlite),
             "device": device,
+            "device_candidates": candidates,
+            "device_rejected": rejected or None,
             "gpu_count": device_count(cur),
             "layer_shard_note": info.get("shard_note"),
             "layers_per_step": layers_per_step,

@@ -690,7 +690,7 @@ function JobDialog({ open, onClose, onLoaded }) {
             <option value="Nvidia B300">Nvidia B300</option>
           </select></label>
           {form.mode === "existing_package" ? <>
-            <label className="span-2">六表 / NsysScope 结果目录<input required value={form.existing_package_path} onChange={set("existing_package_path")} placeholder="/path/to/result-package" /></label>
+            <label className="span-2">七表 / NsysScope 结果目录<input required value={form.existing_package_path} onChange={set("existing_package_path")} placeholder="/path/to/result-package" /></label>
             {form.existing_package_path.trim().toLowerCase().endsWith(".zip") &&
               <label className="span-2">ZIP 解压结果保存目录<input required value={form.result_path} onChange={set("result_path")} placeholder="/path/to/new-result-package（必须为空或不存在）" /></label>}
             <p className="package-hint span-2">目录内有 analysis.json 时直接展示；只有六张规范 CSV 也能自动转换，不要求额外 sidecar。支持 csv/ 子目录和旧版平铺目录。</p>
@@ -1045,7 +1045,7 @@ export default function Dashboard() {
   const fileRef = useRef(null);
 
   useEffect(() => {
-    fetch("/demo-analysis.json?default=kimi3-fixed-v2-20260731", {
+    fetch("/demo-analysis.json?default=kimi3-prefill-0812-1", {
       cache: "no-store",
     }).then((r) => r.json()).then((payload) => {
       setData(payload);
