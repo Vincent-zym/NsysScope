@@ -267,6 +267,57 @@ def metadata_directory(root: Path) -> Path:
     return root
 
 
+def resolve_shell_int(token: str, assignments: dict[str, str], seen: frozenset[str] = frozenset()) -> int | None:
+    """Resolve a shell scalar (`"$VAR"`, `$((VAR * N))`, or a bare literal) to an int.
+
+    Launch scripts set PP_SIZE/TP_SIZE from earlier variables rather than literals
+    (`PP_SIZE=$((NUM_NODES * 1))`), so a flag value has to be expanded through the
+    script's own assignments before it means anything. `assignments` maps a bare
+    variable name to its right-hand-side text, as found by `shell_assignments()`.
+    `seen` guards against a self-referential or circular chain; an unresolved
+    variable makes the whole expression unresolved rather than guessed.
+    """
+    token = token.strip().strip('"').strip("'")
+    if re.fullmatch(r"-?\d+", token):
+        return int(token)
+    arithmetic = re.fullmatch(r"\$\(\((.*)\)\)", token)
+    body = arithmetic.group(1) if arithmetic else token
+    names = set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", body))
+    if not names and not re.fullmatch(r"[\d\s+\-*/()]+", body):
+        return None
+    expanded = body
+    for name in names:
+        if name in seen or name not in assignments:
+            return None
+        value = resolve_shell_int(assignments[name], assignments, seen | {name})
+        if value is None:
+            return None
+        expanded = re.sub(rf"\b{name}\b", str(value), expanded)
+    if not re.fullmatch(r"[\d\s+\-*/()]+", expanded):
+        return None
+    try:
+        return int(eval(expanded, {"__builtins__": {}}, {}))
+    except (SyntaxError, ZeroDivisionError, TypeError, ValueError):
+        return None
+
+
+def shell_assignments(text: str) -> dict[str, str]:
+    """Every `NAME=value` assignment in a launch script, last one wins.
+
+    Values are the raw right-hand side, unresolved -- `resolve_shell_int` does the
+    variable expansion. Re-assignment (e.g. inside a conditional block) intentionally
+    overwrites rather than merges, matching how the shell itself would evaluate the
+    script top to bottom.
+    """
+    out: dict[str, str] = {}
+    for match in re.finditer(
+        r"^[ \t]*([A-Za-z_][A-Za-z0-9_]*)=(\$\(\([^\n]*?\)\)|[^\s#]+)",
+        text, re.MULTILINE,
+    ):
+        out[match.group(1)] = match.group(2)
+    return out
+
+
 def parallel_config(metadata_root: Path) -> dict[str, int]:
     """Parallelism degrees from the job's launch command (PP/TP/DP/EP)."""
     context_path = metadata_root / "context.json"
@@ -288,11 +339,29 @@ def parallel_config(metadata_root: Path) -> dict[str, int]:
         "DP": r"(?:dp|data[-_]parallel)[-_]size",
         "EP": r"(?:ep|moe[-_]ep|expert[-_]parallel)[-_]size",
     }
+    assignments = shell_assignments(text)
     out: dict[str, int] = {}
     for name, pattern in flags.items():
-        match = re.search(rf"--{pattern}[\s=]+(\d+)", text, re.IGNORECASE)
-        if match:
-            out[name] = int(match.group(1))
+        # A flag's value is frequently a variable reference or arithmetic expression
+        # rather than a literal (`--pp-size "$PP_SIZE"` with `PP_SIZE=$((NUM_NODES * 1))`
+        # defined earlier), so the raw token has to be expanded through the script's
+        # own assignments -- see resolve_shell_int.
+        match = re.search(
+            rf"--{pattern}[\s=]+"
+            r"(\"\$\{?[A-Za-z_][A-Za-z0-9_]*\}?\"|\$\(\([^)]*\)\)|\d+)",
+            text, re.IGNORECASE,
+        )
+        if not match:
+            continue
+        token = match.group(1)
+        variable = re.fullmatch(r'"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?"', token)
+        resolved = (
+            resolve_shell_int(assignments[variable.group(1)], assignments)
+            if variable and variable.group(1) in assignments
+            else resolve_shell_int(token, assignments)
+        )
+        if resolved is not None:
+            out[name] = resolved
     return out
 
 

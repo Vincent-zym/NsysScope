@@ -26,6 +26,7 @@ from scripts.build_analysis_json import (
     included_devices,
     is_total_row,
     metadata_directory,
+    parallel_config,
     stable_sample_count,
 )
 
@@ -285,6 +286,67 @@ def test_metadata_is_found_whatever_the_agent_named_the_table_dir(tmp_path: Path
     bare = tmp_path / "bare"
     bare.mkdir()
     assert metadata_directory(bare) == bare
+
+
+def test_chunked_prefill_size_reads_a_shell_arithmetic_expression(tmp_path: Path) -> None:
+    # p_start.sh writes `--chunked-prefill-size $((32 * 1024))`, not a bare integer;
+    # the plain-digit regex silently returned None and Chunk Size vanished from the
+    # frontend without any error.
+    metadata_dir = tmp_path / "metadata"
+    metadata_dir.mkdir()
+    launch = tmp_path / "launch.sh"
+    launch.write_text(
+        "sglang.launch_server \\\n"
+        "    --chunked-prefill-size $((32 * 1024)) \\\n"
+        "    --other-flag 1\n",
+        encoding="utf-8",
+    )
+    (metadata_dir / "context.json").write_text(
+        json.dumps({"launch_path": str(launch)}), encoding="utf-8",
+    )
+    assert JobRunner.chunked_prefill_size(metadata_dir) == 32768
+
+    # A plain integer literal still works.
+    launch.write_text("--chunked-prefill-size 16384\n", encoding="utf-8")
+    assert JobRunner.chunked_prefill_size(metadata_dir) == 16384
+
+    # Anything beyond arithmetic on literals (e.g. a shell variable) is refused
+    # rather than evaluated.
+    launch.write_text("--chunked-prefill-size $((SOME_VAR * 1024))\n", encoding="utf-8")
+    assert JobRunner.chunked_prefill_size(metadata_dir) is None
+
+
+def test_parallel_config_resolves_flags_set_from_earlier_variables(tmp_path: Path) -> None:
+    # p_start.sh does not write literals: PP_SIZE/TP_SIZE are their own variables,
+    # assigned from a still-earlier NUM_NODES, and the flag then quotes the variable
+    # rather than a number. Matching only `--pp-size \d+` returned {} silently and
+    # the frontend's PARALLELISM row just went missing.
+    metadata_dir = tmp_path / "metadata"
+    metadata_dir.mkdir()
+    launch = tmp_path / "launch.sh"
+    launch.write_text(
+        "NUM_NODES=2\n"
+        "export NUM_NODES\n"
+        "PP_SIZE=$((NUM_NODES * 1))\n"
+        "export PP_SIZE\n"
+        "TP_SIZE=$((NUM_NODES * 4))\n"
+        "export TP_SIZE\n"
+        "sglang.launch_server \\\n"
+        '    --tp-size "$TP_SIZE" \\\n'
+        '    --pp-size "$PP_SIZE"\n',
+        encoding="utf-8",
+    )
+    (metadata_dir / "context.json").write_text(
+        json.dumps({"launch_path": str(launch)}), encoding="utf-8",
+    )
+    assert parallel_config(metadata_dir) == {"PP": 2, "TP": 8}
+
+    # A literal flag value still works, unresolved variables are dropped rather
+    # than guessed, and the two behave the same within one script.
+    launch.write_text(
+        '--pp-size "$UNDECLARED_VAR" --tp-size 4\n', encoding="utf-8",
+    )
+    assert parallel_config(metadata_dir) == {"TP": 4}
 
 
 def test_frontend_payload_repairs_legacy_semantic_operator_alias() -> None:

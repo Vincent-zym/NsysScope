@@ -1433,8 +1433,25 @@ Requirements:
             text = Path(launch).read_text(errors="ignore")
         except OSError:
             return None
-        match = re.search(r"chunked[-_]prefill[-_]size[\s=]+(\d+)", text)
-        return int(match.group(1)) if match else None
+        # The value is frequently a shell arithmetic expression rather than a plain
+        # integer literal (e.g. `--chunked-prefill-size $((32 * 1024))`), so pull out
+        # the whole expression and evaluate it instead of expecting a bare number.
+        match = re.search(
+            r"chunked[-_]prefill[-_]size\s*[\s=]\s*"
+            r"(\$\(\([^)]*\)\)|\d+)", text,
+        )
+        if not match:
+            return None
+        token = match.group(1)
+        if token.startswith("$(("):
+            expression = token[3:-2]
+            if not re.fullmatch(r"[\d\s+\-*/()]+", expression):
+                return None  # refuse to eval anything beyond arithmetic on literals
+            try:
+                return int(eval(expression, {"__builtins__": {}}, {}))
+            except (SyntaxError, ZeroDivisionError, TypeError, ValueError):
+                return None
+        return int(token)
 
     def convert(
         self, package: Path, output: Path, prefix: str,
