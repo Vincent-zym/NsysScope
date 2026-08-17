@@ -371,6 +371,88 @@ def test_dcp_sendrecv_is_not_read_as_pipeline_sharding(tmp_path: Path):
     assert manifest["layer_shard_note"] is None
 
 
+def test_eager_kernel_batch_size_overrides_the_padded_graph_bucket(tmp_path: Path):
+    # kimi3_decode_analysis_0817_2: real batch 197 vs --cuda-graph-bs bucket 200. A
+    # graph-captured kernel's grid is baked in at capture time and only exposes the
+    # bucket; scheduler bookkeeping kernels SGLang keeps outside the graph
+    # (graphId IS NULL) are launched fresh every step sized to the real batch.
+    trace = tmp_path / "trace.sqlite"
+    fabricate_trace(trace)
+    con = sqlite3.connect(trace)
+    device = 0
+    names = {row[1]: row[0] for row in con.execute("select id, value from StringIds")}
+
+    def name_id(value: str) -> int:
+        if value not in names:
+            new_id = max(names.values(), default=0) + 1
+            names[value] = new_id
+            con.execute("insert into StringIds values (?, ?)", (new_id, value))
+        return names[value]
+
+    cursor = con.execute(
+        "select max(end) from CUPTI_ACTIVITY_KIND_KERNEL where deviceId = ?", (device,),
+    ).fetchone()[0]
+    real_batch = 197
+    # STEPS eager (graphId IS NULL) launches of two independent scheduler-side
+    # bookkeeping kernels, gridX = the real batch -- what the fabricated marker's
+    # gridX=1 (a fixed constant in fabricate_trace) cannot show at all.
+    rows = []
+    for i in range(STEPS):
+        start = cursor + i * 2 * US
+        rows.append(
+            (start, start + US, device, name_id("alloc_extend_kernel"), real_batch, None, 7)
+        )
+        rows.append(
+            (start + US, start + 2 * US, device,
+             name_id("assign_req_to_token_pool"), real_batch, None, 7)
+        )
+    con.executemany(
+        "insert into CUPTI_ACTIVITY_KIND_KERNEL values (?, ?, ?, ?, ?, ?, ?)", rows,
+    )
+    con.commit()
+    con.close()
+
+    _, manifest = build(tmp_path, "--device", str(device))
+    assert manifest["batch_size"] == real_batch
+    assert "alloc_extend_kernel" in manifest["batch_size_evidence"]
+    assert "cuda-graph-bs" in manifest["batch_size_evidence"]
+
+
+def test_eager_kernel_batch_size_needs_two_agreeing_scheduler_kernels(tmp_path: Path):
+    # A single eager kernel could coincidentally share a launch count with the
+    # step marker without actually encoding the batch -- so one alone must not be
+    # enough to override the (here, None) existing batch_size.
+    trace = tmp_path / "trace.sqlite"
+    fabricate_trace(trace)
+    con = sqlite3.connect(trace)
+    device = 0
+    names = {row[1]: row[0] for row in con.execute("select id, value from StringIds")}
+
+    def name_id(value: str) -> int:
+        if value not in names:
+            new_id = max(names.values(), default=0) + 1
+            names[value] = new_id
+            con.execute("insert into StringIds values (?, ?)", (new_id, value))
+        return names[value]
+
+    cursor = con.execute(
+        "select max(end) from CUPTI_ACTIVITY_KIND_KERNEL where deviceId = ?", (device,),
+    ).fetchone()[0]
+    rows = [
+        (cursor + i * US, cursor + (i + 1) * US, device,
+         name_id("alloc_extend_kernel"), 197, None, 7)
+        for i in range(STEPS)
+    ]
+    con.executemany(
+        "insert into CUPTI_ACTIVITY_KIND_KERNEL values (?, ?, ?, ?, ?, ?, ?)", rows,
+    )
+    con.commit()
+    con.close()
+
+    _, manifest = build(tmp_path, "--device", str(device))
+    assert manifest["batch_size"] is None
+
+
 def test_pp_sendrecv_unrelated_to_any_variant_count_still_warns(tmp_path: Path):
     # A real pipeline handoff's SendRecv count tracks the token/step count, not any
     # one variant's layer count -- so when it can't be attributed to a variant's

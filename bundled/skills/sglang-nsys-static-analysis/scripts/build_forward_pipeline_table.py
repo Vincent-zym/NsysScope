@@ -223,6 +223,100 @@ def auto_step_marker(
     )
 
 
+def local_batch_size_from_eager_kernels(
+    cur: sqlite3.Cursor, device: int, step_count: int, tolerance: float = 0.1,
+) -> Optional[Dict[str, Any]]:
+    """Read the true per-rank batch size off kernels CUDA graphs never capture.
+
+    A graph-captured kernel's grid is baked in at capture time, so it reports the
+    graph's padded bucket (e.g. 200 for a real batch of 197 -- see
+    ``--cuda-graph-bs``), not the request count that actually ran. Kernels SGLang
+    keeps outside the graph (``graphId IS NULL``) are launched fresh every step with
+    grid dimensions sized to the real batch, and under DP attention that size is
+    already this rank's local share (see ``srt/model_executor/forward_batch_info.py``
+    -- per-rank tensors are padded to the local, not the global, token count).
+
+    A single such kernel could still be coincidence, so this only returns a value
+    when at least two independently-named kernels agree on both the launch count
+    (matching step_count within `tolerance`) and one shared grid dimension.
+
+    gridY/gridZ are absent from some exports (older nsys, or a minimal fixture);
+    treat a missing column as a fixed 1 rather than failing the whole lookup.
+    """
+    columns = {row[1] for row in cur.execute(
+        "pragma table_info(CUPTI_ACTIVITY_KIND_KERNEL)"
+    )}
+    grid_cols = ", ".join(
+        f"k.{axis}" if axis in columns else "1" for axis in ("gridX", "gridY", "gridZ")
+    )
+    rows = cur.execute(
+        f"select s.value, {grid_cols} from CUPTI_ACTIVITY_KIND_KERNEL k "
+        "join StringIds s on s.id = k.shortName "
+        "where k.deviceId = ? and k.graphId is null",
+        (device,),
+    ).fetchall()
+    if not rows or step_count <= 0:
+        return None
+
+    per_kernel: Dict[str, Dict[Tuple[int, int, int], int]] = {}
+    for name, gx, gy, gz in rows:
+        grid = (int(gx), int(gy), int(gz))
+        counts = per_kernel.setdefault(str(name), {})
+        counts[grid] = counts.get(grid, 0) + 1
+
+    band = max(1, round(step_count * tolerance))
+    # For each kernel, keep its dominant grid only if that grid alone launches a
+    # number of times close to step_count -- a kernel with mixed grids (e.g. one
+    # warmup launch plus step_count steady-state ones) still qualifies on its
+    # steady-state population, but a kernel that is not once-per-step at all won't.
+    candidates: Dict[str, Tuple[int, int, int]] = {}
+    for name, counts in per_kernel.items():
+        grid, count = max(counts.items(), key=lambda kv: kv[1])
+        if abs(count - step_count) <= band:
+            candidates[name] = grid
+
+    if len(candidates) < 2:
+        return None
+
+    # A degenerate axis (e.g. gridZ, or gridY on a 1-D-grid kernel) is 1 on almost
+    # every kernel by construction -- that near-unanimous "vote" would outweigh the
+    # one axis that actually carries the batch by sheer kernel count. The anchor
+    # for "this axis carries the batch" is the scheduler's own request<->slot
+    # bookkeeping kernels (alloc/assign/cache-loc -- one thread per request, by
+    # name): whichever axis they themselves agree on, at whatever value that is,
+    # is the batch axis; unrelated kernels merely corroborate by sharing it.
+    scheduler_hint = re.compile(
+        r"alloc_extend|assign_extend|assign_req_to_token_pool|extend_cache_locs"
+    )
+    scheduler_grids = {
+        name: grid for name, grid in candidates.items() if scheduler_hint.search(name)
+    }
+    if len(scheduler_grids) < 2:
+        return None
+    axis = None
+    value = None
+    for probe_axis in range(3):
+        values = {grid[probe_axis] for grid in scheduler_grids.values()}
+        if len(values) == 1:
+            axis, value = probe_axis, next(iter(values))
+            break
+    if axis is None:
+        return None
+    agreeing = [
+        name for name, grid in candidates.items() if grid[axis] == value
+    ]
+    if len(agreeing) < 2:
+        return None
+    return {
+        "batch_size": value,
+        "evidence": (
+            f"gridX/Y/Z[{axis}]={value} on {len(agreeing)} non-CUDA-graph kernels "
+            f"({', '.join(sorted(agreeing))}) with ~{step_count} launches each; "
+            "graph-captured kernels only expose the padded --cuda-graph-bs bucket"
+        ),
+    }
+
+
 def detect_markers(cur: sqlite3.Cursor, device: int, pattern: str) -> Dict[str, Any]:
     """Locate the once-per-forward marker and split it into draft vs target.
 
@@ -269,6 +363,7 @@ def detect_markers(cur: sqlite3.Cursor, device: int, pattern: str) -> Dict[str, 
             target_graph=_dominant_graph(by_grid[grids[0]]), draft_graph=None,
             target_starts=[s for s, _ in by_grid[grids[0]]], draft_starts=[],
         )
+        _apply_eager_batch_size(cur, device, info)
         return info
 
     split = _speculative_grids(rows)
@@ -287,6 +382,7 @@ def detect_markers(cur: sqlite3.Cursor, device: int, pattern: str) -> Dict[str, 
             target_graph=_dominant_graph(entries), draft_graph=None,
             target_starts=[s for s, _ in entries], draft_starts=[],
         )
+        _apply_eager_batch_size(cur, device, info)
         return info
 
     draft_grid, target_grid = split
@@ -305,7 +401,24 @@ def detect_markers(cur: sqlite3.Cursor, device: int, pattern: str) -> Dict[str, 
         target_starts=[s for s, _ in by_grid[target_grid]],
         draft_starts=[s for s, _ in by_grid[draft_grid]],
     )
+    # The marker's own gridX split is speculative-token-population arithmetic, not
+    # a token count carried by grid dimensions -- see the LM-head GEMM case, where
+    # gridX is a tile count, not `bs * gamma`. Kernels outside the CUDA graph give
+    # the real batch directly, so prefer that when it is available and corroborated.
+    _apply_eager_batch_size(cur, device, info)
     return info
+
+
+def _apply_eager_batch_size(
+    cur: sqlite3.Cursor, device: int, info: Dict[str, Any],
+) -> None:
+    """Overwrite info's batch_size with the eager-kernel signal when corroborated."""
+    step_count = len(info.get("target_starts") or [])
+    found = local_batch_size_from_eager_kernels(cur, device, step_count)
+    if found is None:
+        return
+    info["batch_size"] = found["batch_size"]
+    info["batch_size_evidence"] = found["evidence"]
 
 
 def _speculative_grids(
