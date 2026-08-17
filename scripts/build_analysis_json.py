@@ -281,7 +281,14 @@ def resolve_shell_int(token: str, assignments: dict[str, str], seen: frozenset[s
     if re.fullmatch(r"-?\d+", token):
         return int(token)
     arithmetic = re.fullmatch(r"\$\(\((.*)\)\)", token)
-    body = arithmetic.group(1) if arithmetic else token
+    if arithmetic:
+        body = arithmetic.group(1)
+    else:
+        # A bare variable reference (`$VAR` or `${VAR}`, no arithmetic wrapper) --
+        # strip the shell sigil so the name below resolves cleanly instead of
+        # leaving a literal `$` in `body` that later fails the numeric-only check.
+        bare_variable = re.fullmatch(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?", token)
+        body = bare_variable.group(1) if bare_variable else token
     names = set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", body))
     if not names and not re.fullmatch(r"[\d\s+\-*/()]+", body):
         return None
@@ -311,7 +318,7 @@ def shell_assignments(text: str) -> dict[str, str]:
     """
     out: dict[str, str] = {}
     for match in re.finditer(
-        r"^[ \t]*([A-Za-z_][A-Za-z0-9_]*)=(\$\(\([^\n]*?\)\)|[^\s#]+)",
+        r"^[ \t]*(?:export[ \t]+)?([A-Za-z_][A-Za-z0-9_]*)=(\$\(\([^\n]*?\)\)|[^\s#]+)",
         text, re.MULTILINE,
     ):
         out[match.group(1)] = match.group(2)
@@ -700,6 +707,9 @@ def main() -> None:
         manifest.get("selected_unit")
         or manifest.get("repeating_unit")
         or manifest.get("repeating_unit_selection")
+        # build_forward_pipeline_table.py's manifest names this field
+        # `unit_selection`, not one of the three names above.
+        or manifest.get("unit_selection")
     )
     layer_count = first_value(
         selected_unit if isinstance(selected_unit, dict) else {},
@@ -712,7 +722,11 @@ def main() -> None:
         else []
     )
     distinct_variants = (
-        selected_unit.get("distinct_layer_variants")
+        (
+            selected_unit.get("distinct_layer_variants")
+            # `unit_selection`'s equivalent field is `variants_present`.
+            or selected_unit.get("variants_present")
+        )
         if isinstance(selected_unit, dict)
         else None
     )

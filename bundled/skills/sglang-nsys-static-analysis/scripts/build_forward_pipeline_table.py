@@ -978,7 +978,13 @@ def analyse_device(
     # of deriving them from prose, or of pairing a taxonomy with a different capture
     # (prefill kernel names do not appear in a decode trace). The taxonomy already
     # declares how many layers of each variant one unit has, so the detected counts
-    # must reproduce that ratio.
+    # must reproduce that ratio -- for as many full repeats as fit, plus at most one
+    # partial leftover (a model whose layer count is not a multiple of the unit
+    # length, e.g. 93 layers = 23 x 4-layer units + one trailing MLA layer, which is
+    # a real, declared remainder, not a labelling error). expected_ratio's key order
+    # is the pattern's variant order (see expected_variant_ratio), so the remainder
+    # is checked against every rotation of that order, since a real trailing partial
+    # unit can start at any position within the pattern.
     if marker_source == "taxonomy" and expected_ratio:
         detected: Dict[str, int] = {}
         for step in steps:
@@ -986,12 +992,29 @@ def analyse_device(
                 detected[name] = max(detected.get(name, 0), count)
         detected = {k: v for k, v in detected.items() if v}
         unit_layers = sum(expected_ratio.values()) or 1
-        repeats = max(1, round((sum(detected.values()) or 0) / unit_layers))
-        wanted = {k: v * repeats for k, v in expected_ratio.items()}
-        if detected != wanted:
+        total_detected = sum(detected.values()) or 0
+        repeats = total_detected // unit_layers
+        remainder = total_detected - repeats * unit_layers
+        full = {k: v * repeats for k, v in expected_ratio.items()}
+        order = list(expected_ratio.keys())
+        wanted_options = [full] if remainder == 0 else [
+            {
+                k: full.get(k, 0) + sum(
+                    1 for offset in range(remainder)
+                    if order[(start + offset) % len(order)] == k
+                )
+                for k in set(full) | set(order)
+            }
+            for start in range(len(order))
+        ]
+        if detected not in wanted_options:
+            wanted_repr = (
+                full if remainder == 0
+                else f"{full} plus a {remainder}-layer trailing remainder"
+            )
             raise SystemExit(
                 "taxonomy-derived variant markers do not reproduce the declared "
-                f"repeating unit: detected {detected}, expected {wanted} "
+                f"repeating unit: detected {detected}, expected {wanted_repr} "
                 f"({repeats}x {expected_ratio}). The markers were parsed from prose "
                 "evidence and are unreliable, or the taxonomy belongs to a different "
                 "capture than this trace. Pass --variant-marker NAME=SUBSTRING "
