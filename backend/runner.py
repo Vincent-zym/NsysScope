@@ -1590,13 +1590,24 @@ Requirements:
         for directory in (csv_dir, xlsx_dir, trace_dir, metadata_dir):
             directory.mkdir(exist_ok=True)
 
+        # When the agent already wrote its tables into result_dir/"csv" (a common,
+        # valid layout -- see find_package), package_dir *is* csv_dir. shutil.move
+        # of a path onto itself is a silent no-op, so the loop below would leave
+        # every canonical table sitting in csv_dir, and the "extra csv" sweep that
+        # follows would then treat all seven as leftovers and move them into
+        # metadata_dir, emptying csv_dir entirely. Skip the move in that case --
+        # the files are already exactly where they belong.
+        already_in_place = package_dir.resolve() == csv_dir.resolve()
         csv_files = []
         for suffix in CSV_SUFFIXES:
             source = package_dir / f"{prefix}{suffix}"
             target = csv_dir / source.name
-            shutil.move(str(source), target)
+            if not already_in_place:
+                shutil.move(str(source), target)
             csv_files.append(target.name)
         for source_dir in dict.fromkeys((package_dir, result_dir)):
+            if source_dir.resolve() == csv_dir.resolve():
+                continue
             for extra_csv in source_dir.glob("*.csv"):
                 shutil.move(str(extra_csv), metadata_dir / extra_csv.name)
 

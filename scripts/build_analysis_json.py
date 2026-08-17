@@ -345,6 +345,7 @@ def parallel_config(metadata_root: Path) -> dict[str, int]:
         "TP": r"(?:tp|tensor[-_]parallel)[-_]size",
         "DP": r"(?:dp|data[-_]parallel)[-_]size",
         "EP": r"(?:ep|moe[-_]ep|expert[-_]parallel)[-_]size",
+        "DCP": r"dcp[-_]size",
     }
     assignments = shell_assignments(text)
     out: dict[str, int] = {}

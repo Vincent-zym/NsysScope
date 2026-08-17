@@ -330,3 +330,88 @@ def test_pipeline_rank_is_chosen_by_variant_mix(tmp_path: Path):
     assert manifest["device_candidates"][0] == 0
     assert manifest["gpu_count"] == len(RANK_PATTERNS)
     assert "device 0" in manifest["layer_shard_note"]
+
+
+def test_dcp_sendrecv_is_not_read_as_pipeline_sharding(tmp_path: Path):
+    # kimi3_decode_analysis_0817_1/_2: dp2 tp16 dcp8, no --pp-size anywhere. DCP's
+    # intra-layer all-to-all also emits SendRecv, once per MLA-variant layer -- the
+    # exact count of the MLA core kernel -- so layer_shard_note used to misfire "PP
+    # layer sharding" on a deployment that has no pipeline parallelism at all.
+    trace = tmp_path / "trace.sqlite"
+    fabricate_trace(trace)
+    con = sqlite3.connect(trace)
+    device = 0
+    mla_count = con.execute(
+        "select count(*) from CUPTI_ACTIVITY_KIND_KERNEL k "
+        "join StringIds s on s.id = k.shortName "
+        "where k.deviceId = ? and s.value = 'mla_core'", (device,),
+    ).fetchone()[0]
+    names = {row[1]: row[0] for row in con.execute("select id, value from StringIds")}
+
+    def name_id(value: str) -> int:
+        if value not in names:
+            new_id = max(names.values(), default=0) + 1
+            names[value] = new_id
+            con.execute("insert into StringIds values (?, ?)", (new_id, value))
+        return names[value]
+
+    cursor = con.execute("select max(end) from CUPTI_ACTIVITY_KIND_KERNEL").fetchone()[0]
+    # One DCP-style SendRecv per MLA-variant layer, same as the real trace.
+    rows = [
+        (cursor + i * US, cursor + (i + 1) * US, device, name_id("ncclDevKernel_SendRecv"), 1, None, 7)
+        for i in range(mla_count)
+    ]
+    con.executemany(
+        "insert into CUPTI_ACTIVITY_KIND_KERNEL values (?, ?, ?, ?, ?, ?, ?)", rows,
+    )
+    con.commit()
+    con.close()
+
+    _, manifest = build(tmp_path, "--device", str(device))
+    assert manifest["layer_shard_note"] is None
+
+
+def test_pp_sendrecv_unrelated_to_any_variant_count_still_warns(tmp_path: Path):
+    # A real pipeline handoff's SendRecv count tracks the token/step count, not any
+    # one variant's layer count -- so when it can't be attributed to a variant's
+    # core-kernel count, the shard warning must still fire. layer_shard_note's first
+    # guard is gpus <= 1, so this needs the multi-device fixture, not fabricate_trace.
+    fabricate_server_trace(tmp_path / "trace.sqlite")
+    con = sqlite3.connect(tmp_path / "trace.sqlite")
+    device = 0
+    names = {row[1]: row[0] for row in con.execute("select id, value from StringIds")}
+
+    def name_id(value: str) -> int:
+        if value not in names:
+            new_id = max(names.values(), default=0) + 1
+            names[value] = new_id
+            con.execute("insert into StringIds values (?, ?)", (new_id, value))
+        return names[value]
+
+    cursor = con.execute(
+        "select max(end) from CUPTI_ACTIVITY_KIND_KERNEL where deviceId = ?", (device,),
+    ).fetchone()[0]
+    kda_count = con.execute(
+        "select count(*) from CUPTI_ACTIVITY_KIND_KERNEL k "
+        "join StringIds s on s.id = k.shortName "
+        "where k.deviceId = ? and s.value = 'kda_core'", (device,),
+    ).fetchone()[0]
+    mla_count = con.execute(
+        "select count(*) from CUPTI_ACTIVITY_KIND_KERNEL k "
+        "join StringIds s on s.id = k.shortName "
+        "where k.deviceId = ? and s.value = 'mla_core'", (device,),
+    ).fetchone()[0]
+    # A handoff count that matches neither variant's core-kernel count exactly.
+    mismatched_count = max(kda_count, mla_count) + 1
+    rows = [
+        (cursor + i * US, cursor + (i + 1) * US, device, name_id("ncclDevKernel_SendRecv"), 1, None, 7)
+        for i in range(mismatched_count)
+    ]
+    con.executemany(
+        "insert into CUPTI_ACTIVITY_KIND_KERNEL values (?, ?, ?, ?, ?, ?, ?)", rows,
+    )
+    con.commit()
+    con.close()
+
+    _, manifest = build_server(tmp_path, "--device", str(device), "--step-marker", "%lm_head_kernel%")
+    assert manifest["layer_shard_note"] is not None

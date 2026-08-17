@@ -855,13 +855,20 @@ def marks_repeating_unit(info: Dict[str, Any], cycles: Optional[float]) -> bool:
 
 def layer_shard_note(
     cur: sqlite3.Cursor, device: int, gpus: int, layers_per_step: int,
+    variant_cores: Optional[Dict[str, List[str]]] = None,
 ) -> Optional[str]:
-    """Warn when this device only carries part of the model's layers.
+    """Warn when this device only carries part of the model's layers (real PP only).
 
-    Point-to-point NCCL traffic (SendRecv) is the fingerprint of activations being
-    handed between devices, i.e. the layers are split across ranks. The table is then
-    written from one rank's viewpoint: the variant rows cover this rank's layers only,
-    not the whole model, even though the step period is the whole forward's.
+    Point-to-point NCCL traffic (SendRecv) used to be read as the fingerprint of
+    pipeline parallelism -- activations handed between devices -- but DCP (decode
+    context parallel) also issues SendRecv, once per attention-variant layer, for
+    an intra-layer all-to-all that has nothing to do with which ranks hold which
+    layers (sglang/srt/layers/dcp/comm.py). The two are distinguished by *what*
+    fires alongside the SendRecv: PP's handoff is unrelated to any specific layer
+    variant's core kernel, while DCP's SendRecv count matches one variant's core
+    kernel count exactly (one all-to-all per layer of that variant, every layer).
+    When every SendRecv can be attributed to a variant this way, this is DCP, not
+    a real per-rank layer split -- so no warning is warranted here.
     """
     if gpus <= 1 or layers_per_step <= 0:
         return None
@@ -873,6 +880,10 @@ def layer_shard_note(
     ).fetchone()[0]
     if not sendrecv:
         return None
+    if variant_cores:
+        core_counts = variant_core_counts(cur, device, variant_cores)
+        if sendrecv in core_counts.values():
+            return None
     return (
         f"层切分：本表为 device {device} 视角，层级行仅覆盖本卡承载的 {layers_per_step} 层"
         f"（共 {gpus} 卡），不是整模型；步耗时本身是整次 forward 的周期"
@@ -970,7 +981,7 @@ def analyse_device(
         default=0,
     )
     info["shard_note"] = layer_shard_note(
-        cur, device, device_count(cur), layers_per_step,
+        cur, device, device_count(cur), layers_per_step, variant_cores,
     )
     rows = build_rows(steps, info, args.gap_threshold_us, len(gap_holes))
 

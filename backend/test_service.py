@@ -383,6 +383,19 @@ def test_parallel_config_resolves_a_bare_variable_reference_chain(tmp_path: Path
     assert parallel_config(metadata_dir) == {"TP": 16, "DP": 2, "EP": 16}
 
 
+def test_parallel_config_recognizes_dcp_size(tmp_path: Path) -> None:
+    # d_start.sh also passes --dcp-size (decode context parallel), which the
+    # PP/TP/DP/EP-only flags dict used to silently drop.
+    metadata_dir = tmp_path / "metadata"
+    metadata_dir.mkdir()
+    launch = tmp_path / "launch.sh"
+    launch.write_text('--tp-size 16 --dcp-size 8\n', encoding="utf-8")
+    (metadata_dir / "context.json").write_text(
+        json.dumps({"launch_path": str(launch)}), encoding="utf-8",
+    )
+    assert parallel_config(metadata_dir) == {"TP": 16, "DCP": 8}
+
+
 def test_frontend_payload_repairs_legacy_semantic_operator_alias() -> None:
     raw = {
         "序号": "7",
