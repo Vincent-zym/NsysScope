@@ -349,6 +349,40 @@ def test_parallel_config_resolves_flags_set_from_earlier_variables(tmp_path: Pat
     assert parallel_config(metadata_dir) == {"TP": 4}
 
 
+def test_parallel_config_resolves_a_bare_variable_reference_chain(tmp_path: Path) -> None:
+    # d_start.sh (kimi3_decode_analysis_0817_1) goes one indirection further than
+    # p_start.sh: TP_SIZE is not its own $((...)) expression, it is a *bare*
+    # reference to another variable (TP_SIZE=$TOTAL_GPUS), and TOTAL_GPUS is
+    # itself combined with `export` on the same line
+    # (`export TOTAL_GPUS=$((NUM_NODES * GPUS_PER_NODE))`). Both of these silently
+    # produced {} before: resolve_shell_int only stripped the $((...)) wrapper, so
+    # a bare `$VAR` token kept its leading `$` and failed the numeric-only check,
+    # and shell_assignments' regex did not match a leading `export `.
+    metadata_dir = tmp_path / "metadata"
+    metadata_dir.mkdir()
+    launch = tmp_path / "launch.sh"
+    launch.write_text(
+        "NUM_NODES=2\n"
+        "GPUS_PER_NODE=8\n"
+        "export TOTAL_GPUS=$((NUM_NODES * GPUS_PER_NODE))\n"
+        "DP_SIZE=$NUM_NODES\n"
+        "export DP_SIZE\n"
+        "TP_SIZE=$TOTAL_GPUS\n"
+        "export TP_SIZE\n"
+        "EP_SIZE=$TOTAL_GPUS\n"
+        "export EP_SIZE\n"
+        "sglang serve \\\n"
+        '    --tp-size "$TP_SIZE" \\\n'
+        '    --dp-size "$DP_SIZE" \\\n'
+        '    --ep-size "$EP_SIZE"\n',
+        encoding="utf-8",
+    )
+    (metadata_dir / "context.json").write_text(
+        json.dumps({"launch_path": str(launch)}), encoding="utf-8",
+    )
+    assert parallel_config(metadata_dir) == {"TP": 16, "DP": 2, "EP": 16}
+
+
 def test_frontend_payload_repairs_legacy_semantic_operator_alias() -> None:
     raw = {
         "序号": "7",

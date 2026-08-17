@@ -161,6 +161,45 @@ def test_layer_breakdown_closes_and_counts_every_unit(tmp_path: Path):
     assert manifest["layer_shard_note"] is None
 
 
+def test_variant_ratio_tolerates_a_trailing_partial_unit(tmp_path: Path):
+    # kimi3_decode_analysis_0817_1: 93 real layers is not a multiple of the
+    # declared 4-layer KDA,KDA,KDA,MLA unit (93 = 23*4 + 1 trailing MLA layer).
+    # Strict equality against `expected_ratio * repeats` rejected every trace
+    # from this model outright; the check has to accept a partial trailing
+    # repeat that starts at any rotation of the pattern, not just position 0.
+    trace = tmp_path / "trace.sqlite"
+    fabricate_trace(trace)
+    con = sqlite3.connect(trace)
+    names = {row[1]: row[0] for row in con.execute("select id, value from StringIds")}
+    cursor = con.execute("select max(end) from CUPTI_ACTIVITY_KIND_KERNEL").fetchone()[0]
+
+    def name_id(value: str) -> int:
+        if value not in names:
+            new_id = max(names.values(), default=0) + 1
+            names[value] = new_id
+            con.execute("insert into StringIds values (?, ?)", (new_id, value))
+        return names[value]
+
+    # One extra trailing MLA layer appended after the fabricated STEPS forwards,
+    # mirroring a model whose layer count is one short of a whole number of units.
+    extra = [
+        (cursor, cursor + 2 * US, 0, name_id("attn_res_fused_tma_kernel"), 1, None, 7),
+        (cursor + 2 * US, cursor + 42 * US, 0, name_id("mla_core"), 1, None, 7),
+        (cursor + 42 * US, cursor + 44 * US, 0, name_id("attn_res_fused_tma_kernel"), 1, None, 7),
+    ]
+    con.executemany(
+        "insert into CUPTI_ACTIVITY_KIND_KERNEL values (?, ?, ?, ?, ?, ?, ?)", extra,
+    )
+    con.commit()
+    con.close()
+
+    table, manifest = build(tmp_path)
+    errors: list[str] = []
+    load_validator().validate_forward_pipeline(table, errors)
+    assert errors == []
+    assert manifest["layers_per_step"] == len(PATTERN) * UNITS_PER_STEP
+
+
 def test_chunk_size_is_carried_from_the_launch_command(tmp_path: Path):
     _, manifest = build(tmp_path, "--chunk-size", "4096")
     assert manifest["chunk_size"] == 4096
