@@ -325,6 +325,46 @@ def shell_assignments(text: str) -> dict[str, str]:
     return out
 
 
+def cluster_batch_size(
+    batch: int | None, gpus: int | None, metadata_root: Path,
+) -> int | None:
+    """This capture's total batch, accounting for how its GPUs are split.
+
+    ``gpus`` (this capture's GPU count, e.g. one node's worth) is not the same as
+    "how many independent batch replicas exist among those GPUs": TP/attn_tp and
+    DCP shard attention across GPUs without splitting the batch (every GPU still
+    sees the same requests, just a different head/KV slice), so multiplying by
+    ``gpus`` unconditionally double, triple, or 8x-counts a batch that is actually
+    shared.
+
+    The real multiplier is how many *data-parallel* replicas these GPUs are split
+    into. With dp-attention, SGLang lays ranks out as contiguous attn-TP blocks of
+    size S = tp_size // dp_size (compute_dp_attention_world_info in
+    srt/layers/dp_attention.py; verified against parallel_state.py's group
+    construction), and enforces tp_size % dp_size == 0 as a hard startup assertion
+    (server_args.py) -- so S always divides tp_size evenly; there is no config where
+    the division itself is ambiguous. What *can* go wrong is this capture's GPU
+    count not lining up with S -- e.g. a capture spanning part of one node and part
+    of another, or multi-node DP where tp_size_per_node < S -- in which case
+    ``gpus`` doesn't correspond to a whole number of replicas and this formula must
+    not guess.
+    """
+    if not batch or not gpus:
+        return None
+    parallel = parallel_config(metadata_root)
+    tp, dp = parallel.get("TP"), parallel.get("DP")
+    if not tp or not dp:
+        # No --tp-size/--dp-size found in the launch command.
+        return None
+    attn_tp_size = tp // dp
+    if attn_tp_size <= 0 or gpus % attn_tp_size:
+        # gpus doesn't hold a whole number of replicas -- most likely this capture
+        # covers only part of one replica (multi-node DP with tp_size_per_node < S).
+        return None
+    replicas = gpus // attn_tp_size
+    return batch * replicas
+
+
 def parallel_config(metadata_root: Path) -> dict[str, int]:
     """Parallelism degrees from the job's launch command (PP/TP/DP/EP)."""
     context_path = metadata_root / "context.json"
@@ -475,8 +515,7 @@ def build_forward_pipeline(
             "layersPerStep": info.get("layers_per_step"),
             "device": info.get("device"),
             "layerShardNote": info.get("layer_shard_note"),
-            # per-rank batch scaled by the GPUs this capture covers
-            "clusterBatchSize": batch * gpus if batch and gpus else None,
+            "clusterBatchSize": cluster_batch_size(batch, gpus, metadata_root),
             "speculativeTokens": info.get("speculative_tokens"),
             "stepCount": (info.get("step_marker") or {}).get("step_count"),
             "sampledSteps": info.get("sampled_steps"),
