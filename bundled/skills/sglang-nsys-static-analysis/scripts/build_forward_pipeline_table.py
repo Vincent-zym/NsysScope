@@ -91,6 +91,26 @@ def trace_fingerprint(path: str) -> Dict[str, Any]:
     }
 
 
+def graph_id_column(cur: sqlite3.Cursor) -> str:
+    """Name of the CUDA-graph id column on this capture's kernel table.
+
+    Older nsys/CUPTI exports call it ``graphNodeId``; newer ones renamed it to
+    ``graphId``. Both mean the same thing here (NULL outside a captured graph),
+    so probe the schema once instead of hard-coding either name.
+    """
+    columns = {row[1] for row in cur.execute(
+        "pragma table_info(CUPTI_ACTIVITY_KIND_KERNEL)"
+    )}
+    if "graphId" in columns:
+        return "graphId"
+    if "graphNodeId" in columns:
+        return "graphNodeId"
+    raise SystemExit(
+        "CUPTI_ACTIVITY_KIND_KERNEL has neither graphId nor graphNodeId; "
+        "cannot detect CUDA-graph capture boundaries"
+    )
+
+
 def device_count(cur: sqlite3.Cursor) -> int:
     """How many GPUs this capture covers, i.e. the node's visible device count.
 
@@ -249,10 +269,11 @@ def local_batch_size_from_eager_kernels(
     grid_cols = ", ".join(
         f"k.{axis}" if axis in columns else "1" for axis in ("gridX", "gridY", "gridZ")
     )
+    graph_col = graph_id_column(cur)
     rows = cur.execute(
         f"select s.value, {grid_cols} from CUPTI_ACTIVITY_KIND_KERNEL k "
         "join StringIds s on s.id = k.shortName "
-        "where k.deviceId = ? and k.graphId is null",
+        f"where k.deviceId = ? and k.{graph_col} is null",
         (device,),
     ).fetchall()
     if not rows or step_count <= 0:
@@ -324,8 +345,9 @@ def detect_markers(cur: sqlite3.Cursor, device: int, pattern: str) -> Dict[str, 
     two distinct gridX populations mean speculative decoding: the smaller one is the
     draft (batch * draft_block), the larger the target verify (batch * (draft_block+1)).
     """
+    graph_col = graph_id_column(cur)
     rows = cur.execute(
-        "select k.start, k.gridX, k.graphId from CUPTI_ACTIVITY_KIND_KERNEL k "
+        f"select k.start, k.gridX, k.{graph_col} from CUPTI_ACTIVITY_KIND_KERNEL k "
         "join StringIds s on s.id = k.shortName "
         "where k.deviceId = ? and s.value like ? order by k.start",
         (device, pattern),
@@ -337,7 +359,7 @@ def detect_markers(cur: sqlite3.Cursor, device: int, pattern: str) -> Dict[str, 
         auto = auto_step_marker(cur, device)
         pattern = auto["name"]
         rows = cur.execute(
-            "select k.start, k.gridX, k.graphId from CUPTI_ACTIVITY_KIND_KERNEL k "
+            f"select k.start, k.gridX, k.{graph_col} from CUPTI_ACTIVITY_KIND_KERNEL k "
             "join StringIds s on s.id = k.shortName "
             "where k.deviceId = ? and s.value = ? order by k.start",
             (device, pattern),
@@ -544,8 +566,9 @@ def segment_steps(
     gap_holes: List[Dict[str, Any]] = []
     for idx in window:
         a, a2 = starts[idx], starts[idx + 1]
+        graph_col = graph_id_column(cur)
         rows = cur.execute(
-            "select k.start, k.end, s.value, k.graphId "
+            f"select k.start, k.end, s.value, k.{graph_col} "
             "from CUPTI_ACTIVITY_KIND_KERNEL k join StringIds s on s.id = k.shortName "
             "where k.deviceId = ? and k.end > ? and k.start < ? order by k.start",
             (device, a, a2),
@@ -894,9 +917,30 @@ def expected_variant_ratio(tax: Dict[str, Any]) -> Dict[str, int]:
     return counts
 
 
+def excluded_layer_variant_counts(tax: Dict[str, Any]) -> Dict[str, int]:
+    """Per-variant marker count contributed by layers outside the repeating unit.
+
+    A head/tail exclusion (e.g. dense warmup layers before a periodic region
+    starts) is legitimate, but its layers still run in every forward and their
+    marker kernels still land in the trace's global count -- the same kernel
+    name does not know it is "excluded". Reading ``layer_variants`` (per-layer
+    type, straight from the config array the taxonomy cited) lets the totals
+    check below add this contribution back in, instead of assuming excluded
+    layers emit no markers at all -- see references/architecture-taxonomy.md
+    ("Machine-readable trace markers" / excluded_from_repeating_unit).
+    """
+    excluded = tax.get("excluded_from_repeating_unit") or {}
+    layer_variants = excluded.get("layer_variants") or {}
+    counts: Dict[str, int] = {}
+    for name in layer_variants.values():
+        if name:
+            counts[name] = counts.get(name, 0) + 1
+    return counts
+
+
 def markers_from_taxonomy(
     path: str,
-) -> Tuple[List[str], Dict[str, List[str]], Dict[str, int]]:
+) -> Tuple[List[str], Dict[str, List[str]], Dict[str, int], Dict[str, int]]:
     """Read the layer boundary and per-variant markers from a job's taxonomy.
 
     Prefers the machine-readable fields (``layer_start_kernel``,
@@ -928,7 +972,10 @@ def markers_from_taxonomy(
             tokens += kernel_tokens(str(item))
         if tokens:
             variants[name] = tokens
-    return boundaries, variants, expected_variant_ratio(tax)
+    return (
+        boundaries, variants, expected_variant_ratio(tax),
+        excluded_layer_variant_counts(tax),
+    )
 
 
 def unit_cycle_count(
@@ -1066,6 +1113,7 @@ def analyse_device(
     cur: sqlite3.Cursor, device: int, args: argparse.Namespace,
     variant_cores: Dict[str, List[str]], expected_ratio: Dict[str, int],
     marker_source: str, layer_boundary: str,
+    excluded_ratio: Optional[Dict[str, int]] = None,
 ) -> Dict[str, Any]:
     """Segment one device's timeline into forward steps and build the table rows."""
     info = detect_markers(cur, device, args.step_marker)
@@ -1109,39 +1157,54 @@ def analyse_device(
     # is the pattern's variant order (see expected_variant_ratio), so the remainder
     # is checked against every rotation of that order, since a real trailing partial
     # unit can start at any position within the pattern.
+    #
+    # A head/tail exclusion adds a *fixed* contribution on top of that: excluded
+    # layers still run every forward and their marker kernels still land in this
+    # global count (detect_markers counts by kernel name, not by layer id), so
+    # `excluded_ratio` (from the taxonomy's excluded_from_repeating_unit.layer_variants,
+    # see markers_from_taxonomy) is added once -- not per repeat -- before comparing.
     if marker_source == "taxonomy" and expected_ratio:
         detected: Dict[str, int] = {}
         for step in steps:
             for name, count in (step["target_children"].get("_counts") or {}).items():
                 detected[name] = max(detected.get(name, 0), count)
         detected = {k: v for k, v in detected.items() if v}
+        excluded_ratio = excluded_ratio or {}
         unit_layers = sum(expected_ratio.values()) or 1
         total_detected = sum(detected.values()) or 0
-        repeats = total_detected // unit_layers
-        remainder = total_detected - repeats * unit_layers
+        total_excluded = sum(excluded_ratio.values())
+        repeatable_total = max(total_detected - total_excluded, 0)
+        repeats = repeatable_total // unit_layers
+        remainder = repeatable_total - repeats * unit_layers
         full = {k: v * repeats for k, v in expected_ratio.items()}
         order = list(expected_ratio.keys())
-        wanted_options = [full] if remainder == 0 else [
+        wanted_options = [
             {
-                k: full.get(k, 0) + sum(
+                k: (full.get(k, 0) if remainder == 0 else full.get(k, 0) + sum(
                     1 for offset in range(remainder)
                     if order[(start + offset) % len(order)] == k
-                )
-                for k in set(full) | set(order)
+                )) + excluded_ratio.get(k, 0)
+                for k in set(full) | set(order) | set(excluded_ratio)
             }
-            for start in range(len(order))
+            for start in (range(len(order)) if remainder else [0])
         ]
         if detected not in wanted_options:
             wanted_repr = (
                 full if remainder == 0
                 else f"{full} plus a {remainder}-layer trailing remainder"
             )
+            excluded_note = (
+                f" plus {excluded_ratio} from excluded_from_repeating_unit.layer_variants"
+                if excluded_ratio else ""
+            )
             raise SystemExit(
                 "taxonomy-derived variant markers do not reproduce the declared "
-                f"repeating unit: detected {detected}, expected {wanted_repr} "
-                f"({repeats}x {expected_ratio}). The markers were parsed from prose "
-                "evidence and are unreliable, or the taxonomy belongs to a different "
-                "capture than this trace. Pass --variant-marker NAME=SUBSTRING "
+                f"repeating unit: detected {detected}, expected {wanted_repr}"
+                f"{excluded_note} ({repeats}x {expected_ratio}). The markers were "
+                "parsed from prose evidence and are unreliable, the taxonomy belongs "
+                "to a different capture than this trace, or excluded_from_repeating_unit"
+                ".layer_variants is missing/wrong for a head or tail layer that runs "
+                "a variant's marker kernel. Pass --variant-marker NAME=SUBSTRING "
                 "explicitly instead of publishing a mislabelled table."
             )
     return {
@@ -1162,8 +1225,11 @@ def main() -> None:
     layer_boundary = args.layer_boundary
     marker_source = "cli"
     expected_ratio: Dict[str, int] = {}
+    excluded_ratio: Dict[str, int] = {}
     if args.taxonomy and os.path.exists(args.taxonomy):
-        boundaries, tax_variants, expected_ratio = markers_from_taxonomy(args.taxonomy)
+        boundaries, tax_variants, expected_ratio, excluded_ratio = markers_from_taxonomy(
+            args.taxonomy,
+        )
         if not variant_cores and tax_variants:
             variant_cores = tax_variants
             marker_source = "taxonomy"
@@ -1179,7 +1245,7 @@ def main() -> None:
         try:
             result = analyse_device(
                 cur, device, args, variant_cores, expected_ratio, marker_source,
-                layer_boundary,
+                layer_boundary, excluded_ratio,
             )
             break
         except SystemExit as exc:

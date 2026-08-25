@@ -97,6 +97,38 @@ position by `layer_id`, a narrow `module_regex`, or explicit semantic-map fields
 Use `unit_id` for the concrete occurrence and `unit_variant` for the
 architecture-defined subtype.
 
+When layers are excluded from the repeating unit (a head or tail that does not
+fit the periodic pattern), add `excluded_from_repeating_unit.layer_variants`:
+a mapping from each excluded `layer_id` to the `unit_variant` name it would
+carry if it were still selected -- read straight from the same config arrays
+used to build `positions` (e.g. `indexer_types[layer_id]`,
+`mlp_layer_types[layer_id]`), never guessed from the periodic formula that
+produced the *included* positions. A head/tail exclusion is common when the
+model config declares dense or warmup layers before the periodic region
+starts (`first_k_dense_replace`, an explicit skip-topk offset, etc.) --
+excluding them from `positions` is correct, but the builder still needs their
+per-layer type to validate variant counts against the whole trace, which
+counts marker kernels globally, not just inside the selected positions.
+
+```json
+"excluded_from_repeating_unit": {
+  "layers": [0, 1, 2, 3, 4, 5],
+  "layer_variants": {
+    "0": "Variant-A", "1": "Variant-A", "2": "Variant-A",
+    "3": "Variant-B", "4": "Variant-B", "5": "Variant-B"
+  },
+  "reason": "prose explanation for humans"
+}
+```
+
+Omitting `layer_variants` when the config exposes an explicit per-layer array
+is a validation failure, not a stylistic choice: without it,
+`build_forward_pipeline_table.py` has no way to know whether the excluded
+layers also emit each variant's marker kernel, and a mismatch there is the
+most common cause of "taxonomy-derived variant markers do not reproduce the
+declared repeating unit" rejections that are actually taxonomy bugs, not
+trace problems.
+
 ## Machine-readable trace markers
 
 `repeating_unit.boundary_evidence.layer_start_kernel` and

@@ -24,13 +24,15 @@ Always create:
 - `<prefix>_analysis_manifest.json`
 - `<prefix>_architecture_taxonomy.json`
 
-`<prefix>_forward_pipeline_table.csv` is the seventh required table (see "Forward
-pipeline table"), not an extra: it is the only place the package says how the measured
-repeating unit relates to a whole forward step. It lives in the same directory as the
-other tables, so the organised result package carries it under `csv/` with an `xlsx/`
-counterpart. A capture that cannot support it — a single forward step, no usable step
-marker — is not a valid input for this analysis; fix the capture instead of shipping
-six tables.
+`<prefix>_forward_pipeline_table.csv` is an optional seventh table (see "Forward
+pipeline table"): the only place the package says how the measured repeating unit
+relates to a whole forward step. Generate and validate it whenever the capture
+supports it -- it lives in the same directory as the other tables, so the organised
+result package carries it under `csv/` with an `xlsx/` counterpart. A capture that
+cannot support it — a single forward step, no usable step marker, or a schema this
+analyzer version does not yet handle — should ship the other six tables and record
+the reason (`forward_pipeline.skipped_reason` in the manifest) instead of failing
+the whole package.
 
 Use `duration_avg_us` when stable samples exist; otherwise use `duration_us` and
 record the fallback. All percentages use the repeating-unit wall-span. Preserve

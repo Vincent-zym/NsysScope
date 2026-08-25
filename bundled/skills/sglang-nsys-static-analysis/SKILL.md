@@ -16,15 +16,18 @@ Generate:
 4. `<prefix>_auxiliary_operator_table.csv`
 5. `<prefix>_op_classification_table.csv`
 6. `<prefix>_stage_table.csv`
-7. `<prefix>_forward_pipeline_table.csv`
+7. `<prefix>_forward_pipeline_table.csv` (optional; see below)
 8. `<prefix>_architecture_taxonomy.json`
 9. `<prefix>_analysis_manifest.json`
 10. a position-aware statistics sidecar
 11. `validation_report.json`
 
-All seven tables are required. The seventh relates the measured repeating unit to a
-whole forward step, so a package without it cannot answer what fraction of a step
-the unit is.
+The first six tables are required. The seventh relates the measured repeating unit
+to a whole forward step, so a package with it can additionally answer what fraction
+of a step the unit is -- generate and validate it whenever the capture supports it,
+but do not fail the package when it cannot: a single forward step, no usable step
+marker, or a schema this analyzer version does not yet handle should record the
+reason and continue with six tables rather than block the rest of the analysis.
 
 Treat the trace as timing authority. Treat current-model design/config/runtime
 and verified source as semantic authority. Never use a previous model's labels

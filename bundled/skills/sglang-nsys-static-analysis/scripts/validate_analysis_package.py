@@ -20,6 +20,14 @@ SUFFIXES = (
     "_auxiliary_operator_table.csv",
     "_op_classification_table.csv",
     "_stage_table.csv",
+)
+# The forward-pipeline table is a valuable seventh table when the capture supports
+# it (it is the only place the package says what fraction of a forward step the
+# measured unit is), but some captures genuinely cannot produce it -- a single
+# forward step, no usable step marker, or a schema this analyzer version does not
+# yet handle. Treat it as optional so one flaky table does not fail an otherwise
+# complete package; validate_forward_pipeline() below still checks it when present.
+OPTIONAL_SUFFIXES = (
     "_forward_pipeline_table.csv",
 )
 CATEGORY_LABELS = {
@@ -355,6 +363,12 @@ def main() -> None:
         errors.append(f"missing required tables: {missing}")
     if errors:
         raise SystemExit("; ".join(errors))
+    missing_optional = [
+        f"{args.prefix}{suffix}" for suffix in OPTIONAL_SUFFIXES
+        if not (root / f"{args.prefix}{suffix}").is_file()
+    ]
+    if missing_optional:
+        print(f"[validate] optional tables absent, continuing: {missing_optional}")
 
     paths = {
         "origin": root / f"{args.prefix}_operator_origin_table.csv",

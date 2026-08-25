@@ -205,6 +205,139 @@ def test_chunk_size_is_carried_from_the_launch_command(tmp_path: Path):
     assert manifest["chunk_size"] == 4096
 
 
+def test_head_exclusion_contributes_a_fixed_extra_count(tmp_path: Path):
+    # glm52_community_prefill_analysis_0825: a head exclusion (layers 0-2 dense,
+    # 3-5 sparse-but-pre-cycle) that itself runs one variant's marker kernel is
+    # not the same shape as a trailing partial unit -- it is a *fixed* one-time
+    # addition on top of `repeats * expected_ratio`, not part of the remainder
+    # rotation. Declaring it via excluded_from_repeating_unit.layer_variants
+    # must let detected counts that include the head's markers pass.
+    trace = tmp_path / "trace.sqlite"
+    fabricate_trace(trace)
+    con = sqlite3.connect(trace)
+    names = {row[1]: row[0] for row in con.execute("select id, value from StringIds")}
+
+    def name_id(value: str) -> int:
+        if value not in names:
+            new_id = max(names.values(), default=0) + 1
+            names[value] = new_id
+            con.execute("insert into StringIds values (?, ?)", (new_id, value))
+        return names[value]
+
+    # One extra KDA-variant layer inserted right after each step marker, before
+    # the first regular layer boundary -- mirroring a head layer excluded from
+    # the repeating unit that still emits the KDA core marker every forward.
+    # `step_marker_kernel` fires once per forward at each step's start; anchor
+    # the extra layer just after it so it falls inside that step's window.
+    marker_starts = [
+        row[0] for row in con.execute(
+            "select k.start from CUPTI_ACTIVITY_KIND_KERNEL k "
+            "join StringIds s on s.id = k.shortName "
+            "where s.value = 'step_marker_kernel' order by k.start"
+        )
+    ]
+    extra = []
+    for marker_start in marker_starts:
+        head_start = marker_start + 6 * US
+        extra.append(
+            (head_start, head_start + 2 * US, 0, name_id("attn_res_fused_tma_kernel"), 1, None, 7),
+        )
+        extra.append(
+            (head_start + 2 * US, head_start + 4 * US, 0, name_id("kda_core"), 1, None, 7),
+        )
+    con.executemany(
+        "insert into CUPTI_ACTIVITY_KIND_KERNEL values (?, ?, ?, ?, ?, ?, ?)", extra,
+    )
+    con.commit()
+    con.close()
+
+    taxonomy_path = tmp_path / "taxonomy.json"
+    taxonomy_path.write_text(json.dumps({
+        "schema_version": "1.0",
+        "model": "SyntheticCycleModel",
+        "repeating_unit": {
+            "kind": "composite",
+            "boundary_evidence": {"layer_start_kernel": ["attn_res_fused_tma_kernel"]},
+            "positions": [
+                {"position": i + 1, "unit_id": f"layer.{i}", "unit_variant": variant}
+                for i, variant in enumerate(PATTERN)
+            ],
+        },
+        "variants": [
+            {"name": "KDA", "trace_marker_kernels": ["kda_core"]},
+            {"name": "MLA", "trace_marker_kernels": ["mla_core"]},
+        ],
+        "excluded_from_repeating_unit": {
+            "layers": [-1],
+            "layer_variants": {"-1": "KDA"},
+        },
+    }))
+    manifest_path = tmp_path / "manifest.json"
+    command = [
+        sys.executable, str(BUILDER),
+        "--sqlite", str(trace),
+        "--output-dir", str(tmp_path),
+        "--prefix", "synthetic",
+        "--device", "0",
+        "--taxonomy", str(taxonomy_path),
+        "--manifest-out", str(manifest_path),
+    ]
+    completed = subprocess.run(command, capture_output=True, text=True)
+    assert completed.returncode == 0, completed.stderr
+    payload = json.loads(manifest_path.read_text())["forward_pipeline"]
+    assert payload["variant_marker_source"] == "taxonomy"
+
+
+def test_head_exclusion_missing_layer_variants_still_rejects_wrong_counts(tmp_path: Path):
+    # The inverse of the above: without layer_variants, the extra head KDA
+    # marker has no accounted-for source, so the mismatch must still be caught
+    # rather than silently accepted as "close enough".
+    trace = tmp_path / "trace.sqlite"
+    fabricate_trace(trace)
+    con = sqlite3.connect(trace)
+    names = {row[1]: row[0] for row in con.execute("select id, value from StringIds")}
+    cursor = con.execute("select min(start) from CUPTI_ACTIVITY_KIND_KERNEL").fetchone()[0]
+
+    def name_id(value: str) -> int:
+        if value not in names:
+            new_id = max(names.values(), default=0) + 1
+            names[value] = new_id
+            con.execute("insert into StringIds values (?, ?)", (new_id, value))
+        return names[value]
+
+    extra = []
+    head_cursor = cursor - 60 * US
+    for _ in range(STEPS):
+        extra.append(
+            (head_cursor, head_cursor + 2 * US, 0, name_id("attn_res_fused_tma_kernel"), 1, None, 7),
+        )
+        extra.append(
+            (head_cursor + 2 * US, head_cursor + 42 * US, 0, name_id("kda_core"), 1, None, 7),
+        )
+        head_cursor += 45 * US
+    con.executemany(
+        "insert into CUPTI_ACTIVITY_KIND_KERNEL values (?, ?, ?, ?, ?, ?, ?)", extra,
+    )
+    con.commit()
+    con.close()
+
+    taxonomy_path = tmp_path / "taxonomy.json"
+    write_taxonomy(taxonomy_path)  # no excluded_from_repeating_unit at all
+    manifest_path = tmp_path / "manifest.json"
+    command = [
+        sys.executable, str(BUILDER),
+        "--sqlite", str(trace),
+        "--output-dir", str(tmp_path),
+        "--prefix", "synthetic",
+        "--device", "0",
+        "--taxonomy", str(taxonomy_path),
+        "--manifest-out", str(manifest_path),
+    ]
+    completed = subprocess.run(command, capture_output=True, text=True)
+    assert completed.returncode != 0
+    assert "do not reproduce the declared" in completed.stderr
+
+
 def test_gap_only_counts_holes_above_the_threshold(tmp_path: Path):
     # the fabricated hole between steps is 80us
     _, loose = build(tmp_path, "--gap-threshold-us", "50")
