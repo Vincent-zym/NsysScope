@@ -125,6 +125,33 @@ class JobRunner:
             if entry.is_file() and entry.name.startswith(prefix)
         )
 
+    @staticmethod
+    def has_popo_token(username: str) -> bool:
+        """Whether a cached ugate token already exists for this username."""
+        uuap_dir = Path.home() / ".config" / "uuap"
+        return (uuap_dir / f".eac_ugate_token_{username}").is_file()
+
+    @staticmethod
+    def save_popo_token(username: str, token: str) -> None:
+        """Cache a ugate token supplied through the web UI.
+
+        The bundled popo upload script (and the get-ugate-token CLI helper it
+        shares a cache format with) only knows how to prompt for this token in
+        a conversational agent session -- a standalone browser user has no such
+        session to answer in. Accepting the token straight from the publish
+        dialog and writing it in the same cache format lets the upload script
+        find it without ever needing that prompt.
+        """
+        token = token.strip()
+        if not token:
+            raise RuntimeError("token 不能为空")
+        uuap_dir = Path.home() / ".config" / "uuap"
+        uuap_dir.mkdir(parents=True, exist_ok=True)
+        cache_file = uuap_dir / f".eac_ugate_token_{username}"
+        cache_file.write_text(
+            json.dumps({"token": token, "permanent": True}), encoding="utf-8",
+        )
+
     def submit(self, job_id: str) -> None:
         self.pool.submit(self.run, job_id)
 
@@ -1309,19 +1336,27 @@ Requirements:
         self, job_id: str, job_dir: Path, package: Path, prefix: str,
         sqlite_path: Path, metadata_root: Path | None = None,
     ) -> None:
-        """Generate the required forward-pipeline table, the package's seventh table.
+        """Generate the optional forward-pipeline table, the package's seventh table.
 
-        Fails the job when generation fails: the table is the only place the package
-        relates the measured unit to a whole forward step, so a package without it is
-        incomplete rather than merely thinner.
+        It is the only place the package relates the measured unit to a whole
+        forward step, so it is worth having whenever the capture supports it -- but
+        some captures genuinely cannot produce it (a single forward step, no usable
+        step marker, a schema quirk the builder does not yet handle). Log and
+        continue instead of failing the whole job: the other six tables remain a
+        complete, valid package on their own, and the frontend already renders
+        without this module when it is absent (see app/page.js's optional-chained
+        forwardPipeline check).
         """
         script = self.settings.skill_dir / "scripts" / "build_forward_pipeline_table.py"
         if not script.exists():
-            raise RuntimeError(f"analysis Skill is missing the pipeline builder: {script}")
+            self.log(job_dir, f"[forward-pipeline] 跳过：缺少生成脚本 {script}")
+            return
         if not sqlite_path.exists():
-            raise RuntimeError(
-                f"forward 链路耗时表需要 trace，但 {sqlite_path} 不存在"
+            self.log(
+                job_dir,
+                f"[forward-pipeline] 跳过：forward 链路耗时表需要 trace，但 {sqlite_path} 不存在",
             )
+            return
         taxonomy = None
         metadata_dir = metadata_root or (job_dir / "metadata")
         metadata_dir.mkdir(parents=True, exist_ok=True)
@@ -1353,33 +1388,36 @@ Requirements:
         completed = subprocess.run(command, text=True, capture_output=True)
         if completed.returncode != 0:
             detail = (completed.stderr or completed.stdout or "").strip()[:1500]
-            self.log(job_dir, f"[forward-pipeline] 生成 forward 链路耗时表失败：{detail}")
-            raise RuntimeError(f"forward 链路耗时表生成失败：{detail}")
+            self.log(job_dir, f"[forward-pipeline] 生成 forward 链路耗时表失败，跳过（不影响任务其余产出）：{detail}")
+            return
         if completed.stdout:
             self.log(job_dir, f"[forward-pipeline] {completed.stdout.strip()}")
         table = package / f"{prefix}{FORWARD_PIPELINE_SUFFIX}"
         if not table.is_file():
-            raise RuntimeError(f"forward 链路耗时表未生成：{table}")
+            self.log(job_dir, f"[forward-pipeline] 跳过：生成脚本未产出 {table}")
 
     def ensure_forward_pipeline(
         self, job_id: str, job_dir: Path, package: Path, prefix: str,
         sqlite_path: Path | None, metadata_root: Path | None = None,
     ) -> None:
-        """Guarantee the seventh table is in the package, regenerating it when possible.
+        """Regenerate the optional seventh table from the trace when possible.
 
-        An imported package may already ship the table without shipping a trace, and a
-        package produced before the table existed can still be completed as long as the
-        trace is available.
+        An imported package may already ship the table without shipping a trace, and
+        a package produced before the table existed can still be completed as long as
+        the trace is available. When neither holds, the package simply ships without
+        it -- this table is a bonus view, not a gate on task success.
         """
         table = package / f"{prefix}{FORWARD_PIPELINE_SUFFIX}"
+        if table.is_file():
+            return
         if sqlite_path is not None and sqlite_path.is_file():
             self.build_forward_pipeline(
                 job_id, job_dir, package, prefix, sqlite_path, metadata_root,
             )
         if not table.is_file():
-            raise RuntimeError(
-                f"缺少必需的 forward 链路耗时表 {table.name}：包内没有这张表，"
-                "也没有可用的 trace 来生成它"
+            self.log(
+                job_dir,
+                f"[forward-pipeline] 跳过：包内没有 {table.name}，也没有可用的 trace 来生成它",
             )
 
     @staticmethod
@@ -1727,15 +1765,23 @@ Requirements:
         if completed.returncode:
             raise RuntimeError(f"analysis package validation failed: {completed.stdout.strip()}")
 
-    def publish_to_popo(self, job_id: str, job_dir: Path, username: str) -> str:
+    def publish_to_popo(
+        self, job_id: str, job_dir: Path, username: str, token: str | None = None,
+    ) -> str:
         analysis_path = job_dir / "analysis.json"
         if not analysis_path.is_file():
             raise RuntimeError("analysis.json is missing; cannot publish")
+        if token:
+            self.save_popo_token(username, token)
         return self._publish_analysis_bytes(
             analysis_path.read_bytes(), slug=f"nsysscope-{job_id}", username=username,
         )
 
-    def publish_analysis_payload(self, analysis: dict, username: str) -> str:
+    def publish_analysis_payload(
+        self, analysis: dict, username: str, token: str | None = None,
+    ) -> str:
+        if token:
+            self.save_popo_token(username, token)
         payload_bytes = json.dumps(analysis, ensure_ascii=False).encode("utf-8")
         slug = f"nsysscope-{secrets.token_hex(8)}"
         return self._publish_analysis_bytes(payload_bytes, slug=slug, username=username)
