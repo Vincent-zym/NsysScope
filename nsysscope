@@ -64,6 +64,49 @@ raise SystemExit(f"no free port in {start}..{start + 99}")
 PY
 }
 
+try_install_node() {
+  if command -v node >/dev/null 2>&1; then
+    return 0
+  fi
+  printf '    检测到缺少 Node.js，尝试自动安装...\n'
+  local installed=1
+  if command -v apt-get >/dev/null 2>&1; then
+    if [[ "$(id -u)" -eq 0 ]]; then
+      apt-get update -qq && apt-get install -y -qq nodejs npm
+    elif command -v sudo >/dev/null 2>&1; then
+      sudo apt-get update -qq && sudo apt-get install -y -qq nodejs npm
+    else
+      return 1
+    fi
+    installed=$?
+  elif command -v dnf >/dev/null 2>&1; then
+    if [[ "$(id -u)" -eq 0 ]]; then
+      dnf install -y -q nodejs npm
+    elif command -v sudo >/dev/null 2>&1; then
+      sudo dnf install -y -q nodejs npm
+    else
+      return 1
+    fi
+    installed=$?
+  elif command -v yum >/dev/null 2>&1; then
+    if [[ "$(id -u)" -eq 0 ]]; then
+      yum install -y -q nodejs npm
+    elif command -v sudo >/dev/null 2>&1; then
+      sudo yum install -y -q nodejs npm
+    else
+      return 1
+    fi
+    installed=$?
+  else
+    return 1
+  fi
+  if [[ "$installed" -eq 0 ]] && command -v node >/dev/null 2>&1; then
+    printf '    ✓ Node.js 安装成功: %s\n' "$(command -v node)"
+    return 0
+  fi
+  return 1
+}
+
 discover_zulu() {
   if [[ -n "$COMATE_BIN" ]] && [[ -x "$COMATE_BIN" ]]; then
     printf '%s\n' "$COMATE_BIN"
@@ -130,6 +173,29 @@ doctor() {
     elif [[ "$comate_status" == *"未登录"* ]] || [[ "$comate_status" == *"not logged"* ]]; then
       printf '  △ Comate Zulu 已安装但尚未登录\n'
       printf '    运行: ./nsysscope login comate\n'
+    elif [[ "$comate_status" == *"env: "*"node"*"No such file or directory"* ]]; then
+      printf '  △ Comate Zulu 需要 Node.js 运行时，但未检测到 node\n'
+      if try_install_node; then
+        set +e
+        comate_status="$(run_comate_cli status 2>&1)"
+        comate_status_code=$?
+        set -e
+        if [[ "$comate_status_code" -eq 0 ]] \
+          && [[ "$comate_status" != *"未登录"* ]] \
+          && [[ "$comate_status" != *"not logged"* ]]; then
+          printf '  ✓ Comate Zulu 已登录\n'
+          provider_ready=1
+        elif [[ "$comate_status" == *"未登录"* ]] || [[ "$comate_status" == *"not logged"* ]]; then
+          printf '  △ Comate Zulu 已安装但尚未登录\n'
+          printf '    运行: ./nsysscope login comate\n'
+        else
+          printf '  △ Node.js 已安装，但 Comate Zulu 状态检查仍失败\n'
+          [[ -z "$comate_status" ]] || printf '    %s\n' "$comate_status"
+        fi
+      else
+        printf '    请手动安装 Node.js 后重新运行: ./nsysscope doctor\n'
+        printf '    Debian/Ubuntu: sudo apt install -y nodejs npm\n'
+      fi
     else
       printf '  △ Comate Zulu 状态检查失败\n'
       [[ -z "$comate_status" ]] || printf '    %s\n' "$comate_status"
@@ -207,7 +273,7 @@ start() {
     NSYSSCOPE_COMATE_BIN="$COMATE_BIN" \
     NSYSSCOPE_COMATE_PLATFORM="$COMATE_PLATFORM" \
     NSYSSCOPE_CORS_ORIGINS="http://127.0.0.1:$ui_port,http://localhost:$ui_port" \
-    NSYSSCOPE_MAX_WORKERS="${NSYSSCOPE_MAX_WORKERS:-1}" \
+    NSYSSCOPE_MAX_WORKERS="${NSYSSCOPE_MAX_WORKERS:-2}" \
     NSYSSCOPE_SKILL_DIR="$SKILL_DIR" \
     "$VENV_DIR/bin/uvicorn" backend.app:app \
       --host 127.0.0.1 --port "$ui_port" \
@@ -235,6 +301,7 @@ start() {
   say "启动完成"
   printf '  页面地址:  http://127.0.0.1:%s\n' "$ui_port"
   printf '  物料范围:  %s\n' "$ALLOWED_ROOTS"
+  printf '  最大任务并发数: %s\n' "${NSYSSCOPE_MAX_WORKERS:-2}"
   if [[ "$DATA_DIR_OWNED" == true ]]; then
     printf '  任务状态:  %s（停止后自动清理）\n' "$DATA_DIR"
   else

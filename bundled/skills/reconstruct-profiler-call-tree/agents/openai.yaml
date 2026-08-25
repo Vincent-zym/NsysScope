@@ -1,0 +1,4 @@
+interface:
+  display_name: "Reconstruct Profiler Call Tree"
+  short_description: "Map profiler kernels through layers to source"
+  default_prompt: "Use $reconstruct-profiler-call-tree to map this trace from model layers through Python calls to CUDA kernels and source."

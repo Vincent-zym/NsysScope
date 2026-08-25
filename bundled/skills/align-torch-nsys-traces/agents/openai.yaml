@@ -1,0 +1,4 @@
+interface:
+  display_name: "Align Torch and NSYS Traces"
+  short_description: "Align PyTorch and NSYS launches across layers"
+  default_prompt: "Use $align-torch-nsys-traces to align this PyTorch trace with this Nsight Systems report."

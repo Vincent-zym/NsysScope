@@ -1,0 +1,101 @@
+{
+  "schema_version": 1,
+  "notes": "Data-driven model profile registry. Add new model families here when only anchor kernels, layer block structure, category rules, simplify rules, or config auto-inference conditions change. Keep SKILL.md workflow unchanged.",
+  "universal_category_rules": [
+    {"label": "● NCCL AllReduce", "key": "allreduce", "match": "contains", "pattern": "AllReduce"},
+    {"label": "  RMSNorm", "key": "rmsnorm", "match": "contains_any", "patterns": ["RMSNorm", "rms_normalize"]},
+    {"label": "  FP8 Quant", "key": "quant", "match": "lower_contains_any", "patterns": ["quant"]},
+    {"label": "  TopK", "key": "topk", "match": "lower_contains", "pattern": "topk"},
+    {"label": "  GEMM fp8", "key": "gemm_fp8", "match": "contains", "pattern": "deep_gemm"},
+    {"label": "  GEMM bf16", "key": "gemm_bf16", "match": "contains", "pattern": "nvjet"},
+    {"label": "  GEMM f32", "key": "gemm_f32", "match": "contains", "pattern": "sm80_xmma"},
+    {"label": "  Activation", "key": "activation", "match": "contains_any", "patterns": ["silu_mul_clamp", "act_and_mul"]},
+    {"label": "  RadixSort", "key": "radixsort", "match": "lower_contains_any", "patterns": ["radix_sort", "radixsort"]}
+  ],
+  "universal_simplify_rules": [
+    ["void (anonymous namespace)::", ""],
+    ["void at::native::", ""],
+    ["void flashinfer::", ""],
+    ["void deep_gemm::sm90_fp8_gemm_1d2d_impl", "deep_gemm::sm90_fp8_gemm_1d2d"],
+    ["void fast_hadamard_transform_kernel", "fast_hadamard_transform_kernel"],
+    ["void per_token_group_quant_8bit_kernel", "per_token_group_quant_8bit_kernel"],
+    ["ncclDevKernel_AllReduce_Sum_bf16_RING_LL(ncclDevKernelArgsStorage<4096ul>)", "ncclAllReduce_bf16_RING_LL"],
+    ["norm::RMSNormKernel", "RMSNormKernel"]
+  ],
+  "profiles": [
+    {
+      "name": "dsv4_csa_hca",
+      "anchor_kernel": "mhc_post_tilelang",
+      "blocks_per_layer": 2,
+      "half_labels": ["attn", "ffn"],
+      "default_num_layers": 43,
+      "include_universal": true,
+      "auto_infer": [{"field": "compress_ratios", "op": "non_empty"}],
+      "category_rules": [
+        {"label": "★ MLA Attention", "key": "mla", "match": "contains", "pattern": "flash_fwd_splitkv_mla"},
+        {"label": "★ MoE Fused", "key": "moe", "match": "contains", "pattern": "fused_moe_kernel"},
+        {"label": "  Hadamard Xform", "key": "hadamard", "match": "lower_contains", "pattern": "hadamard"},
+        {"label": "  Indexer Cache", "key": "indexer", "match": "lower_contains", "pattern": "indexer"},
+        {"label": "  Paged MQA", "key": "paged_mqa", "match": "contains", "pattern": "paged_mqa_logits"},
+        {"label": "  MLA Metadata", "key": "mla_metadata", "match": "contains", "pattern": "get_mla_metadata"},
+        {"label": "  C4 Prefill", "key": "c4_prefill", "match": "contains", "pattern": "c4_prefill"},
+        {"label": "  C128 Prefill", "key": "c128_prefill", "match": "contains", "pattern": "c128_prefill"},
+        {"label": "  RoPE", "key": "rope", "match": "contains_any", "patterns": ["deepseek_rope", "fused_norm_rope"]},
+        {"label": "  MHC Pre GEMM", "key": "mhc_pre_gemm", "match": "contains", "pattern": "mhc_pre_gemm_sqrsum"},
+        {"label": "  MHC Pre Fuse", "key": "mhc_pre_fuse", "match": "contains", "pattern": "mhc_pre_big_fuse"},
+        {"label": "  MHC Post", "key": "mhc_post", "match": "contains", "pattern": "mhc_post_tilelang"},
+        {"label": "  MoE Gate", "key": "moe_gate", "match": "contains", "pattern": "moe_fused_gate"},
+        {"label": "  MoE Align", "key": "moe_align", "match": "contains", "pattern": "moe_align_block"},
+        {"label": "  MoE Sort", "key": "moe_sort", "match": "contains", "pattern": "count_and_sort"},
+        {"label": "  MLA Cache Store", "key": "mla_cache_store", "match": "contains", "pattern": "fused_store_flashmla_cache"},
+        {"label": "  Indexer Store", "key": "indexer_store", "match": "contains", "pattern": "fused_store_indexer_cache"}
+      ],
+      "simplify_rules": [
+        ["void deep_gemm::sm90_fp8_paged_mqa_logits", "deep_gemm::sm90_fp8_paged_mqa_logits"],
+        ["void deep_gemm::sched::smxx_paged_mqa_logits_metadata", "deep_gemm::paged_mqa_logits_metadata"],
+        ["void sm90::decode::sparse_fp8::flash_fwd_splitkv_mla_fp8_sparse_kernel", "flash_fwd_splitkv_mla_fp8_sparse"],
+        ["void smxx::decode::flash_fwd_mla_combine_kernel", "flash_fwd_mla_combine"],
+        ["void smxx::decode::get_mla_metadata_kernel", "get_mla_metadata"],
+        ["mhc_pre_gemm_sqrsum_tilelang_kernel", "mhc_pre_gemm_sqrsum"],
+        ["mhc_post_tilelang_kernel", "mhc_post_tilelang"],
+        ["mhc_pre_big_fuse_tilelang_kernel", "mhc_pre_big_fuse"],
+        ["fused_moe_kernel", "fused_moe_kernel"]
+      ]
+    },
+    {
+      "name": "dsv3_mla",
+      "anchor_kernel": "flash_fwd_mla_combine",
+      "blocks_per_layer": 1,
+      "half_labels": ["full"],
+      "default_num_layers": 61,
+      "include_universal": true,
+      "auto_infer": [{"field": "kv_lora_rank", "op": "gt", "value": 0}],
+      "category_rules": [
+        {"label": "★ MLA Attention", "key": "mla", "match": "contains", "pattern": "flash_fwd_splitkv_mla"},
+        {"label": "★ MoE Fused", "key": "moe", "match": "contains", "pattern": "fused_moe_kernel"},
+        {"label": "  MLA Metadata", "key": "mla_metadata", "match": "contains", "pattern": "get_mla_metadata"},
+        {"label": "  MLA Combine", "key": "mla_combine", "match": "contains", "pattern": "flash_fwd_mla_combine"},
+        {"label": "  RoPE", "key": "rope", "match": "contains_any", "patterns": ["deepseek_rope", "fused_norm_rope"]},
+        {"label": "  MoE Gate", "key": "moe_gate", "match": "contains", "pattern": "moe_fused_gate"},
+        {"label": "  MoE Align", "key": "moe_align", "match": "contains", "pattern": "moe_align_block"},
+        {"label": "  MoE Sort", "key": "moe_sort", "match": "contains", "pattern": "count_and_sort"},
+        {"label": "  MLA Cache Store", "key": "mla_cache_store", "match": "contains", "pattern": "fused_store_flashmla_cache"}
+      ],
+      "simplify_rules": [
+        ["void sm90::decode::sparse_fp8::flash_fwd_splitkv_mla_fp8_sparse_kernel", "flash_fwd_splitkv_mla_fp8_sparse"],
+        ["void smxx::decode::flash_fwd_mla_combine_kernel", "flash_fwd_mla_combine"],
+        ["void smxx::decode::get_mla_metadata_kernel", "get_mla_metadata"],
+        ["fused_moe_kernel", "fused_moe_kernel"]
+      ]
+    },
+    {
+      "name": "generic",
+      "anchor_kernel": null,
+      "blocks_per_layer": 1,
+      "half_labels": ["full"],
+      "default_num_layers": 1,
+      "include_universal": true,
+      "auto_infer": []
+    }
+  ]
+}
