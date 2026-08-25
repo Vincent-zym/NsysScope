@@ -4,6 +4,8 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from .models import BUILTIN_MODEL_CONFIGS
+
 
 def _paths(value: str) -> tuple[Path, ...]:
     return tuple(Path(item).expanduser().resolve() for item in value.split(":") if item)
@@ -49,6 +51,7 @@ class Settings:
     subprocess_timeout_seconds: int
     popo_username: str
     popo_upload_script: Path
+    builtin_model_configs: dict[str, Path]
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -75,7 +78,7 @@ class Settings:
                     "https://nsysscope-perf.z-yuanming.chatgpt.site",
                 ).split(",") if item.strip()
             ),
-            max_workers=max(1, int(os.getenv("NSYSSCOPE_MAX_WORKERS", "1"))),
+            max_workers=max(1, int(os.getenv("NSYSSCOPE_MAX_WORKERS", "2"))),
             codex_enabled=os.getenv("NSYSSCOPE_CODEX_ENABLED", "false").lower() == "true",
             codex_bin=os.getenv("NSYSSCOPE_CODEX_BIN", "codex"),
             comate_enabled=os.getenv(
@@ -138,6 +141,7 @@ class Settings:
                 "NSYSSCOPE_POPO_UPLOAD_SCRIPT",
                 "/root/.comate/skills/.system/popo/scripts/upload.py",
             )).expanduser(),
+            builtin_model_configs=dict(BUILTIN_MODEL_CONFIGS),
         )
 
     def prepare(self) -> None:

@@ -227,6 +227,7 @@ tbody tr.selected { background: rgba(92,129,220,.12); box-shadow: inset 3px 0 #6
 .form-grid input, .form-grid select, .form-grid textarea { width: 100%; border: 1px solid #293241; border-radius: 8px; background: #0b0f15; color: #d7dfeb; outline: none; padding: 10px 11px; font-size: 12px; }
 .form-grid textarea { min-height: 88px; resize: vertical; line-height: 1.55; }
 .form-grid label > small { color: #78869b; font-size: 11px; line-height: 1.5; letter-spacing: 0; }
+.form-grid label > em { color: #6fbf73; font-size: 10px; font-style: normal; font-weight: 500; }
 .form-grid input:focus, .form-grid select:focus, .form-grid textarea:focus { border-color: #4a6bc8; box-shadow: 0 0 0 2px rgba(74,107,200,.12); }
 .field-title { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .field-title em { color: #75a7ff; font-size: 10px; font-style: normal; letter-spacing: 0; }
@@ -306,7 +307,9 @@ tbody tr.selected { background: rgba(92,129,220,.12); box-shadow: inset 3px 0 #6
 .publish-account-list button:hover { border-color: #4365ba; color: #e5ecff; }
 .publish-account-custom { display: block; margin-bottom: 18px; }
 .publish-account-custom span { display: block; margin-bottom: 6px; color: #6c8f91; font-size: 10px; }
-.publish-account-custom input { width: 100%; border: 1px solid #2c3544; border-radius: 8px; background: #0d1117; color: #d6dfec; padding: 9px 12px; font-size: 13px; }
+.publish-account-custom input, .publish-account-custom textarea { width: 100%; border: 1px solid #2c3544; border-radius: 8px; background: #0d1117; color: #d6dfec; padding: 9px 12px; font-size: 13px; font-family: inherit; resize: vertical; }
+.publish-token-hint { color: #9aa8bb; font-size: 12px; line-height: 1.6; margin-bottom: 14px; }
+.publish-token-hint a { color: #6ea8fe; }
 .job-progress { margin-top: 24px; }
 .job-status { display: grid; grid-template-columns: 90px 1fr 45px; align-items: center; }
 .job-status span { color: #7899f0; font: 9px ui-monospace, monospace; letter-spacing: .12em; }

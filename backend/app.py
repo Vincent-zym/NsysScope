@@ -85,6 +85,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "providers": runner.provider_status(),
             "auth_required": bool(settings.api_token),
             "max_workers": settings.max_workers,
+            "builtin_models": sorted(settings.builtin_model_configs),
         }
 
     @app.get("/api/providers/{provider}/models", dependencies=[Depends(authorize)])
@@ -259,15 +260,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if job["status"] != "succeeded":
             raise HTTPException(status_code=409, detail="only succeeded jobs can be published")
         try:
-            url = runner.publish_to_popo(job_id, Path(job["output_dir"]), request.username)
+            url = runner.publish_to_popo(
+                job_id, Path(job["output_dir"]), request.username, request.token,
+            )
         except RuntimeError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
         return view(store.update(job_id, popo_url=url))
 
+    @app.get("/api/popo/token-status", dependencies=[Depends(authorize)])
+    def popo_token_status(username: str = Query(..., min_length=1, max_length=120)) -> dict:
+        return {"has_token": runner.has_popo_token(username)}
+
     @app.post("/api/publish", dependencies=[Depends(authorize)])
     def publish_current(request: PublishRequest) -> dict:
         try:
-            url = runner.publish_analysis_payload(request.analysis, request.username)
+            url = runner.publish_analysis_payload(
+                request.analysis, request.username, request.token,
+            )
         except RuntimeError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
         return {"popo_url": url}

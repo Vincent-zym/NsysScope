@@ -308,6 +308,7 @@ function JobDialog({ open, onClose, onLoaded }) {
   const [token, setToken] = useState("");
   const [form, setForm] = useState({
     mode: "codex_skill", agent_provider: "codex", agent_model: "", model_name: "GLM5.2",
+    isCustomModel: false,
     stage: "prefill", hardware: "Nvidia B200",
     report_path: "", config_path: "", launch_path: "", source_path: "",
     design_path: "", existing_package_path: "", result_path: "",
@@ -319,7 +320,7 @@ function JobDialog({ open, onClose, onLoaded }) {
   const analysisLoaded = useRef(false);
   const [logHasMore, setLogHasMore] = useState(true);
   const [health, setHealth] = useState({
-    state: "checking", message: "正在连接本地 Analyzer…", providers: null,
+    state: "checking", message: "正在连接本地 Analyzer…", providers: null, builtinModels: [],
   });
   const [modelCatalog, setModelCatalog] = useState({
     state: "idle", default_model: "", models: [], message: "",
@@ -416,6 +417,7 @@ function JobDialog({ open, onClose, onLoaded }) {
             ? `可用 Provider：${ready.join("、")}`
             : "Analyzer 已连接，但没有可用的 Agent Provider",
           providers,
+          builtinModels: payload.builtin_models || [],
         });
       } catch (cause) {
         if (stopped || cause.name === "AbortError") return;
@@ -514,6 +516,18 @@ function JobDialog({ open, onClose, onLoaded }) {
   const setProvider = (event) => setForm({
     ...form, agent_provider: event.target.value, agent_model: "",
   });
+  const setModelName = (event) => {
+    const value = event.target.value;
+    setForm((current) => ({
+      ...current,
+      model_name: value === "__custom__" ? "" : value,
+      isCustomModel: value === "__custom__",
+    }));
+  };
+  const knownModels = health.builtinModels?.length
+    ? health.builtinModels
+    : ["GLM5.2", "DeepSeekV4", "Kimi-K3"];
+  const hasBuiltinConfig = !form.isCustomModel && knownModels.includes(form.model_name);
   const provider = health.providers?.[form.agent_provider];
   const importingPackage = form.mode === "existing_package";
   async function submit(event) {
@@ -527,6 +541,7 @@ function JobDialog({ open, onClose, onLoaded }) {
     sessionStorage.setItem("nsysscope.token", token);
     try {
       const payload = { ...form };
+      delete payload.isCustomModel;
       if (payload.mode === "existing_package") {
         payload.model_name ||= "Imported analysis";
         payload.hardware ||= "Unknown";
@@ -582,14 +597,14 @@ function JobDialog({ open, onClose, onLoaded }) {
   }
 
   async function publishJob() {
-    openPublishPrompt(async (username) => {
+    openPublishPrompt(async (username, popoToken) => {
       setError("");
       setPublishing(true);
       try {
         const response = await fetch(`${api}/api/jobs/${job.id}/publish`, {
           method: "POST",
           headers: { "X-NsysScope-Token": token, "Content-Type": "application/json" },
-          body: JSON.stringify({ username }),
+          body: JSON.stringify({ username, token: popoToken }),
         });
         const body = await response.json();
         if (!response.ok) throw new Error(body.detail || `发布失败 (${response.status})`);
@@ -612,7 +627,7 @@ function JobDialog({ open, onClose, onLoaded }) {
     } catch {
       accounts = [];
     }
-    setPublishPrompt({ accounts, custom: "", onConfirm });
+    setPublishPrompt({ accounts, custom: "", onConfirm, api, authToken: token });
   }
 
   return <div className="dialog-backdrop" onMouseDown={onClose}>
@@ -680,11 +695,14 @@ function JobDialog({ open, onClose, onLoaded }) {
             {modelCatalog.state === "error" && <div className="provider-warning span-2">模型列表读取失败，将使用 Provider 默认模型：{modelCatalog.message}</div>}
             {modelCatalog.state === "ready" && modelCatalog.models.length === 0 &&
               <div className="provider-warning span-2">Provider 已就绪，但没有返回可选模型；可点击“刷新”重试。</div>}
-          <label>模型<select required value={form.model_name} onChange={set("model_name")}>
+          <label>模型<select required={!form.isCustomModel} value={form.isCustomModel ? "__custom__" : form.model_name} onChange={setModelName}>
             <option value="GLM5.2">GLM5.2</option>
             <option value="DeepSeekV4">DeepSeekV4</option>
             <option value="Kimi-K3">Kimi-K3</option>
+            <option value="__custom__">自定义…</option>
           </select></label>
+          {form.isCustomModel &&
+            <label>自定义模型名<input required value={form.model_name} onChange={set("model_name")} placeholder="模型名称" /></label>}
           <label>硬件<select required value={form.hardware} onChange={set("hardware")}>
             <option value="Nvidia B200">Nvidia B200</option>
             <option value="Nvidia B300">Nvidia B300</option>
@@ -696,7 +714,7 @@ function JobDialog({ open, onClose, onLoaded }) {
             <p className="package-hint span-2">目录内有 analysis.json 时直接展示；只有六张规范 CSV 也能自动转换，不要求额外 sidecar。支持 csv/ 子目录和旧版平铺目录。</p>
           </> : <>
             <label className="span-2">Nsight 报告<input required value={form.report_path} onChange={set("report_path")} placeholder="/path/to/report.nsys-rep" /></label>
-            <label>Model config.json<input required value={form.config_path} onChange={set("config_path")} placeholder="/path/to/config.json" /></label>
+            <label>Model config.json{hasBuiltinConfig && <em className="builtin-hint">已内置，可留空</em>}<input required={!hasBuiltinConfig} value={form.config_path} onChange={set("config_path")} placeholder={hasBuiltinConfig ? "留空则使用内置 config.json" : "/path/to/config.json"} /></label>
             <label>部署 YAML / 脚本<input required value={form.launch_path} onChange={set("launch_path")} placeholder="/path/to/launch.yaml" /></label>
             <label className="span-2">模型源码根目录<input required value={form.source_path} onChange={set("source_path")} placeholder="/path/to/sglang/source" /></label>
             <label className="span-2">设计说明（可选）<input value={form.design_path} onChange={set("design_path")} placeholder="/path/to/design.md" /></label>
@@ -738,21 +756,100 @@ function JobDialog({ open, onClose, onLoaded }) {
 
 function PublishAccountPrompt({ prompt, onClose }) {
   const [custom, setCustom] = useState("");
-  useEffect(() => { if (prompt) setCustom(""); }, [prompt]);
+  const [selectedUsername, setSelectedUsername] = useState(null);
+  const [needsToken, setNeedsToken] = useState(false);
+  const [token, setToken] = useState("");
+  const [checkingToken, setCheckingToken] = useState(false);
+  const [tokenError, setTokenError] = useState("");
+  useEffect(() => {
+    if (prompt) {
+      setCustom("");
+      setSelectedUsername(null);
+      setNeedsToken(false);
+      setToken("");
+      setTokenError("");
+    }
+  }, [prompt]);
   if (!prompt) return null;
-  const { accounts, onConfirm } = prompt;
+  const { accounts, onConfirm, api = "", authToken = "" } = prompt;
+
+  async function chooseUsername(username) {
+    if (!username) return;
+    setSelectedUsername(username);
+    setTokenError("");
+    setCheckingToken(true);
+    try {
+      const response = await fetch(
+        `${api}/api/popo/token-status?username=${encodeURIComponent(username)}`,
+        { headers: authToken ? { "X-NsysScope-Token": authToken } : {} },
+      );
+      const body = response.ok ? await response.json() : { has_token: false };
+      if (body.has_token) {
+        onConfirm(username, null);
+        onClose();
+      } else {
+        setNeedsToken(true);
+      }
+    } catch {
+      // Network hiccup checking token status -- fall through to asking for
+      // one anyway; a supplied token is always safe to send, an unnecessary
+      // one is simply ignored server-side.
+      setNeedsToken(true);
+    } finally {
+      setCheckingToken(false);
+    }
+  }
+
   const confirmCustom = () => {
     const value = custom.trim();
     if (!value) return;
-    onConfirm(value);
+    chooseUsername(value);
+  };
+
+  const confirmWithToken = () => {
+    const value = token.trim();
+    if (!value) {
+      setTokenError("请粘贴 token 内容");
+      return;
+    }
+    onConfirm(selectedUsername, value);
     onClose();
   };
+
+  if (needsToken) {
+    return <div className="confirm-backdrop" onMouseDown={onClose}>
+      <div className="confirm-card publish-prompt" onMouseDown={(event) => event.stopPropagation()}>
+        <p>首次使用 popo 发布，需要一次性授权</p>
+        <p className="publish-token-hint">
+          请点击 <a href="https://uuap.baidu.com/agent/token" target="_blank" rel="noreferrer">
+            https://uuap.baidu.com/agent/token
+          </a> 获取 token，复制后粘贴到下方（之后无需再次输入）
+        </p>
+        <label className="publish-account-custom">
+          <span>Token</span>
+          <textarea
+            value={token}
+            onChange={(event) => { setToken(event.target.value); setTokenError(""); }}
+            placeholder="粘贴 token 内容"
+            rows={4}
+            autoFocus
+          />
+        </label>
+        {tokenError && <div className="error">{tokenError}</div>}
+        <div className="confirm-actions">
+          <button onClick={() => setNeedsToken(false)}>返回</button>
+          <button className="primary" onClick={confirmWithToken}>确定</button>
+        </div>
+      </div>
+    </div>;
+  }
+
   return <div className="confirm-backdrop" onMouseDown={onClose}>
     <div className="confirm-card publish-prompt" onMouseDown={(event) => event.stopPropagation()}>
       <p>发布到 popo 用哪个账号？</p>
       {accounts.length > 0 && <div className="publish-account-list">
         {accounts.map((account) => (
-          <button key={account} onClick={() => { onConfirm(account); onClose(); }}>{account}</button>
+          <button key={account} onClick={() => chooseUsername(account)} disabled={checkingToken}>{account}</button>
         ))}
       </div>}
       <label className="publish-account-custom">
@@ -763,11 +860,14 @@ function PublishAccountPrompt({ prompt, onClose }) {
           onKeyDown={(event) => { if (event.key === "Enter") confirmCustom(); }}
           placeholder="用户名"
           autoFocus={accounts.length === 0}
+          disabled={checkingToken}
         />
       </label>
       <div className="confirm-actions">
         <button onClick={onClose}>取消</button>
-        <button className="primary" onClick={confirmCustom}>确定</button>
+        <button className="primary" onClick={confirmCustom} disabled={checkingToken}>
+          {checkingToken ? "检查中…" : "确定"}
+        </button>
       </div>
     </div>
   </div>;
@@ -1056,14 +1156,14 @@ export default function Dashboard() {
 
   async function publishCurrent() {
     if (!data) return;
-    openPublishPrompt(async (username) => {
+    openPublishPrompt(async (username, token) => {
       setError("");
       setPublishing(true);
       try {
         const response = await fetch("/api/publish", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ username, analysis: data }),
+          body: JSON.stringify({ username, analysis: data, token: token || undefined }),
         });
         const body = await response.json();
         if (!response.ok) throw new Error(body.detail || `发布失败 (${response.status})`);
