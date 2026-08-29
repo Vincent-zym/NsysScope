@@ -312,6 +312,9 @@ function JobDialog({ open, onClose, onLoaded }) {
     stage: "prefill", hardware: "Nvidia B200",
     report_path: "", config_path: "", launch_path: "", source_path: "",
     design_path: "", existing_package_path: "", result_path: "",
+    // Table filename prefix. No longer user-facing: every job gets its own empty
+    // result directory so the tables can never collide, and imported packages
+    // fall back to the prefix detected on disk.
     prefix: "analysis", notes: "", enable_operator_advisor: false,
   });
   const [job, setJob] = useState(null);
@@ -659,7 +662,7 @@ function JobDialog({ open, onClose, onLoaded }) {
           </div>
         </details>
         <div className="form-grid">
-          <label>执行模式<select value={form.mode} onChange={set("mode")}><option value="codex_skill">Agent 静态分析</option><option value="existing_package">导入结果目录（无需 Agent）</option></select></label>
+          <label>执行模式<select value={form.mode} onChange={set("mode")}><option value="codex_skill">Agent 静态分析</option><option value="existing_package">导入分析结果（无需 Agent）</option></select></label>
           <label>阶段<select value={form.stage} onChange={set("stage")}><option value="prefill">Prefill</option><option value="decode">Decode</option></select></label>
           <label>Agent Provider<select value={form.agent_provider} onChange={setProvider}>
               <option value="codex" disabled={health.providers && !health.providers.codex?.ready}>Codex CLI{health.providers && !health.providers.codex?.ready ? "（未就绪）" : ""}</option>
@@ -688,39 +691,43 @@ function JobDialog({ open, onClose, onLoaded }) {
                   刷新
                 </button>
               </span>
-              {modelCatalog.state === "ready" && modelCatalog.models.length > 0 &&
-                <small>已从 {form.agent_provider === "codex" ? "Codex CLI" : "Comate Zulu"} 自动读取{importingPackage ? "（导入模式仅用于算子优化建议）" : ""}</small>}
+              {importingPackage && modelCatalog.state === "ready" && modelCatalog.models.length > 0 &&
+                <small>导入模式下仅用于算子优化建议</small>}
             </label>
             {provider && !provider.ready && <div className="provider-warning span-2">{provider.message}</div>}
             {modelCatalog.state === "error" && <div className="provider-warning span-2">模型列表读取失败，将使用 Provider 默认模型：{modelCatalog.message}</div>}
             {modelCatalog.state === "ready" && modelCatalog.models.length === 0 &&
               <div className="provider-warning span-2">Provider 已就绪，但没有返回可选模型；可点击“刷新”重试。</div>}
-          <label>模型<select required={!form.isCustomModel} value={form.isCustomModel ? "__custom__" : form.model_name} onChange={setModelName}>
-            <option value="GLM5.2">GLM5.2</option>
-            <option value="DeepSeekV4">DeepSeekV4</option>
-            <option value="Kimi-K3">Kimi-K3</option>
-            <option value="__custom__">自定义…</option>
-          </select></label>
-          {form.isCustomModel &&
-            <label>自定义模型名<input required value={form.model_name} onChange={set("model_name")} placeholder="模型名称" /></label>}
+          <label>模型
+            <span className={form.isCustomModel ? "model-custom-row" : undefined}>
+              <select value={form.isCustomModel ? "__custom__" : form.model_name} onChange={setModelName}>
+                <option value="GLM5.2">GLM5.2</option>
+                <option value="DeepSeekV4">DeepSeekV4</option>
+                <option value="Kimi-K3">Kimi-K3</option>
+                <option value="__custom__">自定义…</option>
+              </select>
+              {form.isCustomModel &&
+                <input required value={form.model_name} onChange={set("model_name")}
+                  placeholder="输入模型名称" aria-label="自定义模型名" />}
+            </span>
+          </label>
           <label>硬件<select required value={form.hardware} onChange={set("hardware")}>
             <option value="Nvidia B200">Nvidia B200</option>
             <option value="Nvidia B300">Nvidia B300</option>
           </select></label>
           {form.mode === "existing_package" ? <>
-            <label className="span-2">七表 / NsysScope 结果目录<input required value={form.existing_package_path} onChange={set("existing_package_path")} placeholder="/path/to/result-package" /></label>
+            <label className="span-2"><span>七表 / NsysScope 结果目录<i className="req">*</i></span><input required value={form.existing_package_path} onChange={set("existing_package_path")} placeholder="/path/to/result-package" /></label>
             {form.existing_package_path.trim().toLowerCase().endsWith(".zip") &&
-              <label className="span-2">ZIP 解压结果保存目录<input required value={form.result_path} onChange={set("result_path")} placeholder="/path/to/new-result-package（必须为空或不存在）" /></label>}
+              <label className="span-2"><span>ZIP 解压结果保存目录<i className="req">*</i></span><input required value={form.result_path} onChange={set("result_path")} placeholder="/path/to/new-result-package（必须为空或不存在）" /></label>}
             <p className="package-hint span-2">目录内有 analysis.json 时直接展示；只有六张规范 CSV 也能自动转换，不要求额外 sidecar。支持 csv/ 子目录和旧版平铺目录。</p>
           </> : <>
-            <label className="span-2">Nsight 报告<input required value={form.report_path} onChange={set("report_path")} placeholder="/path/to/report.nsys-rep" /></label>
-            <label>Model config.json{hasBuiltinConfig && <em className="builtin-hint">已内置，可留空</em>}<input required={!hasBuiltinConfig} value={form.config_path} onChange={set("config_path")} placeholder={hasBuiltinConfig ? "留空则使用内置 config.json" : "/path/to/config.json"} /></label>
-            <label>部署 YAML / 脚本<input required value={form.launch_path} onChange={set("launch_path")} placeholder="/path/to/launch.yaml" /></label>
-            <label className="span-2">模型源码根目录<input required value={form.source_path} onChange={set("source_path")} placeholder="/path/to/sglang/source" /></label>
+            <label className="span-2"><span>Nsys / Sqlite 文件<i className="req">*</i></span><input required value={form.report_path} onChange={set("report_path")} placeholder="/path/to/report.nsys-rep 或 /path/to/report.sqlite" /><small>注意：.nsys-rep 导出成 .sqlite 的结果与 Nsight Systems 版本有关，建议直接提供已导出的 .sqlite 文件。</small></label>
+            <label><span>部署 YAML / 启动命令脚本<i className="req">*</i></span><input required value={form.launch_path} onChange={set("launch_path")} placeholder="/path/to/start_server.sh" /></label>
+            <label><span className="field-title"><span>Model config.json{!hasBuiltinConfig && <i className="req">*</i>}</span>{hasBuiltinConfig && <em className="builtin-hint">已内置，可留空</em>}</span><input required={!hasBuiltinConfig} value={form.config_path} onChange={set("config_path")} placeholder={hasBuiltinConfig ? "留空则使用内置 config.json" : "/path/to/config.json"} /></label>
+            <label className="span-2"><span>模型源码根目录<i className="req">*</i></span><input required value={form.source_path} onChange={set("source_path")} placeholder="/path/to/sglang/source" /></label>
+            <label className="span-2"><span>结果保存目录<i className="req">*</i></span><input required value={form.result_path} onChange={set("result_path")} placeholder="/path/to/result-package（必须为空或不存在）" /></label>
             <label className="span-2">设计说明（可选）<input value={form.design_path} onChange={set("design_path")} placeholder="/path/to/design.md" /></label>
-            <label className="span-2">结果保存目录<input required value={form.result_path} onChange={set("result_path")} placeholder="/path/to/result-package（必须为空或不存在）" /></label>
           </>}
-          <label>输出前缀<input required value={form.prefix} onChange={set("prefix")} pattern="[a-zA-Z0-9_-]+" /></label>
           {!importingPackage && <label className="span-2">分析范围与硬性要求<textarea value={form.notes} onChange={set("notes")} placeholder="例如：只分析 GLM5.2 的单个非 shared Indexer 层，不要扩展为 4 层周期。" /><small>Agent 必须按这里限定重复单元和分支；无法满足时任务应失败，不能静默改用其他范围。</small></label>}
           <label className="span-2 checkbox-row"><input type="checkbox" checked={form.enable_operator_advisor} onChange={setCheckbox("enable_operator_advisor")} /> 开启算子优化建议（实验性）<small>{importingPackage ? "导入完成后追加一次分析，识别可融合/优化的辅助算子并给出方案；不勾选也可以之后在结果页按需触发。" : "主分析完成后追加一次分析，识别可融合/优化的辅助算子并给出方案；不影响主分析结果。"}</small></label>
         </div>
