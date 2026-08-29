@@ -576,30 +576,73 @@ def compute_mfu(
 
 # Coarse bytes-per-dtype used only for the approximate MBU estimate below.
 # This ignores cache reuse, tiling and any intermediate quantization traffic.
+#
+# These are *storage* widths: how wide the operand is in HBM. Tensor-core
+# compute formats that have no memory representation of their own are absent on
+# purpose -- tf32 math consumes fp32 or upconverted bf16 registers, so the
+# compute dtype alone cannot tell us how many bytes crossed the bus.
 DTYPE_BYTES = {
-    "fp32": 4, "tf32": 4,
-    "bf16": 2, "fp16": 2,
+    "fp32": 4, "float32": 4,
+    "bf16": 2, "bfloat16": 2, "fp16": 2, "float16": 2,
     "fp8": 1, "fp8_e4m3": 1, "fp8_e5m2": 1, "mxfp8": 1,
     "fp6": 1, "mxfp4": 1, "fp4": 1,
     "int8": 1,
 }
 
+# Compute formats that are not storage formats. Seeing one of these as the only
+# dtype evidence means the operand width is unknown, not that it is 4 bytes.
+COMPUTE_ONLY_DTYPES = {"tf32", "fp32_accum", "fp32-accum", "accum_fp32"}
 
-def resolve_dtype_bytes(rule: dict[str, Any], compute_dtype: str | None) -> float | None:
-    dtypes = rule.get("dtypes")
-    candidates: list[str] = []
-    if isinstance(dtypes, list):
-        candidates.extend(
-            str(item).lower()
-            for item in dtypes
-            if str(item).lower() not in {"fp32_accum", "fp32-accum", "accum_fp32"}
-        )
-    if compute_dtype:
-        candidates.append(compute_dtype.lower())
-    for candidate in candidates:
-        if candidate in DTYPE_BYTES:
-            return float(DTYPE_BYTES[candidate])
-    return None
+# Operand order for the three MBU terms: A is M*K, B is K*N, C is M*N.
+MBU_OPERANDS = ("a", "b", "c")
+
+
+def dtype_bytes(name: str | None) -> float | None:
+    """Storage width in bytes for one dtype name, or None when not a storage dtype."""
+    if not name:
+        return None
+    key = str(name).lower()
+    if key in COMPUTE_ONLY_DTYPES:
+        return None
+    value = DTYPE_BYTES.get(key)
+    return float(value) if value else None
+
+
+def resolve_operand_bytes(
+    rule: dict[str, Any], compute_dtype: str | None,
+) -> tuple[list[float], str] | None:
+    """Per-operand storage widths for the A/B/C matrices of one GEMM.
+
+    A GEMM's three operands routinely differ in width -- an activation read as
+    bf16 multiplied by an fp32 factor matrix into an fp32 output is normal, and
+    the A term dominates the byte count whenever K is large. Prefer an explicit
+    per-operand declaration, fall back to one shared storage dtype, and give up
+    rather than guessing when only a compute format is known.
+    """
+    storage = rule.get("storage_dtypes")
+    if isinstance(storage, dict):
+        widths = [dtype_bytes(storage.get(key)) for key in MBU_OPERANDS]
+        if all(width for width in widths):
+            return [float(width) for width in widths], "rule.storage_dtypes"
+    if isinstance(storage, list) and len(storage) == 3:
+        widths = [dtype_bytes(item) for item in storage]
+        if all(width for width in widths):
+            return [float(width) for width in widths], "rule.storage_dtypes"
+
+    shared = dtype_bytes(storage) if isinstance(storage, str) else None
+    source = "rule.storage_dtypes"
+    if shared is None:
+        for item in rule.get("dtypes") or []:
+            shared = dtype_bytes(item)
+            if shared is not None:
+                source = "rule.dtypes"
+                break
+    if shared is None:
+        shared = dtype_bytes(compute_dtype)
+        source = "compute_dtype"
+    if shared is None:
+        return None
+    return [shared, shared, shared], source
 
 
 def resolve_bandwidth_peak(
@@ -638,30 +681,69 @@ def compute_mbu(
     semantics: dict[str, Any],
     hardware_profiles: dict[str, Any],
     hardware: str | None,
-) -> str:
+) -> tuple[str, dict[str, Any] | None]:
     """Approximate memory-bandwidth utilization for core GEMMs, as a percentage.
 
     Reported the same way as ``mfu``: a peak-relative percentage against the
     registered per-GPU HBM bandwidth. Left empty when the byte estimate or the
     bandwidth peak is unavailable. See references/runtime-evidence-and-mfu.md for
     the formula and its caveats.
+
+    Returns the cell text plus an optional rejection record. Counting every
+    element once is a *lower* bound on real traffic -- tiling can re-read an
+    operand, cache reuse only pushes real traffic down toward this bound -- so a
+    result above 100% cannot be a cache-friendly shape. It means an input is
+    wrong (usually an operand width taken from a compute format), and publishing
+    it would assert the kernel beat its own memory bus.
     """
     if shape is None or duration_us <= 0:
-        return ""
-    dtype_bytes = resolve_dtype_bytes(rule, compute_dtype)
-    if not dtype_bytes:
-        return ""
+        return "", None
     peak_gb_per_second, _ = resolve_bandwidth_peak(
         semantics, hardware_profiles, hardware,
     )
     if not peak_gb_per_second or peak_gb_per_second <= 0:
-        return ""
+        return "", None
     m, n, k = shape
-    accessed_bytes = (m * k + k * n + m * n) * dtype_bytes
+    resolved = resolve_operand_bytes(rule, compute_dtype)
+    if resolved is None:
+        # A bandwidth peak is registered and the shape is known, so this row was
+        # otherwise publishable: record why it is blank instead of dropping it
+        # silently, which reads as "nobody tried".
+        return "", {
+            "shape": {"M": m, "N": n, "K": k},
+            "duration_us": duration_us,
+            "compute_dtype": compute_dtype,
+            "declared_dtypes": rule.get("dtypes"),
+            "reason": (
+                f"{compute_dtype or 'the declared dtype'} is a tensor-core compute "
+                "format with no storage width; declare per-operand storage_dtypes "
+                "{a,b,c} for this rule to publish MBU"
+            ),
+        }
+    widths, width_source = resolved
+    accessed_bytes = m * k * widths[0] + k * n * widths[1] + m * n * widths[2]
     bytes_per_second = accessed_bytes / (duration_us / 1_000_000.0)
     gb_per_second = bytes_per_second / 1e9
     utilization = gb_per_second / peak_gb_per_second * 100.0
-    return f"{utilization:.2f}%"
+    if utilization > 100.0:
+        return "", {
+            "shape": {"M": m, "N": n, "K": k},
+            "duration_us": duration_us,
+            "operand_bytes": {
+                key: width for key, width in zip(MBU_OPERANDS, widths)
+            },
+            "operand_bytes_source": width_source,
+            "compute_dtype": compute_dtype,
+            "implied_gb_per_s": round(gb_per_second, 3),
+            "hbm_peak_gb_per_s": peak_gb_per_second,
+            "rejected_mbu_pct": round(utilization, 2),
+            "reason": (
+                "once-each byte count is a lower bound on HBM traffic, so >100% "
+                "means an input is wrong; declare per-operand storage_dtypes for "
+                "this rule instead of relying on the compute dtype"
+            ),
+        }
+    return f"{utilization:.2f}%", None
 
 
 def main() -> None:
@@ -714,6 +796,7 @@ def main() -> None:
     enriched: list[dict[str, Any]] = []
     origin_rows: list[dict[str, Any]] = []
     mfu_evidence: list[dict[str, Any]] = []
+    mbu_rejections: list[dict[str, Any]] = []
     for index, row in enumerate(ordered_source_rows, 1):
         rule = {} if row.get("module") == "__layer_total__" else match_rule(row, rules)
         unit_position, unit_id, unit_variant = resolve_unit_fields(
@@ -759,11 +842,18 @@ def main() -> None:
                 row.get("operator_name", ""), rule.get("operator_name"),
             )
             mfu_evidence.append(evidence)
-        mbu = compute_mbu(
+        mbu, mbu_rejection = compute_mbu(
             shape, duration, rule,
             evidence.get("compute_dtype") if evidence else None,
             semantics, hardware_profiles, args.hardware,
         )
+        if mbu_rejection is not None:
+            mbu_rejection["origin_index"] = int(row.get("序号") or index)
+            mbu_rejection["module"] = row.get("module", "")
+            mbu_rejection["operator_name"] = operator_table_name(
+                row.get("operator_name", ""), rule.get("operator_name"),
+            )
+            mbu_rejections.append(mbu_rejection)
         enriched.append({
             "module": row.get("module", ""),
             "单元位置": unit_position,
@@ -1001,6 +1091,11 @@ def main() -> None:
         ),
         "mfu_formula": "2*M*N*K/(duration_seconds*dense_peak_flops)",
         "mfu_evidence": mfu_evidence,
+        "mbu_formula": (
+            "(M*K*bytes_a + K*N*bytes_b + M*N*bytes_c)"
+            "/duration_seconds/hbm_peak_bytes_per_s"
+        ),
+        "mbu_rejected": mbu_rejections,
         "module_duration_basis": {
             "模块耗时(us)": "sum of position-aware average kernel durations",
             "代表区间并集(us)": "representative-sample interval union",

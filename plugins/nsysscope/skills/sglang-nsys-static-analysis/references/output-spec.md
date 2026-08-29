@@ -24,13 +24,15 @@ Always create:
 - `<prefix>_analysis_manifest.json`
 - `<prefix>_architecture_taxonomy.json`
 
-`<prefix>_forward_pipeline_table.csv` is the seventh required table (see "Forward
-pipeline table"), not an extra: it is the only place the package says how the measured
-repeating unit relates to a whole forward step. It lives in the same directory as the
-other tables, so the organised result package carries it under `csv/` with an `xlsx/`
-counterpart. A capture that cannot support it — a single forward step, no usable step
-marker — is not a valid input for this analysis; fix the capture instead of shipping
-six tables.
+`<prefix>_forward_pipeline_table.csv` is an optional seventh table (see "Forward
+pipeline table"): the only place the package says how the measured repeating unit
+relates to a whole forward step. Generate and validate it whenever the capture
+supports it -- it lives in the same directory as the other tables, so the organised
+result package carries it under `csv/` with an `xlsx/` counterpart. A capture that
+cannot support it — a single forward step, no usable step marker, or a schema this
+analyzer version does not yet handle — should ship the other six tables and record
+the reason (`forward_pipeline.skipped_reason` in the manifest) instead of failing
+the whole package.
 
 Use `duration_avg_us` when stable samples exist; otherwise use `duration_us` and
 record the fallback. All percentages use the repeating-unit wall-span. Preserve
@@ -187,18 +189,26 @@ reported alongside `mfu` in the same form — a peak-relative percentage such as
 unavailable:
 
 ```text
-accessed_bytes = (M*K + K*N + M*N) * dtype_bytes
+accessed_bytes = M*K*bytes_a + K*N*bytes_b + M*N*bytes_c
 achieved_gb_per_s = accessed_bytes / duration_seconds / 1e9
 mbu = achieved_gb_per_s / hbm_bandwidth_gb_per_s * 100   # percent of peak
 ```
 
-`dtype_bytes` is derived from the GEMM's operand `dtypes` (falling back to the
-resolved `compute_dtype`); this is a coarse estimate that ignores cache reuse
-and intermediate quantization/dequantization traffic, so treat `mbu` as an
-order-of-magnitude read on whether a kernel is bandwidth-bound, not an exact
-utilization. `hbm_bandwidth_gb_per_s` comes from the matched profile in
-`references/hardware-peaks.json`; when a hardware profile has no bandwidth peak
-registered, leave `mbu` empty rather than reporting raw bytes/second.
+Each operand carries its own storage width, declared per semantic-map rule as
+`"storage_dtypes": {"a": "bf16", "b": "fp32", "c": "fp32"}`. These are HBM
+widths, not compute formats — `tf32` has no storage representation, so a
+`sm100_tf32_*` kernel reading bf16 must not be costed at 4 bytes. When only a
+compute format is known, leave `mbu` empty and record the reason.
+
+This is a coarse estimate that ignores cache reuse and intermediate
+quantization/dequantization traffic, so treat `mbu` as an order-of-magnitude read
+on whether a kernel is bandwidth-bound, not an exact utilization. Because
+counting each element once assumes perfect reuse, it is a lower bound on real
+traffic: an MBU above 100% is impossible and means an input is wrong, so blank it
+like an impossible MFU instead of publishing it. `hbm_bandwidth_gb_per_s` comes
+from the matched profile in `references/hardware-peaks.json`; when a hardware
+profile has no bandwidth peak registered, leave `mbu` empty rather than reporting
+raw bytes/second.
 
 Classify each operator independently. Core compute is a strict allow-list:
 

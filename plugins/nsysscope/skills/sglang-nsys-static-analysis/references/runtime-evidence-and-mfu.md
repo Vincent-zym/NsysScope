@@ -89,21 +89,38 @@ For each eligible GEMM record, alongside MFU, also estimate accessed bytes and
 report `mbu` as a peak-relative percentage, in the same form as MFU:
 
 ```text
-accessed_bytes = (M*K + K*N + M*N) * dtype_bytes
+accessed_bytes = M*K*bytes_a + K*N*bytes_b + M*N*bytes_c
 achieved_gb_per_s = accessed_bytes / duration_seconds / 1e9
 mbu = achieved_gb_per_s / hbm_bandwidth_gb_per_s * 100
 ```
 
-`dtype_bytes` comes from the GEMM's operand dtypes (same source as MFU's
-`compute_dtype`). `hbm_bandwidth_gb_per_s` is the matched profile's per-GPU HBM
-peak in `references/hardware-peaks.json`; if the matched profile has no bandwidth
-peak, leave `mbu` empty rather than emitting raw bytes/second.
+Each operand gets its own width, because a GEMM's three matrices routinely
+differ: a bf16 activation times an fp32 factor matrix into an fp32 output is
+normal, and the A term dominates whenever K is large. Declare them per rule:
 
-The byte estimate ignores cache reuse, tiling, and intermediate
-quantization/dequantization traffic, so MBU is a coarse read on whether a kernel
-is bandwidth-bound — not an exact utilization. Unlike MFU, do not treat an MBU
-above 100% as a hard error, since the byte estimate can overshoot on
-cache-friendly shapes; report it and note the shape in the evidence sidecar.
+```json
+"storage_dtypes": {"a": "bf16", "b": "fp32", "c": "fp32"}
+```
+
+These are *storage* widths — how wide the operand is in HBM — not the compute
+format. `tf32` is a tensor-core compute format with no memory representation of
+its own: a `sm100_tf32_*` kernel commonly reads bf16 and upconverts in
+registers, so costing its operands at 4 bytes doubles the byte count. When the
+only dtype evidence is a compute format, leave `mbu` empty and record the reason
+rather than assuming a width. `hbm_bandwidth_gb_per_s` is the matched profile's
+per-GPU HBM peak in `references/hardware-peaks.json`; if the matched profile has
+no bandwidth peak, leave `mbu` empty rather than emitting raw bytes/second.
+
+Counting every element once assumes perfect reuse, which makes this a *lower*
+bound on real HBM traffic: tiling can only re-read an operand, and cache reuse
+only pushes real traffic down toward the bound. So an MBU above 100% is
+arithmetically impossible and is never explained by a cache-friendly shape — it
+means an input is wrong, nearly always an operand width taken from the compute
+dtype. Treat it exactly like an MFU above 100%: blank the cell, record the
+rejected value and the shape in the evidence sidecar, and fix the dtype
+declaration. Within 0-100% the estimate is still coarse — it ignores cache
+reuse, tiling and intermediate quantization/dequantization traffic — so read it
+as evidence of whether a kernel is bandwidth-bound, not as an exact utilization.
 
 ## CPU attribution
 

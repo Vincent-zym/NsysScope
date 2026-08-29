@@ -20,6 +20,14 @@ SUFFIXES = (
     "_auxiliary_operator_table.csv",
     "_op_classification_table.csv",
     "_stage_table.csv",
+)
+# The forward-pipeline table is a valuable seventh table when the capture supports
+# it (it is the only place the package says what fraction of a forward step the
+# measured unit is), but some captures genuinely cannot produce it -- a single
+# forward step, no usable step marker, or a schema this analyzer version does not
+# yet handle. Treat it as optional so one flaky table does not fail an otherwise
+# complete package; validate_forward_pipeline() below still checks it when present.
+OPTIONAL_SUFFIXES = (
     "_forward_pipeline_table.csv",
 )
 CATEGORY_LABELS = {
@@ -260,6 +268,46 @@ def validate_evidence_depth(
             "no core-compute row has a shape: GEMM shape/mfu/mbu cannot all be blank "
             "when config and launch material provide token count and dimensions"
         )
+    validate_efficiency_bounds(core, errors)
+
+
+def validate_efficiency_bounds(
+    core: list[dict[str, str]], errors: list[str],
+) -> None:
+    """Reject MFU/MBU percentages that claim a kernel beat the hardware.
+
+    MFU already had this guard by convention; MBU never did, and a package
+    shipped 134% MBU on a skinny GEMM whose bf16 activation had been costed as
+    fp32. Counting every operand element once is a *lower* bound on HBM traffic
+    -- tiling only re-reads, and cache reuse pushes real traffic down toward
+    that bound -- so above 100% is arithmetically impossible, not a
+    cache-friendly shape. Blank is the correct output when the inputs are
+    unknown; an impossible number is not.
+    """
+    for column in ("mfu", "mbu"):
+        offenders = []
+        for row in core:
+            raw = str(row.get(column) or "").strip().rstrip("%")
+            if not raw:
+                continue
+            try:
+                value = float(raw)
+            except ValueError:
+                errors.append(
+                    f"core-compute {column} is not a percentage: {row.get(column)!r}"
+                )
+                continue
+            if value > 100.0 or value < 0.0:
+                offenders.append(
+                    f"{row.get('算子名称', '?')} {row.get('shape', '')} = {value:.2f}%"
+                )
+        if offenders:
+            errors.append(
+                f"{len(offenders)} core-compute row(s) report an impossible {column} "
+                f"(outside 0-100%): {'; '.join(offenders[:3])}"
+                + (" …" if len(offenders) > 3 else "")
+                + f"; leave {column} blank and record the reason instead"
+            )
 
 
 def validate_unit_attribution(
@@ -355,6 +403,12 @@ def main() -> None:
         errors.append(f"missing required tables: {missing}")
     if errors:
         raise SystemExit("; ".join(errors))
+    missing_optional = [
+        f"{args.prefix}{suffix}" for suffix in OPTIONAL_SUFFIXES
+        if not (root / f"{args.prefix}{suffix}").is_file()
+    ]
+    if missing_optional:
+        print(f"[validate] optional tables absent, continuing: {missing_optional}")
 
     paths = {
         "origin": root / f"{args.prefix}_operator_origin_table.csv",
