@@ -1256,6 +1256,7 @@ export default function Dashboard() {
       setSelectedUnit(null);
       setSelectedStage(null);
       setSelectedOp(null);
+      setPopoUrl("");
       setError("");
     } catch {
       setError("无法读取：请选择 NsysScope analysis.json（schemaVersion 1.0）");
@@ -1270,6 +1271,11 @@ export default function Dashboard() {
     setError("");
     setOptimization(null);
     setOptimizationError("");
+    // A published link belongs to the analysis it was generated from. Keeping it
+    // across a load would replace the publish button with a link to the previous
+    // dataset, which is what blocked re-publishing a job after its tables were
+    // rebuilt.
+    setPopoUrl("");
     setView("dashboard");
     const optimizationUrl = jobMeta?.optimizationUrl;
     if (optimizationUrl) {

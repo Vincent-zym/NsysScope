@@ -1773,8 +1773,13 @@ Requirements:
             raise RuntimeError("analysis.json is missing; cannot publish")
         if token:
             self.save_popo_token(username, token)
+        # A fresh slug per publish. The first upload of the pair creates the page
+        # and has no --previous-slug, so a slug derived from job_id alone fails
+        # the second time a job is published -- which is exactly what happens
+        # after its tables are rebuilt and it needs a new page.
+        slug = f"nsysscope-{job_id}-{secrets.token_hex(4)}"
         return self._publish_analysis_bytes(
-            analysis_path.read_bytes(), slug=f"nsysscope-{job_id}", username=username,
+            analysis_path.read_bytes(), slug=slug, username=username,
         )
 
     def publish_analysis_payload(
