@@ -64,11 +64,7 @@ raise SystemExit(f"no free port in {start}..{start + 99}")
 PY
 }
 
-try_install_node() {
-  if command -v node >/dev/null 2>&1; then
-    return 0
-  fi
-  printf '    检测到缺少 Node.js，尝试自动安装...\n'
+try_install_node_pkgmgr() {
   local installed=1
   if command -v apt-get >/dev/null 2>&1; then
     if [[ "$(id -u)" -eq 0 ]]; then
@@ -100,7 +96,51 @@ try_install_node() {
   else
     return 1
   fi
-  if [[ "$installed" -eq 0 ]] && command -v node >/dev/null 2>&1; then
+  [[ "$installed" -eq 0 ]]
+}
+
+try_install_node_binary() {
+  local arch os_arch node_version download_url install_dir tmp_dir
+  case "$(uname -m)" in
+    x86_64) os_arch="x64" ;;
+    aarch64|arm64) os_arch="arm64" ;;
+    *) return 1 ;;
+  esac
+  case "$(uname -s)" in
+    Linux) arch="linux" ;;
+    Darwin) arch="darwin" ;;
+    *) return 1 ;;
+  esac
+  node_version="${NSYSSCOPE_NODE_VERSION:-v20.17.0}"
+  download_url="https://nodejs.org/dist/${node_version}/node-${node_version}-${arch}-${os_arch}.tar.xz"
+  install_dir="${NSYSSCOPE_NODE_DIR:-$CACHE_BASE/node}"
+  printf '    尝试直接下载 Node.js 二进制包: %s\n' "$download_url"
+  tmp_dir="$(mktemp -d)"
+  if ! curl -fsSL --connect-timeout 15 -o "$tmp_dir/node.tar.xz" "$download_url"; then
+    rm -rf -- "$tmp_dir"
+    return 1
+  fi
+  mkdir -p "$install_dir"
+  if ! tar -xf "$tmp_dir/node.tar.xz" -C "$install_dir" --strip-components=1; then
+    rm -rf -- "$tmp_dir"
+    return 1
+  fi
+  rm -rf -- "$tmp_dir"
+  export PATH="$install_dir/bin:$PATH"
+  [[ -x "$install_dir/bin/node" ]]
+}
+
+try_install_node() {
+  if command -v node >/dev/null 2>&1; then
+    return 0
+  fi
+  printf '    检测到缺少 Node.js，尝试自动安装...\n'
+  if try_install_node_pkgmgr && command -v node >/dev/null 2>&1; then
+    printf '    ✓ Node.js 安装成功: %s\n' "$(command -v node)"
+    return 0
+  fi
+  printf '    包管理器安装失败或不可用，尝试从 nodejs.org 下载二进制包...\n'
+  if try_install_node_binary && command -v node >/dev/null 2>&1; then
     printf '    ✓ Node.js 安装成功: %s\n' "$(command -v node)"
     return 0
   fi
@@ -234,7 +274,8 @@ prepare_python() {
     printf '%s\n' "$requirements_hash" > "$stamp"
   elif [[ ! -x "$VENV_DIR/bin/uvicorn" ]] || [[ "$(<"$stamp")" != "$requirements_hash" ]]; then
     say "安装 Analyzer Python 依赖"
-    "$VENV_DIR/bin/python3" -m pip install -r "$PROJECT_DIR/backend/requirements.txt"
+    env -u PIP_INDEX_URL -u PIP_TRUSTED_HOST -u PIP_EXTRA_INDEX_URL \
+      "$VENV_DIR/bin/python3" -m pip install -r "$PROJECT_DIR/backend/requirements.txt"
     printf '%s\n' "$requirements_hash" > "$stamp"
   fi
 }

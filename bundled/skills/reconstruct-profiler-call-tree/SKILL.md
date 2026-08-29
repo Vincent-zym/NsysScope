@@ -264,9 +264,31 @@ current directory layout, file meanings, and call-tree column definitions, read
 Implementation notes and caveats:
 
 - Layer ownership still uses the active `ModelProfile` and anchor-kernel boundary logic from the existing scripts.
-- CPU/Python/ATen/CUDA API ownership is best-effort: the script first uses torch-profiler correlation metadata such as `correlation` and `External id`, then falls back to timestamp containment.
-- Source `file:line` is available only when the trace was collected with stack metadata (for example `with_stack=True`) or when the profiler exported callsite fields. If missing, leave the field blank and still report timing hierarchy.
+- Each kernel is anchored to its launch event through `correlation` (both `cuda_runtime` and `cuda_driver` launches), and the dispatch site is the innermost `python_function` frame containing that launch timestamp; the full chain comes from `Python parent id`. Do not anchor on the kernel's GPU timestamp — it does not overlap the CPU-side python frames.
+- `--source-filter` (default `sglang/`) selects the deepest frame inside the model/framework source as the reported dispatch site, skipping third-party and interpreter frames.
+- Source `file:line` requires the trace to carry `python_function` events (`with_stack=True`). If missing, leave the field blank and still report timing hierarchy.
+- The line number in a frame name is the function's `def` line, not the launching statement. Use `scripts/resolve_dispatch_snippets.py` to turn it into an actual code snippet.
 - Submodule labels (`self_attn`, `mlp`, `norm`, `comm`, etc.) are inferred from kernel/op/category names. Treat them as mapping aids and verify against model code for final reports.
+
+### 5. `resolve_dispatch_snippets.py` — Source snippets for a dispatch-site cache
+
+Run this after `layer_call_tree.py` when a source checkout is available and the report
+needs actual dispatch statements rather than line pointers.
+
+```bash
+python3 scripts/resolve_dispatch_snippets.py \
+  --cache <output_dir>/mappings/dispatch_site_cache.json \
+  --source-root /path/to/repo/python
+```
+
+It resolves each function **by name** (the recorded line is only a hint), records
+`line_drift` when the local checkout disagrees with the traced build, and emits
+`dispatch_code_snippet` plus `enclosing_branch`. When the dispatch frame is the deepest
+python frame, no callee name exists to match, so a bounded `dispatch_function_body`
+search window is emitted instead of a guessed statement. Writes
+`mappings/dispatch_site_cache_with_snippets.json`. Report the resolution counts
+(`snippet_resolved` / `body_window_only` / `line_drifted`) rather than presenting every
+row as a verified snippet.
 
 ## Workflow
 

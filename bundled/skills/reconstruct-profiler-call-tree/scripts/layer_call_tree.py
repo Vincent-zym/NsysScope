@@ -115,6 +115,184 @@ def file_line_from_args(e: Optional[dict]) -> str:
     return ""
 
 
+# ── python frame parsing ──────────────────────────────────────────────────
+
+# torch profiler with_stack=True encodes python frames as "path/to/file.py(123): func".
+PY_FRAME_RE = re.compile(r"^(?P<file>.+?)\((?P<line>\d+)\):\s*(?P<func>.+)$")
+
+
+def parse_py_frame(name: str) -> Optional[Tuple[str, str, str]]:
+    """Return (file, line, func) when the event name carries a source location."""
+    m = PY_FRAME_RE.match(str(name).strip())
+    if not m:
+        return None
+    return m.group("file"), m.group("line"), m.group("func")
+
+
+def frame_file_line(name: str) -> str:
+    parsed = parse_py_frame(name)
+    return f"{parsed[0]}:{parsed[1]}" if parsed else ""
+
+
+def kernel_leaf(name: str) -> str:
+    """Compact leaf symbol for a demangled CUDA kernel name."""
+    s = re.sub(r"^void\s+", "", str(name).strip())
+    # "(anonymous namespace)::foo<...>(...)" would otherwise truncate at the first paren.
+    s = re.sub(r"\(anonymous namespace\)::", "", s)
+    depth = 0
+    for i, ch in enumerate(s):
+        if ch == "<":
+            depth += 1
+        elif ch == ">":
+            depth = max(0, depth - 1)
+        elif ch == "(" and depth == 0:
+            s = s[:i]
+            break
+    m = re.search(r"([A-Za-z_][A-Za-z0-9_]*)$", s.split("<")[0].strip().rstrip(":"))
+    return m.group(1) if m else s[:80]
+
+
+def build_py_frame_index(py_events: List[dict]):
+    """Index python_function events by thread and by 'Python id' for chain walking."""
+    by_tid: Dict[object, List[dict]] = defaultdict(list)
+    by_pyid: Dict[object, dict] = {}
+    for e in py_events:
+        if str(e.get("cat", "")) != "python_function":
+            continue
+        by_tid[e.get("tid")].append(e)
+        pid = get_arg(e, "Python id")
+        if pid is not None:
+            by_pyid[pid] = e
+    for lst in by_tid.values():
+        lst.sort(key=lambda e: (e.get("ts", 0), -event_dur(e)))
+    return by_tid, by_pyid
+
+
+def deepest_frames_for_queries(frames: List[dict], queries: List[Tuple[float, int]]) -> Dict[int, dict]:
+    """Sweep properly-nested frames to find the innermost frame containing each query ts.
+
+    ``queries`` is a list of ``(ts, query_key)``; the returned dict maps query_key
+    to the innermost containing frame event.
+    """
+    out: Dict[int, dict] = {}
+    stack: List[dict] = []
+    i = 0
+    for ts, key in sorted(queries, key=lambda q: q[0]):
+        while i < len(frames) and frames[i].get("ts", 0) <= ts:
+            f = frames[i]
+            while stack and event_end(stack[-1]) < f.get("ts", 0):
+                stack.pop()
+            stack.append(f)
+            i += 1
+        while stack and event_end(stack[-1]) < ts:
+            stack.pop()
+        if stack:
+            out[key] = stack[-1]
+    return out
+
+
+def frame_chain(frame: Optional[dict], by_pyid: Dict[object, dict], max_depth: int = 64) -> List[dict]:
+    """Return the ancestor chain from outermost to the given frame via Python parent id."""
+    chain: List[dict] = []
+    cur = frame
+    seen = set()
+    while cur is not None and len(chain) < max_depth:
+        pid = get_arg(cur, "Python id")
+        if pid in seen:
+            break
+        seen.add(pid)
+        chain.append(cur)
+        parent_id = get_arg(cur, "Python parent id")
+        cur = by_pyid.get(parent_id) if parent_id is not None else None
+    chain.reverse()
+    return chain
+
+
+def pick_dispatch_frame(chain: List[dict], source_filter: str) -> Optional[dict]:
+    """Pick the deepest frame whose file path matches source_filter, else the deepest frame."""
+    if not chain:
+        return None
+    if source_filter:
+        for f in reversed(chain):
+            parsed = parse_py_frame(f.get("name", ""))
+            if parsed and source_filter in parsed[0]:
+                return f
+    for f in reversed(chain):
+        if parse_py_frame(f.get("name", "")):
+            return f
+    return chain[-1]
+
+
+def resolve_innermost_cpu_ops(kernels: List[dict], launch_by_corr: Dict[str, dict], cpu_ops: List[dict]) -> Dict[int, dict]:
+    """Innermost enclosing cpu_op per kernel, anchored on the CPU-side launch event.
+
+    Replaces a per-kernel linear scan over every cpu_op; both sides are properly
+    nested per thread, so one sweep resolves all kernels.
+    """
+    by_tid: Dict[object, List[dict]] = defaultdict(list)
+    for e in cpu_ops:
+        by_tid[e.get("tid")].append(e)
+    for lst in by_tid.values():
+        lst.sort(key=lambda e: (e.get("ts", 0), -event_dur(e)))
+
+    queries_by_tid: Dict[object, List[Tuple[float, int]]] = defaultdict(list)
+    for k in kernels:
+        c = corr_id(k)
+        launch = launch_by_corr.get(c) if c else None
+        if launch is None:
+            continue
+        queries_by_tid[launch.get("tid")].append((float(launch.get("ts", 0)), id(k)))
+
+    out: Dict[int, dict] = {}
+    for tid, queries in queries_by_tid.items():
+        ops = by_tid.get(tid)
+        if ops:
+            out.update(deepest_frames_for_queries(ops, queries))
+    return out
+
+
+def resolve_dispatch_sites(kernels: List[dict], launch_by_corr: Dict[str, dict], py_events: List[dict], source_filter: str, chain_depth: int):
+    """Map each kernel correlation id to its launching python dispatch site.
+
+    A kernel's GPU timestamp does not overlap the CPU python frames, so the launch
+    event (cudaLaunchKernel / cuLaunchKernelEx) is used as the CPU-side anchor.
+    """
+    by_tid, by_pyid = build_py_frame_index(py_events)
+    queries_by_tid: Dict[object, List[Tuple[float, int]]] = defaultdict(list)
+    launch_for_key: Dict[int, dict] = {}
+    for k in kernels:
+        c = corr_id(k)
+        launch = launch_by_corr.get(c) if c else None
+        if launch is None:
+            continue
+        key = id(k)
+        launch_for_key[key] = launch
+        queries_by_tid[launch.get("tid")].append((float(launch.get("ts", 0)), key))
+
+    innermost: Dict[int, dict] = {}
+    for tid, queries in queries_by_tid.items():
+        frames = by_tid.get(tid)
+        if not frames:
+            continue
+        innermost.update(deepest_frames_for_queries(frames, queries))
+
+    resolved: Dict[int, dict] = {}
+    for key, launch in launch_for_key.items():
+        chain = frame_chain(innermost.get(key), by_pyid)
+        dispatch = pick_dispatch_frame(chain, source_filter)
+        parsed = parse_py_frame(dispatch.get("name", "")) if dispatch else None
+        chain_names = [f.get("name", "") for f in chain if parse_py_frame(f.get("name", ""))]
+        resolved[key] = {
+            "py_name": dispatch.get("name", "") if dispatch else "",
+            "py_dur": event_dur(dispatch) if dispatch else 0.0,
+            "file_line": f"{parsed[0]}:{parsed[1]}" if parsed else "",
+            "func": parsed[2] if parsed else "",
+            "chain": chain_names[-chain_depth:] if chain_depth > 0 else chain_names,
+            "innermost": innermost.get(key, {}).get("name", ""),
+        }
+    return resolved
+
+
 # ── profile / layer helpers ────────────────────────────────────────────────
 
 
@@ -214,7 +392,7 @@ def build_correlation_maps(events: List[dict]):
     for e in events:
         cat = str(e.get("cat", ""))
         name = str(e.get("name", ""))
-        if "cuda_runtime" in cat or name.startswith("cuda"):
+        if "cuda_runtime" in cat or "cuda_driver" in cat or name.startswith("cuda") or name.startswith("cuLaunch"):
             runtime.append(e)
             c = corr_id(e)
             if c:
@@ -240,7 +418,7 @@ def find_enclosing(events: List[dict], ts: float, end_ts: float, prefer_smallest
     return min(candidates, key=key)
 
 
-def resolve_runtime_and_cpu(kernel: dict, runtime_by_corr, cpu_by_ext, runtime_events, cpu_ops):
+def resolve_runtime_and_cpu(kernel: dict, runtime_by_corr, cpu_by_ext, runtime_events, cpu_ops, cpu_fallback: Optional[Dict[int, dict]] = None):
     rt = None
     c = corr_id(kernel)
     if c and c in runtime_by_corr:
@@ -254,7 +432,9 @@ def resolve_runtime_and_cpu(kernel: dict, runtime_by_corr, cpu_by_ext, runtime_e
             # Usually the smallest enclosing CPU op with the same External id is the direct op.
             candidates = cpu_by_ext[x]
             cpu = find_enclosing(candidates, rt.get("ts", 0), event_end(rt)) or (candidates[-1] if candidates else None)
-    if cpu is None:
+    if cpu is None and cpu_fallback is not None:
+        cpu = cpu_fallback.get(id(kernel))
+    elif cpu is None:
         cpu = find_enclosing(cpu_ops, kernel.get("ts", 0), event_end(kernel))
     return rt, cpu
 
@@ -442,6 +622,8 @@ def main():
     ap.add_argument("--num-layers", type=int, default=None, help="Override number of layers")
     ap.add_argument("--output-dir", default=None, help="New directory for generated files; must not already exist. If omitted, create a unique ./outputs/<trace>_fwd<N>_rXXX directory.")
     ap.add_argument("--top-kernels-per-layer", type=int, default=20, help="Rows per layer in slowest_kernels_by_layer.csv")
+    ap.add_argument("--source-filter", default="sglang/", help="Path substring identifying model/framework source; the deepest matching python frame is reported as the dispatch site. Empty string disables filtering.")
+    ap.add_argument("--chain-depth", type=int, default=8, help="Number of innermost python frames kept in the recorded call chain")
     args = ap.parse_args()
 
     output_dir = args.output_dir or make_default_output_dir(args.trace, args.fwd_pass)
@@ -493,9 +675,19 @@ def main():
 
     runtime_by_corr, cpu_by_ext, runtime_events, cpu_ops, py_events = build_correlation_maps(events)
 
+    # Kernels of the requested forward pass only; resolving dispatch sites for the
+    # whole trace would scan far more python frames than needed.
+    pass_start = anchor_indices[base]
+    pass_end = anchor_indices[min(base + blocks_per_pass, len(anchor_indices) - 1)]
+    dispatch_sites = resolve_dispatch_sites(
+        gpu[pass_start:pass_end], runtime_by_corr, py_events, args.source_filter, args.chain_depth
+    )
+    cpu_fallback = resolve_innermost_cpu_ops(gpu[pass_start:pass_end], runtime_by_corr, cpu_ops)
+
     root = Node("model", f"Model Forward #{args.fwd_pass}", "Model")
     rows: List[dict] = []
     kernel_to_layer = []
+    dispatch_rows: List[dict] = []
     layer_stats = defaultdict(lambda: {"Time(ms)": 0.0, "file:line": "", "Type": ""})
     submodule_stats = defaultdict(float)
     submodule_file = {}
@@ -514,18 +706,23 @@ def main():
             k = gpu[j]
             kname = k.get("name", "")
             kdur = event_dur(k)
-            rt, cpu = resolve_runtime_and_cpu(k, runtime_by_corr, cpu_by_ext, runtime_events, cpu_ops)
-            py = find_enclosing(py_events, cpu.get("ts", k.get("ts", 0)) if cpu else k.get("ts", 0), event_end(cpu) if cpu else event_end(k))
-            py_name = (py or cpu or {}).get("name", "<unknown python>")
+            rt, cpu = resolve_runtime_and_cpu(k, runtime_by_corr, cpu_by_ext, runtime_events, cpu_ops, cpu_fallback)
+            site = dispatch_sites.get(id(k)) or {}
+            py = None
+            if not site.get("py_name"):
+                # Only fall back to a linear containment scan when correlation-based
+                # resolution failed; py_events can hold over a million frames.
+                py = find_enclosing(py_events, cpu.get("ts", k.get("ts", 0)) if cpu else k.get("ts", 0), event_end(cpu) if cpu else event_end(k))
+            py_name = site.get("py_name") or (py or cpu or {}).get("name", "<unknown python>")
             op_name = (cpu or {}).get("name", "<unknown op>")
             api_name = (rt or {}).get("name", "<unknown cuda api>")
             _, cat_key = classify_kernel(kname, profile)
             submodule = infer_submodule(kname, op_name, cat_key)
-            fl = file_line_from_args(py) or file_line_from_args(cpu)
+            fl = site.get("file_line") or file_line_from_args(py) or file_line_from_args(cpu) or frame_file_line(py_name)
 
             api_dur = event_dur(rt) if rt else 0.0
             op_dur = event_dur(cpu) if cpu else 0.0
-            py_dur = event_dur(py) if py else op_dur
+            py_dur = site.get("py_dur") or (event_dur(py) if py else op_dur)
 
             path = [
                 (f"layer:{layer_name}", f"{layer_name} [{ltype}]", "Layer", fl),
@@ -543,6 +740,17 @@ def main():
                 "Kernel": kname, "Kernel time": kdur, "file:line": fl,
             })
             kernel_to_layer.append({"Kernel": kname, "Layer": layer_name, "Submodule": submodule})
+            dispatch_rows.append({
+                "Layer": layer_name,
+                "Submodule": submodule,
+                "Kernel": kname,
+                "Kernel time(us)": f"{kdur:.3f}",
+                "file:line": fl,
+                "Function": site.get("func", ""),
+                "ATen / Custom Op": op_name,
+                "CUDA API": api_name,
+                "Python call chain": " -> ".join(site.get("chain", [])),
+            })
             layer_stats[layer_name]["Time(ms)"] += kdur / 1000.0
             layer_stats[layer_name]["Type"] = ltype
             if fl and not layer_stats[layer_name]["file:line"]:
@@ -560,6 +768,51 @@ def main():
     write_mermaid(os.path.join(output_dir, "call_graph", "layer_call_graph.mmd"), root, total_us, with_time=False)
     write_mermaid(os.path.join(output_dir, "call_graph", "layer_call_graph_with_time.mmd"), root, total_us, with_time=True)
     write_csv(os.path.join(output_dir, "mappings", "kernel_to_layer.csv"), kernel_to_layer, ["Kernel", "Layer", "Submodule"])
+    write_csv(
+        os.path.join(output_dir, "mappings", "kernel_dispatch_sites.csv"),
+        dispatch_rows,
+        ["Layer", "Submodule", "Kernel", "Kernel time(us)", "file:line", "Function", "ATen / Custom Op", "CUDA API", "Python call chain"],
+    )
+
+    # Per-kernel-symbol cache so downstream analysis resolves a source location once
+    # per kernel instead of once per launch.
+    cache: Dict[str, dict] = {}
+    for r in dispatch_rows:
+        entry = cache.setdefault(r["Kernel"], {
+            "kernel_leaf": kernel_leaf(r["Kernel"]),
+            "file_line": r["file:line"],
+            "function": r["Function"],
+            "aten_op": r["ATen / Custom Op"],
+            "cuda_api": r["CUDA API"],
+            "python_call_chain": r["Python call chain"],
+            "submodules": [],
+            "layers": [],
+            "launch_count": 0,
+            "total_time_us": 0.0,
+        })
+        if not entry["file_line"] and r["file:line"]:
+            entry.update({"file_line": r["file:line"], "function": r["Function"], "python_call_chain": r["Python call chain"]})
+        if r["Submodule"] not in entry["submodules"]:
+            entry["submodules"].append(r["Submodule"])
+        if r["Layer"] not in entry["layers"]:
+            entry["layers"].append(r["Layer"])
+        entry["launch_count"] += 1
+        entry["total_time_us"] += float(r["Kernel time(us)"])
+    for entry in cache.values():
+        entry["total_time_us"] = round(entry["total_time_us"], 3)
+        entry["layer_count"] = len(entry["layers"])
+        entry.pop("layers")
+    resolved_syms = sum(1 for e in cache.values() if e["file_line"])
+    with open(os.path.join(output_dir, "mappings", "dispatch_site_cache.json"), "w") as f:
+        json.dump({
+            "trace": args.trace,
+            "fwd_pass": args.fwd_pass,
+            "source_filter": args.source_filter,
+            "kernel_symbols": len(cache),
+            "kernel_symbols_with_source": resolved_syms,
+            "launches": len(dispatch_rows),
+            "kernels": cache,
+        }, f, indent=2, ensure_ascii=False)
 
     slow_layers = []
     for layer, info in sorted(layer_stats.items(), key=lambda kv: kv[1]["Time(ms)"], reverse=True):
@@ -579,6 +832,8 @@ def main():
 
     core_files = [
         ("call_tree/layer_call_tree.md", "Layer → Submodule → Python → ATen/Custom Op → CUDA API → Kernel markdown attribution table."),
+        ("mappings/kernel_dispatch_sites.csv", "Per-launch kernel → dispatch `file:line`, function, and python call chain."),
+        ("mappings/dispatch_site_cache.json", "Per-kernel-symbol dispatch-site cache for reuse by downstream source mapping."),
         ("call_graph/layer_call_graph_with_time.mmd", "Mermaid execution DAG with total time, self time, percentage, and source location when available."),
         ("rankings/slowest_layers.csv", "Layers ranked by total CUDA kernel time."),
         ("rankings/slowest_submodules.csv", "Layer submodules ranked by total CUDA kernel time."),
@@ -591,7 +846,7 @@ def main():
     bad = gate_nonempty(output_dir, [rel for rel, _ in all_files])
     status = "成功" if not bad else "失败"
     reason = "" if not bad else "Gate failed: missing or empty files: " + ", ".join(bad)
-    metadata.update({"profile": profile.name, "anchor": anchor, "num_layers": str(num_layers), "total_kernel_time": fmt_us(total_us)})
+    metadata.update({"profile": profile.name, "anchor": anchor, "num_layers": str(num_layers), "total_kernel_time": fmt_us(total_us), "source_filter": args.source_filter, "kernel_symbols_with_source": f"{resolved_syms}/{len(cache)}"})
     write_final_report(output_dir, status, reason, core_files, all_files, metadata)
     if bad:
         print(reason, file=sys.stderr)
