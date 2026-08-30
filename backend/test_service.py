@@ -1107,3 +1107,64 @@ def test_forward_pipeline_table_is_optional(tmp_path: Path) -> None:
         "环节,总耗时(us)\nforward step 总计,1.0\n", encoding="utf-8",
     )
     runner.ensure_forward_pipeline("job", job_dir, package, "analysis", None)
+
+
+def test_bad_optional_torch_trace_does_not_fail_the_job(tmp_path: Path) -> None:
+    # The torch trace only makes the analysis faster, so a path that no longer
+    # resolves degrades to "not supplied" instead of costing the caller a run.
+    # An evidence input in the same state still fails loudly.
+    configured = settings(tmp_path)
+    configured.prepare()
+    runner = JobRunner(configured, JobStore(configured.data_dir / "jobs.sqlite"))
+    report = tmp_path / "capture.sqlite"
+    report.write_bytes(b"")
+    config = tmp_path / "config.json"
+    config.write_text("{}", encoding="utf-8")
+    launch = tmp_path / "launch.sh"
+    launch.write_text("#!/bin/sh\n", encoding="utf-8")
+    source = tmp_path / "source"
+    source.mkdir()
+    job_dir = tmp_path / "trace-job"
+    job_dir.mkdir()
+
+    def build(**overrides: str) -> JobCreate:
+        fields = {
+            "model_name": "test",
+            "stage": "prefill",
+            "hardware": "test",
+            "report_path": str(report),
+            "config_path": str(config),
+            "launch_path": str(launch),
+            "source_path": str(source),
+            "result_path": str(tmp_path / "out"),
+        }
+        fields.update(overrides)
+        return JobCreate(**fields)
+
+    paths = runner.resolve_inputs(
+        build(torch_trace_path=str(tmp_path / "missing-trace.json")), job_dir,
+    )
+    assert paths["report"] == report
+    assert paths["torch_trace"] is None
+    assert "missing-trace.json" in JobRunner.job_log_path(job_dir).read_text(
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError):
+        runner.resolve_inputs(
+            build(source_path=str(tmp_path / "missing-source")), job_dir,
+        )
+
+
+def test_plugin_serves_the_bundled_skills() -> None:
+    # The Codex plugin used to keep its own copy of the skills, which drifted 13
+    # files behind bundled/ and never gained functional-modules.json at all --
+    # two installs of one tool behaving differently is worse than a failure.
+    bundled = PROJECT / "bundled" / "skills"
+    exposed = PROJECT / "plugins" / "nsysscope" / "skills"
+    expected = {path.name for path in bundled.iterdir() if path.is_dir()}
+    assert {path.name for path in exposed.iterdir()} == expected
+    for name in expected:
+        assert (exposed / name).resolve() == (bundled / name).resolve(), (
+            f"plugin skill {name} is a separate copy, not the bundled skill"
+        )

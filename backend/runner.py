@@ -288,7 +288,7 @@ class JobRunner:
             else:
                 if self.is_cancelled(job_id):
                     return
-                paths = self.resolve_inputs(request)
+                paths = self.resolve_inputs(request, job_dir)
                 context = {key: str(value) if value else None for key, value in paths.items()}
                 context.update(request.model_dump())
                 metadata_dir = job_dir / "metadata"
@@ -425,7 +425,16 @@ class JobRunner:
                     message="转换重试失败", error=str(exc),
                 )
 
-    def resolve_inputs(self, request: JobCreate) -> dict[str, Path | None]:
+    # Inputs whose only job is to make the analysis faster, not to feed it
+    # evidence. A typo in one of these must not cost the caller a whole run, so
+    # it degrades to "not supplied". Every other input stays fatal on purpose:
+    # analysing without the source tree or the config succeeds and produces a
+    # worse answer, which is harder to notice than a failed job.
+    OPTIONAL_INPUTS = ("torch_trace",)
+
+    def resolve_inputs(
+        self, request: JobCreate, job_dir: Path | None = None,
+    ) -> dict[str, Path | None]:
         values = {
             "report": request.report_path,
             "config": request.config_path,
@@ -434,10 +443,24 @@ class JobRunner:
             "design": request.design_path,
             "torch_trace": request.torch_trace_path,
         }
-        return {
-            key: self.settings.resolve_allowed(value, kind=key) if value else None
-            for key, value in values.items()
-        }
+        resolved: dict[str, Path | None] = {}
+        for key, value in values.items():
+            if not value:
+                resolved[key] = None
+                continue
+            try:
+                resolved[key] = self.settings.resolve_allowed(value, kind=key)
+            except ValueError:
+                if key not in self.OPTIONAL_INPUTS:
+                    raise
+                resolved[key] = None
+                if job_dir is not None:
+                    self.log(
+                        job_dir,
+                        f"[inputs] 忽略无法解析的可选输入 {key}={value}："
+                        "本次分析按未提供该输入继续",
+                    )
+        return resolved
 
     def export_nsys(self, job_id: str, job_dir: Path, report: Path | None) -> Path:
         if report is None:

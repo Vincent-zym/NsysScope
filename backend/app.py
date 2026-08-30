@@ -109,7 +109,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 raise HTTPException(status_code=422, detail=provider["message"])
         for field in (
             "report_path", "config_path", "launch_path", "source_path",
-            "design_path", "existing_package_path",
+            "design_path", "torch_trace_path", "existing_package_path",
         ):
             value = getattr(request, field)
             if value:

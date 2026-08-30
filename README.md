@@ -122,4 +122,7 @@ npm run watch:local   # 监听文件变化自动重新构建
 
 ## 可选的 Codex 插件
 
-经过校验的插件源码位于 `plugins/nsysscope`，向 Codex 提供同一份分析 skill。
+经过校验的插件源码位于 `plugins/nsysscope`，向 Codex 提供同一份分析 skill：
+`plugins/nsysscope/skills/` 下每一项都是指向 `bundled/skills/` 的符号链接，
+不是副本，所以插件用户与 Web 用户拿到的 skill 完全一致
+（`test_plugin_serves_the_bundled_skills` 会在两者分叉时失败）。
