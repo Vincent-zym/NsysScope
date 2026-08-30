@@ -308,7 +308,15 @@ class JobRunner:
                 )
                 if self.is_cancelled(job_id):
                     return
-                self.run_agent(job_id, job_dir, request, paths, sqlite_path)
+                dispatch_cache = self.try_build_dispatch_cache(job_id, job_dir, request, paths)
+                if dispatch_cache is not None:
+                    context["dispatch_cache_path"] = str(dispatch_cache)
+                    (metadata_dir / "context.json").write_text(
+                        json.dumps(context, ensure_ascii=False, indent=2) + "\n",
+                    )
+                if self.is_cancelled(job_id):
+                    return
+                self.run_agent(job_id, job_dir, request, paths, sqlite_path, dispatch_cache)
                 if self.is_cancelled(job_id):
                     return
                 self.state(job_id, job_dir, "converting", 88, "正在构建前端 analysis.json")
@@ -424,6 +432,7 @@ class JobRunner:
             "launch": request.launch_path,
             "source": request.source_path,
             "design": request.design_path,
+            "torch_trace": request.torch_trace_path,
         }
         return {
             key: self.settings.resolve_allowed(value, kind=key) if value else None
@@ -448,14 +457,83 @@ class JobRunner:
             raise RuntimeError("nsys export completed without producing SQLite")
         return sqlite_path
 
+    def build_dispatch_cache(
+        self, job_id: str, job_dir: Path, request: JobCreate,
+        paths: dict[str, Path | None],
+    ) -> Path | None:
+        """Pre-resolve kernel -> Python dispatch sites from a torch profiler trace.
+
+        Optional value-add pass: it turns the trace's Python stacks into a
+        per-kernel-symbol lookup table so the analysis Skill does not have to
+        search the source tree once per kernel. Any failure here is logged and
+        swallowed -- the analysis must still run exactly as it did before, just
+        without the shortcut.
+        """
+        trace = paths.get("torch_trace")
+        if trace is None:
+            return None
+        scripts = self.settings.call_tree_skill_dir / "scripts"
+        call_tree = scripts / "layer_call_tree.py"
+        if not call_tree.is_file():
+            self.log(
+                job_dir,
+                "[dispatch] 未找到 reconstruct-profiler-call-tree Skill，跳过调用栈预解析："
+                f"{call_tree}",
+            )
+            return None
+        self.state(job_id, job_dir, "analyzing", 24, "正在从 torch profiler trace 预解析 kernel 调用栈")
+        out_dir = job_dir / "dispatch_sites"
+        command = [
+            sys.executable, str(call_tree),
+            "--trace", str(trace),
+            # A negative index asks the script to pick a steady-state pass.
+            "--fwd-pass", "-1",
+            "--output-dir", str(out_dir),
+        ]
+        if paths.get("config"):
+            command += ["--config", str(paths["config"])]
+        self.run_process(job_id, job_dir, command)
+        cache = out_dir / "mappings" / "dispatch_site_cache.json"
+        if not cache.is_file():
+            raise RuntimeError(f"call-tree pass produced no dispatch cache at {cache}")
+        source = paths.get("source")
+        if source is not None:
+            snippets = scripts / "resolve_dispatch_snippets.py"
+            if snippets.is_file():
+                self.run_process(job_id, job_dir, [
+                    sys.executable, str(snippets),
+                    "--cache", str(cache),
+                    "--source-root", str(source if source.is_dir() else source.parent),
+                ])
+                enriched = cache.with_name("dispatch_site_cache_with_snippets.json")
+                if enriched.is_file():
+                    cache = enriched
+        self.log(job_dir, f"[dispatch] 调用栈查表已生成：{cache}")
+        return cache
+
+    def try_build_dispatch_cache(
+        self, job_id: str, job_dir: Path, request: JobCreate,
+        paths: dict[str, Path | None],
+    ) -> Path | None:
+        try:
+            return self.build_dispatch_cache(job_id, job_dir, request, paths)
+        except Exception:
+            self.log(
+                job_dir,
+                "[dispatch] 调用栈预解析失败，本次分析回退为由 Agent 自行检索源码：\n"
+                + traceback.format_exc(),
+            )
+            return None
+
     def run_agent(
         self, job_id: str, job_dir: Path, request: JobCreate,
         paths: dict[str, Path | None], sqlite_path: Path,
+        dispatch_cache: Path | None = None,
     ) -> None:
         if request.agent_provider == "comate":
-            self.run_comate(job_id, job_dir, request, paths, sqlite_path)
+            self.run_comate(job_id, job_dir, request, paths, sqlite_path, dispatch_cache)
         else:
-            self.run_codex(job_id, job_dir, request, paths, sqlite_path)
+            self.run_codex(job_id, job_dir, request, paths, sqlite_path, dispatch_cache)
 
     def run_operator_advisor(
         self, job_id: str, job_dir: Path, request: JobCreate,
@@ -724,13 +802,14 @@ supplied model source root.
     def run_codex(
         self, job_id: str, job_dir: Path, request: JobCreate,
         paths: dict[str, Path | None], sqlite_path: Path,
+        dispatch_cache: Path | None = None,
     ) -> None:
         if not self.settings.codex_enabled:
             raise RuntimeError(
                 "Codex analyzer is disabled. Set NSYSSCOPE_CODEX_ENABLED=true on an isolated runner."
             )
         self.state(job_id, job_dir, "analyzing", 30, "Codex Skill Agent 正在分析模型与时间线")
-        prompt = self.build_prompt(job_dir, request, paths, sqlite_path)
+        prompt = self.build_prompt(job_dir, request, paths, sqlite_path, dispatch_cache)
         prompt_path = job_dir / "metadata" / "prompt.md"
         prompt_path.parent.mkdir(exist_ok=True)
         prompt_path.write_text(prompt)
@@ -762,12 +841,13 @@ supplied model source root.
     def run_comate(
         self, job_id: str, job_dir: Path, request: JobCreate,
         paths: dict[str, Path | None], sqlite_path: Path,
+        dispatch_cache: Path | None = None,
     ) -> None:
         status = self._comate_status()
         if not status["ready"]:
             raise RuntimeError(status["message"])
         self.state(job_id, job_dir, "analyzing", 30, "Comate Skill Agent 正在分析模型与时间线")
-        prompt = self.build_prompt(job_dir, request, paths, sqlite_path)
+        prompt = self.build_prompt(job_dir, request, paths, sqlite_path, dispatch_cache)
         metadata_dir = job_dir / "metadata"
         metadata_dir.mkdir(exist_ok=True)
         (metadata_dir / "prompt.md").write_text(prompt)
@@ -822,9 +902,56 @@ supplied model source root.
         )
         return target
 
+    @staticmethod
+    def dispatch_cache_prompt(dispatch_cache: Path | None) -> str:
+        """Prompt section describing the pre-resolved dispatch-site cache.
+
+        Empty when no torch profiler trace was supplied, so the prompt stays
+        byte-identical to the previous version for jobs that do not use it.
+        """
+        if dispatch_cache is None:
+            return ""
+        # The same pre-pass also derived the layer segmentation the analysis has to
+        # establish anyway. Listing those artifacts lets the agent verify a prior
+        # instead of rediscovering the anchor from scratch; they come from a
+        # *different* capture than the nsys trace, so they are priors, not facts.
+        root = dispatch_cache.parent.parent
+        priors = "".join(
+            f"- {label}: {path}\n"
+            for label, path in (
+                ("layer segmentation prior (torch trace)", root / "final_report.md"),
+                ("per-layer timing prior (torch trace)", root / "rankings" / "slowest_layers.csv"),
+                ("kernel -> layer/submodule prior (torch trace)",
+                 root / "mappings" / "kernel_to_layer.csv"),
+            )
+            if path.is_file()
+        )
+        prior_note = f"""
+{priors}These priors report the anchor kernel, layer count and per-layer timings the
+pre-pass derived from the torch profiler trace. Use them as a starting hypothesis
+to confirm against the nsys trace -- they come from a separate capture, so the
+anchor, layer count and repeating unit must still be re-established from the nsys
+SQLite before you rely on them, and nsys stays the sole timing authority. Say so
+explicitly if the two captures disagree.
+""" if priors else ""
+        return f"""- pre-resolved kernel dispatch sites: {dispatch_cache}
+{prior_note}
+A dispatch-site cache was built from this task's torch profiler trace. Consult it
+per kernel symbol before searching the source tree, and record the cache as the
+mapping evidence when you use it. Trust levels differ per entry:
+- `dispatch_code_snippet` present: use it as the dispatching statement.
+- only `dispatch_function_body` present: the launching statement was not
+  identified; treat the body as the search window and pick the statement yourself.
+- `line_drift: true`: the local checkout disagrees with the traced build for that
+  function; the function name is authoritative, the line number is not.
+Kernels absent from the cache still require the normal source-tree search. The
+cache never overrides the trace as timing authority.
+"""
+
     def build_prompt(
         self, job_dir: Path, request: JobCreate,
         paths: dict[str, Path | None], sqlite_path: Path,
+        dispatch_cache: Path | None = None,
     ) -> str:
         return f"""Use the `sglang-nsys-static-analysis` skill at:
 {self.settings.skill_dir}
@@ -855,7 +982,7 @@ Analyze this task without asking follow-up questions:
 - deployment YAML/script: {paths['launch']}
 - model source root: {paths['source']}
 - design notes: {paths['design'] or 'not supplied'}
-
+{self.dispatch_cache_prompt(dispatch_cache)}
 Write all artifacts only under:
 {job_dir}
 

@@ -35,6 +35,11 @@ class JobCreate(BaseModel):
     launch_path: str | None = None
     source_path: str | None = None
     design_path: str | None = None
+    # Optional torch.profiler Chrome trace. When supplied, the runner pre-resolves
+    # each CUDA kernel's Python dispatch site from it so the analysis Skill looks
+    # call chains up instead of searching the source tree once per kernel. Kept out
+    # of the required-paths check on purpose: a job without it behaves as before.
+    torch_trace_path: str | None = None
     existing_package_path: str | None = None
     result_path: str | None = None
     prefix: str = Field(default="analysis", pattern=r"^[a-zA-Z0-9_-]+$")

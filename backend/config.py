@@ -46,6 +46,7 @@ class Settings:
     nsys_bin: str
     skill_dir: Path
     operator_advisor_skill_dir: Path
+    call_tree_skill_dir: Path
     converter: Path
     xlsx_converter: Path
     subprocess_timeout_seconds: int
@@ -63,6 +64,9 @@ class Settings:
         bundled_skill = project / "bundled" / "skills" / "sglang-nsys-static-analysis"
         bundled_advisor_skill = (
             project / "bundled" / "skills" / "sglang-operator-fusion-advisor"
+        )
+        bundled_call_tree_skill = (
+            project / "bundled" / "skills" / "reconstruct-profiler-call-tree"
         )
         comate_bin = os.getenv("NSYSSCOPE_COMATE_BIN", "") or _discover_zulu()
         return cls(
@@ -124,6 +128,13 @@ class Settings:
             operator_advisor_skill_dir=Path(os.getenv(
                 "NSYSSCOPE_OPERATOR_ADVISOR_SKILL_DIR",
                 bundled_advisor_skill,
+            )).resolve(),
+            # Optional: only used when a job supplies a torch profiler trace. A
+            # missing directory disables the pre-pass instead of failing startup,
+            # so prepare() deliberately does not check it.
+            call_tree_skill_dir=Path(os.getenv(
+                "NSYSSCOPE_CALL_TREE_SKILL_DIR",
+                bundled_call_tree_skill,
             )).resolve(),
             converter=Path(os.getenv(
                 "NSYSSCOPE_CONVERTER",

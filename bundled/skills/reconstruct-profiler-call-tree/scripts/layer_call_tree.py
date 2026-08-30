@@ -296,11 +296,91 @@ def resolve_dispatch_sites(kernels: List[dict], launch_by_corr: Dict[str, dict],
 # ── profile / layer helpers ────────────────────────────────────────────────
 
 
-def find_anchor_kernel(gpu_kernels: List[dict], profile: ModelProfile) -> str:
+def config_layer_counts(config: dict) -> List[int]:
+    """Plausible anchor-blocks-per-forward counts derived from a model config.
+
+    Multimodal configs nest the language model under ``text_config``, and a model
+    with next-token-prediction layers emits anchors for those too, so both the
+    bare hidden-layer count and the count including nextn layers are candidates.
+    """
+    sections = [config]
+    for key in ("text_config", "language_config", "llm_config"):
+        section = config.get(key)
+        if isinstance(section, dict):
+            sections.append(section)
+    counts: List[int] = []
+    for section in sections:
+        base = section.get("num_hidden_layers")
+        if not isinstance(base, int) or base <= 0:
+            continue
+        nextn = section.get("num_nextn_predict_layers") or 0
+        for candidate in (base, base + (nextn if isinstance(nextn, int) else 0)):
+            if candidate > 0 and candidate not in counts:
+                counts.append(candidate)
+    return counts
+
+
+def config_num_layers(config: dict) -> Optional[int]:
+    """``num_hidden_layers`` from the config, looking inside nested sections."""
+    counts = config_layer_counts(config)
+    return counts[0] if counts else None
+
+
+def detect_anchor_from_config(gpu_kernels: List[dict], config: dict) -> Optional[Tuple[str, int]]:
+    """Pick a layer-boundary anchor whose occurrence count fits a config layer count.
+
+    A once-per-layer kernel appears ``layers_per_forward * forward_passes`` times,
+    so a candidate is accepted when its count divides evenly by a config-derived
+    layer count and yields at least two complete forward passes.
+
+    Counting is done on the compact leaf symbol, which is also what gets returned:
+    counting full templated symbols but returning their shared leaf would select an
+    anchor that matches far more kernels than were counted (several distinct GEMM
+    instantiations collapse to one leaf) and slice layers at the wrong offsets.
+
+    Among valid candidates the smallest count wins, since one occurrence per layer
+    is the smallest count that still reaches every layer; a kernel launched twice
+    per layer would otherwise halve the layer windows.
+    """
+    counts = config_layer_counts(config)
+    if not counts:
+        return None
+    occurrences: Dict[str, int] = defaultdict(int)
+    for event in gpu_kernels:
+        leaf = kernel_leaf(str(event.get("name", "")))
+        if leaf:
+            occurrences[leaf] += 1
+    best: Optional[Tuple[int, int, str]] = None
+    for name, count in occurrences.items():
+        for layers in counts:
+            if count < layers * 2 or count % layers:
+                continue
+            # Prefer the finest layer partition, then the sparsest anchor.
+            key = (-layers, count)
+            if best is None or key < (-best[1], best[0]):
+                best = (count, layers, name)
+    if best is None:
+        return None
+    return best[2], best[1]
+
+
+def find_anchor_kernel(gpu_kernels: List[dict], profile: ModelProfile, config: Optional[dict] = None) -> str:
+    def occurrences(needle: str) -> int:
+        return sum(1 for e in gpu_kernels if needle in e.get("name", ""))
+
+    # An inferred profile can name an anchor this capture does not contain (e.g. a
+    # config matches dsv3_mla but the deployment runs a sparse-attention backend).
+    # Only trust the profile's anchor when it is actually present.
+    if profile.anchor_kernel and occurrences(profile.anchor_kernel) >= 2:
+        return profile.anchor_kernel
+    if config:
+        detected = detect_anchor_from_config(gpu_kernels, config)
+        if detected and occurrences(detected[0]) >= 4:
+            return detected[0]
     if profile.anchor_kernel:
         return profile.anchor_kernel
     for c in ["mhc_post_tilelang", "flash_fwd_mla_combine", "AllReduce"]:
-        if sum(1 for e in gpu_kernels if c in e.get("name", "")) >= 4:
+        if occurrences(c) >= 4:
             return c
     raise ValueError("Cannot auto-detect layer anchor kernel; specify --anchor-kernel.")
 
@@ -618,7 +698,7 @@ def main():
     ap.add_argument("--config", default=None, help="Path to model config.json")
     ap.add_argument("--profile", default=None, help="Model profile name; auto-inferred from config if omitted")
     ap.add_argument("--anchor-kernel", default=None, help="Override layer boundary anchor kernel substring")
-    ap.add_argument("--fwd-pass", type=int, default=0, help="Forward pass index to analyze")
+    ap.add_argument("--fwd-pass", type=int, default=0, help="Forward pass index to analyze; a negative value selects a steady-state pass automatically")
     ap.add_argument("--num-layers", type=int, default=None, help="Override number of layers")
     ap.add_argument("--output-dir", default=None, help="New directory for generated files; must not already exist. If omitted, create a unique ./outputs/<trace>_fwd<N>_rXXX directory.")
     ap.add_argument("--top-kernels-per-layer", type=int, default=20, help="Rows per layer in slowest_kernels_by_layer.csv")
@@ -654,7 +734,7 @@ def main():
 
     config = load_config(args.config)
     profile = get_profile(args.profile) if args.profile else infer_profile(config)
-    anchor = args.anchor_kernel or find_anchor_kernel(gpu, profile)
+    anchor = args.anchor_kernel or find_anchor_kernel(gpu, profile, config)
     anchor_indices = [i for i, e in enumerate(gpu) if anchor in e.get("name", "")]
     if len(anchor_indices) < 2:
         metadata.update({"profile": profile.name, "anchor": anchor})
@@ -664,13 +744,29 @@ def main():
 
     compress_ratios = normalize_compress_ratios(config)
     num_hash_layers = config.get("num_hash_layers", 0)
-    num_layers = args.num_layers or config.get("num_hidden_layers") or detect_num_layers(anchor_indices, gpu, profile.blocks_per_layer, profile.default_num_layers)
+    num_layers = args.num_layers or config_num_layers(config) or detect_num_layers(anchor_indices, gpu, profile.blocks_per_layer, profile.default_num_layers)
+    if not args.num_layers and not args.anchor_kernel:
+        # When the anchor came from config-based detection, its own layer count is
+        # the one consistent with the anchor's occurrence count; a bare
+        # num_hidden_layers can disagree with it (e.g. nextn layers also emit the
+        # anchor) and would slice forwards at the wrong offsets.
+        detected = detect_anchor_from_config(gpu, config) if config else None
+        if detected and detected[0] == anchor:
+            num_layers = detected[1]
     blocks_per_pass = num_layers * profile.blocks_per_layer
-    base = args.fwd_pass * blocks_per_pass
+    fwd_pass = args.fwd_pass
+    if fwd_pass < 0:
+        # Automatic selection: skip the cold-start pass and the trailing one, which
+        # can be truncated by when profiling stopped.
+        available = len(anchor_indices) // blocks_per_pass
+        fwd_pass = max(0, available - 2)
+        metadata["fwd_pass_selection"] = f"auto (available={available})"
+    metadata["fwd_pass"] = str(fwd_pass)
+    base = fwd_pass * blocks_per_pass
     if base + blocks_per_pass >= len(anchor_indices):
         metadata.update({"profile": profile.name, "anchor": anchor, "num_layers": str(num_layers)})
-        write_final_report(output_dir, "失败", f"fwd_pass={args.fwd_pass} exceeds available anchor blocks", [], [], metadata)
-        print(f"ERROR: fwd_pass={args.fwd_pass} exceeds available anchor blocks", file=sys.stderr)
+        write_final_report(output_dir, "失败", f"fwd_pass={fwd_pass} exceeds available anchor blocks", [], [], metadata)
+        print(f"ERROR: fwd_pass={fwd_pass} exceeds available anchor blocks", file=sys.stderr)
         sys.exit(1)
 
     runtime_by_corr, cpu_by_ext, runtime_events, cpu_ops, py_events = build_correlation_maps(events)
@@ -684,7 +780,7 @@ def main():
     )
     cpu_fallback = resolve_innermost_cpu_ops(gpu[pass_start:pass_end], runtime_by_corr, cpu_ops)
 
-    root = Node("model", f"Model Forward #{args.fwd_pass}", "Model")
+    root = Node("model", f"Model Forward #{fwd_pass}", "Model")
     rows: List[dict] = []
     kernel_to_layer = []
     dispatch_rows: List[dict] = []
@@ -806,7 +902,7 @@ def main():
     with open(os.path.join(output_dir, "mappings", "dispatch_site_cache.json"), "w") as f:
         json.dump({
             "trace": args.trace,
-            "fwd_pass": args.fwd_pass,
+            "fwd_pass": fwd_pass,
             "source_filter": args.source_filter,
             "kernel_symbols": len(cache),
             "kernel_symbols_with_source": resolved_syms,
@@ -854,7 +950,7 @@ def main():
 
     print(f"Wrote layer-aware call tree/graph outputs to: {output_dir}")
     print(f"Trace={args.trace}")
-    print(f"Profile={profile.name}, anchor={anchor}, fwd_pass={args.fwd_pass}, layers={num_layers}, total_kernel_time={fmt_us(total_us)}")
+    print(f"Profile={profile.name}, anchor={anchor}, fwd_pass={fwd_pass}, layers={num_layers}, total_kernel_time={fmt_us(total_us)}")
     print(f"Final report: {os.path.join(output_dir, 'final_report.md')}")
 
 

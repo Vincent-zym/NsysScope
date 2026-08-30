@@ -1,10 +1,22 @@
 {
-  "schema_version": "1.1",
-  "updated_at": "2026-08-08",
+  "schema_version": "1.2",
+  "updated_at": "2026-08-30",
   "source": {
     "title": "NVIDIA HGX Platform specifications",
     "url": "https://www.nvidia.com/en-eu/data-center/hgx/",
     "notes": "HGX values are for 8 GPUs. FP4 lists sparse and dense explicitly. Other Tensor Core values are sparse and NVIDIA states dense is one half of the shown value. Values below are derived per-GPU dense peaks. hbm_bandwidth_gb_per_s is the per-GPU HBM peak bandwidth and is the MBU denominator; B200 and B300 both publish 8 TB/s."
+  },
+  "mixed_input_rules": {
+    "notes": "dense_tflops_per_gpu is keyed by a single dtype, so resolve_peak() only auto-resolves a GEMM whose tensor inputs share one dtype. A GEMM with operands of different widths needs an explicit mfu_peak_tflops in its semantic rule. Rule: on Blackwell the tcgen05 mxf8f6f4 instruction path runs fp8/fp6/fp4 operands at one rate, so a mixed-input GEMM runs at the rate of its *widest* operand -- the slower rate -- not at the narrow operand's headline rate.",
+    "widest_operand_wins": true,
+    "examples": {
+      "fp8_x_mxfp4": {
+        "peak_dtype_key": "fp8",
+        "note": "fp8 activations x mxfp4 weights (e.g. SGLang MegaMoE grouped GEMM on B200) run at the fp8 dense peak 4500 TFLOPS/GPU, not the fp4 peak 9000. Verified against a GLM5.2 prefill capture.",
+        "mbu": "leave empty when the narrow operand is sub-byte and the kernel fuses multiple GEMMs: a single (M,N,K) cannot express its HBM traffic. Declare storage_dtypes.b as an explicit unmodeled marker, e.g. \"mxfp4-subbyte-unmodeled\"."
+      }
+    },
+    "unlisted_combinations": "Apply the same widest-operand rule, and record in the evidence why the chosen peak_dtype_key is the throughput-limiting operand."
   },
   "profiles": {
     "nvidia-b200": {

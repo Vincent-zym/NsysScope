@@ -4,9 +4,12 @@
 
 1. Description-grounded module mapping
 2. Python call-chain attribution
-3. Dual-stream grouping
-4. Mapping files
-5. Stable statistics
+3. Pre-resolved dispatch-site cache
+4. Layer-segmentation priors from the same pre-pass
+5. Prefilled slot skeleton
+6. Dual-stream grouping
+7. Mapping files
+8. Stable statistics
 
 ## Description-grounded module mapping
 
@@ -76,6 +79,85 @@ When the dispatch site cannot be confidently identified (e.g. the call chain
 is ambiguous or the deepest frame is inside vendored/compiled code with no
 accessible source), leave `dispatch_code_snippet` blank and record the gap in
 `uncertain_mappings` instead of guessing a line range.
+
+## Pre-resolved dispatch-site cache
+
+A task may supply a dispatch-site cache built by `reconstruct-profiler-call-tree`
+from a torch profiler trace of the same deployment. The trace records Python
+frames per CUDA launch, so the cache already answers "which Python statement
+launched this kernel" without searching the source tree per kernel. Keys are
+kernel symbols, so one lookup covers every launch of that symbol.
+
+Consult it before searching source. Per-entry trust levels:
+
+- `dispatch_code_snippet` present -- use it as `dispatch_code_snippet`, with
+  `enclosing_branch` as the branch condition that explains why it ran.
+- only `dispatch_function_body` present -- the launching statement could not be
+  matched by callee name (the dispatch frame is the deepest Python frame, below
+  which execution enters native code). Treat the body as a bounded search window
+  and select the statement yourself; do not paste the whole body as the snippet.
+- `line_drift: true` -- the supplied checkout disagrees with the traced build for
+  that function. The function name is authoritative; the recorded line is not.
+  Cite the resolved location and mark the claim accordingly.
+- kernel symbol absent -- no shortcut exists; do the normal recursive search.
+
+The cache is evidence about call sites only. It never overrides the trace as
+timing authority, never supplies `unit_position`/`unit_id`/`unit_variant`, and
+never substitutes for the architecture taxonomy. Record in `mapping_reason` that
+the call site came from the cache, and keep `uncertain_mappings` for entries whose
+statement you could not confirm.
+
+## Layer-segmentation priors from the same pre-pass
+
+When the dispatch-site cache is supplied, the pre-pass also wrote its own layer
+segmentation next to it: `final_report.md` (anchor kernel, layer count, selected
+forward pass, total kernel time), `rankings/slowest_layers.csv` (per-layer time)
+and `mappings/kernel_to_layer.csv` (kernel -> layer/submodule).
+
+Read these first and treat them as a **starting hypothesis**, not as findings. They
+were derived from a torch profiler capture, which is a different run than the nsys
+trace under analysis: layer count and anchor kernel are expected to agree, absolute
+timings are not. Confirm the anchor, the layer count and the repeating unit against
+the nsys SQLite before relying on them, and keep nsys as the sole timing authority.
+State it explicitly when the two captures disagree rather than silently preferring
+either one.
+
+## Prefilled slot skeleton
+
+`scripts/build_slot_skeleton.py` turns the nsys SQLite plus the dispatch-site
+cache into a draft slot table for one representative repeating unit. Run it after
+the unit is fixed and before writing any semantics.
+
+Structure: `symbols` holds one entry per distinct kernel symbol (call chain,
+dispatch statement, `line_drift`, function body window, template integers);
+`slots` is the ordered unit, each slot referencing a symbol and carrying its own
+duration, stream, grid and block. A 4-layer GLM5.2 unit is 184 slots over 49
+symbols, so the two levels keep the draft an order of magnitude smaller than
+inlining evidence per slot.
+
+`cache_match` per symbol, strongest first:
+
+- `exact` -- the demangled name matched a cache key verbatim.
+- `normalized` -- matched after canonicalizing demangling spelling (nsys writes
+  `<unnamed>::foo<(unsigned int)16>` where the torch profiler writes
+  `(anonymous namespace)::foo<16u>`). Same instantiation, different spelling.
+- `leaf` -- only the leaf symbol matched, so the call chain came from a *different*
+  template instantiation. Usually the same call site, not always. Confirm before
+  citing.
+- `missing` -- nothing prefilled; resolve the slot the normal way.
+
+`module`, `functional_module`, `category`, `shape`, `introduction` and
+`mapping_reason` are empty by design. Fill them; do not let the empty fields
+survive into the tables.
+
+Two properties worth relying on: the unit is selected deterministically (modal
+kernel count, then median wall span, after skipping the cold first unit), so a
+rerun on the same trace produces the same draft; and `duration_us` is that one
+occurrence, never the stable-sample average, so statistics still come from the
+full sample set.
+
+Two failure modes to avoid: citing a `leaf` call chain without checking it, and
+copying `duration_us` into the tables in place of the averaged sample.
 
 ## Dual-stream grouping
 

@@ -83,6 +83,34 @@ For grouped MoE, distinguish logical routed rows from padded physical rows. If
 the trace exposes only logical work, report logical MFU and say so. Do not
 invent expert padding.
 
+### Mixed-input GEMMs
+
+`dense_tflops_per_gpu` is keyed by one dtype, so the peak is resolved
+automatically only when a GEMM's tensor inputs share a dtype. When they do not --
+fp8 activations against mxfp4 weights, for instance -- set `mfu_peak_tflops`
+explicitly on the rule and cite `mixed_input_rules` in
+`references/hardware-peaks.json`.
+
+The rule there is that on Blackwell the tcgen05 `mxf8f6f4` path runs fp8/fp6/fp4
+operands at a single rate, so a mixed-input GEMM runs at the rate of its *widest*
+operand, not at the narrow operand's headline rate. SGLang's MegaMoE grouped GEMM
+on B200 is the worked example: fp8 x mxfp4 peaks at 4500 TFLOPS/GPU (fp8), not
+9000 (fp4). Do not let the narrow operand set the peak just because it appears in
+the kernel name.
+
+Two consequences to apply without rediscovering them:
+
+- A fused kernel whose narrow operand is sub-byte and which folds several GEMMs
+  into one launch has no expressible `(M,N,K)` byte count. Declare
+  `storage_dtypes.b` as an explicit unmodeled marker such as
+  `"mxfp4-subbyte-unmodeled"` and leave `mbu` empty. Publishing MFU with an
+  empty MBU is correct here; publishing both contradicts the semantic map.
+- Any field you add to a semantic rule must be threaded through your own emit
+  pipeline. `mfu_peak_tflops` and `peak_note` are the ones that get silently
+  dropped: the rule keeps the value, the CSV loses it, and MFU comes out empty
+  along with it. After adding a field, diff one emitted row against its rule
+  before running the validators.
+
 ## MBU evidence (approximate)
 
 For each eligible GEMM record, alongside MFU, also estimate accessed bytes and

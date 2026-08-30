@@ -61,6 +61,14 @@ Record conflicts. Do not infer runtime branches from source defaults.
   export, SQLite inspection or repeating-unit selection.
 - Read [references/architecture-taxonomy.md](references/architecture-taxonomy.md)
   before naming modules or mapping a heterogeneous/composite unit.
+- Use [references/functional-modules.json](references/functional-modules.json) as
+  the `功能模块` vocabulary; it exists so two analyses of one model stay comparable.
+  Its `reuse` section says which stages a new model must reuse verbatim and how to
+  add a block for a new attention mechanism. The validator checks five things
+  against it -- unknown names, deprecated names, per-variant stage count against
+  the 5-8 window, stages under ~2% of their block, and whether the emitted stage
+  set matches the declared family's `typical_layer` -- so record the family id in
+  `functional_module_policy` and match its stage list, or state why you deviated.
 - Read [references/mapping-and-stats.md](references/mapping-and-stats.md) before
   kernel mapping, call-chain tracing, dual-stream handling or stable statistics.
 - Read [references/runtime-evidence-and-mfu.md](references/runtime-evidence-and-mfu.md)
@@ -193,6 +201,14 @@ Verify each selected structural unit through:
 Assign exact network layer IDs only from explicit metadata or a verified full
 model-depth signature. Otherwise leave them blank.
 
+When a dispatch-site cache was supplied, the same pre-pass also wrote a layer
+segmentation next to it (`final_report.md`, `rankings/slowest_layers.csv`,
+`mappings/kernel_to_layer.csv`). Read it first as a starting hypothesis for the
+anchor kernel and layer count, then confirm it against the nsys SQLite -- it comes
+from a different capture, so it saves search, not verification. See
+references/mapping-and-stats.md ("Layer-segmentation priors from the same
+pre-pass").
+
 ### 5. Map every kernel
 
 Assign every selected kernel:
@@ -208,6 +224,47 @@ Assign every selected kernel:
 Follow wrappers to the narrowest Python statement that launches CUDA/C++/Triton
 work. Cite the deepest repository-relative path and normally fewer than 15
 lines. Do not emit `unknown`, `misc` or `other`.
+
+Both name columns have to be reproducible, because two analyses of the same model
+are compared by name. Two runs of this skill on one GLM5.2 capture produced 8
+functional modules each and agreed on 2 names, and 62 versus 56 distinct `module`
+values with 7 in common -- which makes per-module timing impossible to diff.
+
+- `module`: lift every segment from the source. The leaf is an `nn.Module`
+  attribute or the dispatching function, not a phrase you compose. If the leaf's
+  words appear nowhere in the row's call chain, dispatch statement or kernel name,
+  it was invented -- pick the source symbol instead.
+- `功能模块`: choose from references/functional-modules.json for the matching
+  architecture family. Only invent a name when no canonical entry fits, and then
+  record it plus the reason in the taxonomy's `functional_module_policy`.
+
+`validate_analysis_package.py` reports both as warnings, so drift shows up in the
+validation report without failing an otherwise correct package.
+
+When the task supplies a pre-resolved dispatch-site cache (produced by
+`reconstruct-profiler-call-tree` from a torch profiler trace of the same
+deployment), consult it per kernel symbol before searching the source tree, and
+read references/mapping-and-stats.md ("Pre-resolved dispatch-site cache") for the
+per-entry trust levels. It is a lookup table, not an authority: it never
+overrides the trace for timing, and kernels missing from it still require the
+normal search.
+
+Once the repeating unit is fixed, get the mechanical half of this step written for
+you instead of transcribing it:
+
+```bash
+python scripts/build_slot_skeleton.py \
+  --sqlite <trace.sqlite> --cache <dispatch_site_cache_with_snippets.json> \
+  --anchor <layer_start_kernel> --anchor-confirm <once_per_layer_kernel> \
+  --layers-per-unit <N> --output work/slot_skeleton.json
+```
+
+It selects a representative unit deterministically and prefills, per slot, the
+launch geometry, duration, template integers and -- from the cache -- the call
+chain, dispatch statement and `line_drift` state. `module`, `functional_module`,
+`category`, `shape`, `introduction` and `mapping_reason` stay empty because they
+are the analysis. Check `coverage` and each symbol's `cache_match` before citing
+anything: see references/mapping-and-stats.md ("Prefilled slot skeleton").
 
 Keep module occurrences contiguous and one-stream-only. Split occurrences when
 related work uses separate streams.

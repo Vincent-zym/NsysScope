@@ -60,6 +60,9 @@ cd /path/to/NsysScope
 点击「新建分析」，提供：
 
 - `.nsys-rep` 或已导出的 `.sqlite`
+- 可选的 torch profiler trace（`.trace.json` / `.trace.json.gz`，采集时 `activities` 需含 GPU）：
+  提供后先从中解析每个 kernel 的 Python 调用栈与源码位置供 Agent 查表，省去逐个 kernel
+  检索源码；解析失败只记日志，不影响主分析
 - 模型 `config.json`、真实部署脚本、对应的模型源码根目录
 - 模型名称、推理阶段、硬件信息
 - 一个空的或未创建的结果目录
@@ -76,15 +79,16 @@ result-package/
 ├── xlsx/                # 对应的 XLSX 工作簿
 ├── trace/               # 导出或复制的 SQLite trace
 ├── logs/job.log         # 有大小上限的任务日志
+├── dispatch_sites/      # 仅在提供 torch profiler trace 时生成的调用栈查表
 └── metadata/            # 请求、prompt、manifest 与校验证据
 ```
 
 ## 导入已有结果
 
 使用「导入结果目录（无需 Agent）」指定包目录或 ZIP：已有 `analysis.json` 则直接
-打开，只有 CSV 表则自动构建。七张 CSV 全部为必需契约（第 7 张 forward 链路表
-缺失时会用包内 trace 补齐，补不出则判失败），manifest/语义映射/
-校验报告/统计 sidecar 为可选的可追溯性增强。
+打开，只有 CSV 表则自动构建。前六张 CSV 为必需契约；第 7 张 forward 链路表是可选的
+补充视图（缺失时会用包内 trace 补齐，补不出则跳过并记录日志，不影响导入成功），
+manifest/语义映射/校验报告/统计 sidecar 为可选的可追溯性增强。
 
 ## 常用环境变量
 

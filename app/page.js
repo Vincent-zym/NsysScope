@@ -312,6 +312,7 @@ function JobDialog({ open, onClose, onLoaded }) {
     stage: "prefill", hardware: "Nvidia B200",
     report_path: "", config_path: "", launch_path: "", source_path: "",
     design_path: "", existing_package_path: "", result_path: "",
+    torch_trace_path: "",
     // Table filename prefix. No longer user-facing: every job gets its own empty
     // result directory so the tables can never collide, and imported packages
     // fall back to the prefix detected on disk.
@@ -722,6 +723,7 @@ function JobDialog({ open, onClose, onLoaded }) {
             <p className="package-hint span-2">目录内有 analysis.json 时直接展示；只有六张规范 CSV 也能自动转换，不要求额外 sidecar。支持 csv/ 子目录和旧版平铺目录。</p>
           </> : <>
             <label className="span-2"><span>Nsys / Sqlite 文件<i className="req">*</i></span><input required value={form.report_path} onChange={set("report_path")} placeholder="/path/to/report.nsys-rep 或 /path/to/report.sqlite" /><small>注意：.nsys-rep 导出成 .sqlite 的结果与 Nsight Systems 版本有关，建议直接提供已导出的 .sqlite 文件。</small></label>
+            <label className="span-2">Torch Profiler trace（可选，可加速分析）<input value={form.torch_trace_path} onChange={set("torch_trace_path")} placeholder="/path/to/xxx-TP-0.trace.json 或 .trace.json.gz" /><small>提供后会先从中解析每个 kernel 的 Python 调用栈与源码位置，供分析 Agent 查表使用，省去逐个 kernel 检索源码。要求采集时 activities 含 GPU（否则 trace 里没有 kernel 事件）；解析失败不影响主分析。</small></label>
             <label><span>部署 YAML / 启动命令脚本<i className="req">*</i></span><input required value={form.launch_path} onChange={set("launch_path")} placeholder="/path/to/start_server.sh" /></label>
             <label><span className="field-title"><span>Model config.json{!hasBuiltinConfig && <i className="req">*</i>}</span>{hasBuiltinConfig && <em className="builtin-hint">已内置，可留空</em>}</span><input required={!hasBuiltinConfig} value={form.config_path} onChange={set("config_path")} placeholder={hasBuiltinConfig ? "留空则使用内置 config.json" : "/path/to/config.json"} /></label>
             <label className="span-2"><span>模型源码根目录<i className="req">*</i></span><input required value={form.source_path} onChange={set("source_path")} placeholder="/path/to/sglang/source" /></label>
