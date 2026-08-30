@@ -182,7 +182,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "provenance": {
             "derivedFrom": f"sgl-project/sglang {UPSTREAM_RELPATH}::FUSION_PATTERN_REGISTRY",
             "importedAt": dt.date.today().isoformat(),
-            "sglangCheckout": os.path.abspath(args.sglang_root),
+            # Only the checkout's directory name, never its absolute path: this
+            # registry is committed and shared, and whose home it was imported
+            # from is not provenance anyone can act on. `sglangHead` is the part
+            # that identifies the upstream state.
+            "sglangCheckout": os.path.basename(os.path.abspath(args.sglang_root)),
             "sglangHead": git_head(args.sglang_root),
             "note": (
                 "candidatePathsPresentLocally is a snapshot of the checkout at import "

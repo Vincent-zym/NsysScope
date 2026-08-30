@@ -3,7 +3,7 @@
   "provenance": {
     "derivedFrom": "sgl-project/sglang .claude/skills/llm-torch-profiler-analysis/scripts/triage_kernel_helpers.py::FUSION_PATTERN_REGISTRY",
     "importedAt": "2026-08-08",
-    "sglangCheckout": "/home/users/zhongyuanming/sglang_community/sglang",
+    "sglangCheckout": "sglang",
     "sglangHead": null,
     "note": "candidatePathsPresentLocally is a snapshot of the checkout at import time; scan_fusion_candidates.py re-resolves paths by basename against the analysed source tree, so upstream file moves do not break matching."
   },

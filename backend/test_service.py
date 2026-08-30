@@ -32,16 +32,25 @@ from scripts.build_analysis_json import (
 
 
 PROJECT = Path(__file__).resolve().parents[1]
+# A real seven-table package to exercise import/conversion against. It is too
+# large to commit, so point NSYSSCOPE_TEST_PACKAGE at one; the tests that need it
+# skip loudly rather than passing vacuously when it is absent.
 PACKAGE = Path(
-    "/home/users/zhongyuanming/nsys_statis_analysis/"
-    "glm52_prefill_nonshared_indexer_20260728_run01"
-)
+    os.getenv("NSYSSCOPE_TEST_PACKAGE", str(PROJECT / "does-not-exist" / "package"))
+).expanduser()
+
+
+def require_package() -> None:
+    if not PACKAGE.exists():
+        pytest.skip(
+            "set NSYSSCOPE_TEST_PACKAGE to a seven-table result package to run this test",
+        )
 
 
 def settings(tmp_path: Path) -> Settings:
     return Settings(
         data_dir=tmp_path / "data",
-        allowed_roots=(Path("/home/users/zhongyuanming"), tmp_path),
+        allowed_roots=(PACKAGE.parent, tmp_path),
         api_token="test-token",
         cors_origins=("http://localhost:3000",),
         max_workers=1,
@@ -85,8 +94,7 @@ def package_copy(tmp_path: Path) -> Path:
 
 
 def test_existing_package_job(tmp_path: Path) -> None:
-    if not PACKAGE.exists():
-        return
+    require_package()
     package = package_copy(tmp_path)
     client = TestClient(create_app(settings(tmp_path)))
     headers = {"X-NsysScope-Token": "test-token"}
@@ -160,8 +168,7 @@ def test_existing_analysis_json_directory_import(tmp_path: Path) -> None:
 
 
 def test_existing_six_tables_import_without_sidecars(tmp_path: Path) -> None:
-    if not PACKAGE.exists():
-        return
+    require_package()
     package = tmp_path / "tables-only"
     package.mkdir()
     for source in PACKAGE.glob("glm52_*.csv"):
@@ -228,8 +235,7 @@ def test_external_skill_selection_uses_lightweight_pointer(tmp_path: Path) -> No
 
 
 def test_zip_six_table_import_writes_only_to_selected_result(tmp_path: Path) -> None:
-    if not PACKAGE.exists():
-        return
+    require_package()
     archive_path = tmp_path / "shared-result.zip"
     with zipfile.ZipFile(archive_path, "w") as archive:
         for source in PACKAGE.glob("glm52_*.csv"):
@@ -538,8 +544,7 @@ def test_validate_analysis_rejects_collapsed_heterogeneous_cycle(tmp_path: Path)
 
 
 def test_log_pagination_and_conversion_retry(tmp_path: Path) -> None:
-    if not PACKAGE.exists():
-        return
+    require_package()
     package = package_copy(tmp_path)
     application = create_app(settings(tmp_path))
     client = TestClient(application)
@@ -594,8 +599,7 @@ def test_log_pagination_and_conversion_retry(tmp_path: Path) -> None:
 
 
 def test_comate_provider_end_to_end_with_fake_zulu(tmp_path: Path) -> None:
-    if not PACKAGE.exists():
-        return
+    require_package()
     fake_zulu = tmp_path / "zulu"
     fake_zulu.write_text(textwrap.dedent(f"""\
         #!/usr/bin/env python3
