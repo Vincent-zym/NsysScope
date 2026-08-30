@@ -101,6 +101,7 @@ manifest/语义映射/校验报告/统计 sidecar 为可选的可追溯性增强
 | `NSYSSCOPE_AGENT_STALL_TIMEOUT_SECONDS` | 无产出、无输出、无 CPU、无会话更新多久判为停滞（默认 1800） |
 | `NSYSSCOPE_COMATE_STORE_DIR` | Comate 会话目录，用于判断 Agent 是否真的还在跑（默认 `~/.comate-engine/store`） |
 | `NSYSSCOPE_JOB_LOG_MAX_BYTES` | 单任务日志总大小上限 |
+| `NSYSSCOPE_TEST_PACKAGE` | 指向一份七表结果包，供 `pytest backend/test_service.py` 中 5 个导入/端到端测试使用；未设置时这些测试会显式 skip |
 
 ## 发布到 popo
 

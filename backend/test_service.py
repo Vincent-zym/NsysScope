@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import json
 import os
 import shutil
@@ -47,6 +48,37 @@ def require_package() -> None:
         )
 
 
+def package_tables() -> list[Path]:
+    """The package's CSV tables, wherever the producing run put them."""
+    root = PACKAGE / "csv" if (PACKAGE / "csv").is_dir() else PACKAGE
+    return sorted(root.glob("*_table.csv"))
+
+
+def package_prefix() -> str:
+    """The prefix the package was produced with, read off the origin table."""
+    for table in package_tables():
+        if table.name.endswith("_operator_origin_table.csv"):
+            return table.name[: -len("_operator_origin_table.csv")]
+    raise AssertionError(f"no *_operator_origin_table.csv in {PACKAGE}")
+
+
+def package_operator_count() -> int:
+    """Operator rows in the origin table, excluding its total row.
+
+    The origin table marks its total with `module=__layer_total__` rather than
+    `序号=总计`, so is_total_row alone would count it as an operator.
+    """
+    origin = next(
+        table for table in package_tables()
+        if table.name.endswith("_operator_origin_table.csv")
+    )
+    with origin.open(newline="", encoding="utf-8") as handle:
+        return sum(
+            1 for row in csv.DictReader(handle)
+            if not is_total_row(row) and row.get("module") != "__layer_total__"
+        )
+
+
 def settings(tmp_path: Path) -> Settings:
     return Settings(
         data_dir=tmp_path / "data",
@@ -84,10 +116,25 @@ def settings(tmp_path: Path) -> Settings:
     )
 
 
-def package_copy(tmp_path: Path) -> Path:
-    target = tmp_path / "package"
+def package_copy(tmp_path: Path, *, tables_only: bool = False) -> Path:
+    """A flat copy of the fixture package, whatever layout it shipped in.
+
+    A package produced by the agent keeps its tables in csv/ and its sidecars in
+    metadata/; an older one is flat. Flattening here is what lets these tests run
+    against any real result directory instead of one specific one. `tables_only`
+    keeps the manifest, without which validate_sampling rejects the package, and
+    drops the statistics/semantic/validation sidecars.
+    """
+    target = tmp_path / ("tables-only" if tables_only else "package")
     target.mkdir()
-    for source in PACKAGE.iterdir():
+    for table in package_tables():
+        shutil.copy2(table, target / table.name)
+    sidecars = [*PACKAGE.glob("*.json"), *(PACKAGE / "metadata").glob("*.json")]
+    if tables_only:
+        sidecars = [
+            path for path in sidecars if path.name.endswith("_analysis_manifest.json")
+        ]
+    for source in sidecars:
         if source.is_file():
             shutil.copy2(source, target / source.name)
     return target
@@ -104,7 +151,7 @@ def test_existing_package_job(tmp_path: Path) -> None:
         "stage": "prefill",
         "hardware": "Nvidia B200",
         "existing_package_path": str(package),
-        "prefix": "glm52",
+        "prefix": package_prefix(),
     })
     assert response.status_code == 200, response.text
     job = response.json()
@@ -118,8 +165,8 @@ def test_existing_package_job(tmp_path: Path) -> None:
     assert analysis.status_code == 200
     payload = analysis.json()
     assert payload["schemaVersion"] == "1.0"
-    assert len(payload["operators"]) == 61
-    assert payload["summary"]["stableSamples"] == 1164
+    assert len(payload["operators"]) == package_operator_count()
+    assert payload["summary"]["stableSamples"] >= 1
 
 
 def test_auth_and_path_boundary(tmp_path: Path) -> None:
@@ -169,10 +216,8 @@ def test_existing_analysis_json_directory_import(tmp_path: Path) -> None:
 
 def test_existing_six_tables_import_without_sidecars(tmp_path: Path) -> None:
     require_package()
-    package = tmp_path / "tables-only"
-    package.mkdir()
-    for source in PACKAGE.glob("glm52_*.csv"):
-        shutil.copy2(source, package / source.name)
+    package = package_copy(tmp_path, tables_only=True)
+    tables = len(list(package.glob("*.csv")))
     client = TestClient(create_app(settings(tmp_path)))
     headers = {"X-NsysScope-Token": "test-token"}
     response = client.post("/api/jobs", headers=headers, json={
@@ -181,7 +226,7 @@ def test_existing_six_tables_import_without_sidecars(tmp_path: Path) -> None:
         "stage": "prefill",
         "hardware": "Nvidia B200",
         "existing_package_path": str(package),
-        "prefix": "glm52",
+        "prefix": package_prefix(),
     })
     assert response.status_code == 200, response.text
     job = response.json()
@@ -191,24 +236,28 @@ def test_existing_six_tables_import_without_sidecars(tmp_path: Path) -> None:
             break
         time.sleep(0.05)
     assert job["status"] == "succeeded", job
-    assert len(list((package / "xlsx").glob("*.xlsx"))) == 6
+    assert len(list((package / "xlsx").glob("*.xlsx"))) == tables
     payload = json.loads((package / "analysis.json").read_text())
     assert payload["metadata"]["model"] == "GLM5.2"
-    assert payload["summary"]["stableSamples"] == 1
-    assert sum(item["count"] for item in payload["classifications"]) == 61
+    # The sample count survives without the statistics sidecar because the
+    # manifest carries it; the converter only falls back to 1 when neither is
+    # present, and validate_sampling rejects a package missing the manifest.
+    assert payload["summary"]["stableSamples"] >= 1
+    assert sum(item["count"] for item in payload["classifications"]) == (
+        package_operator_count()
+    )
     by_name = {
         operator["kernelName"]: operator["category"]
         for operator in payload["operators"]
     }
-    assert any(
-        name.startswith("per_token_group_quant_8bit_kernel")
-        and category == "auxiliary"
-        for name, category in by_name.items()
-    )
-    assert any(
-        name.startswith("generalLayerNorm") and category == "auxiliary"
-        for name, category in by_name.items()
-    )
+    assert set(by_name.values()) <= {"core", "communication", "auxiliary"}
+    # A quantisation or norm helper is never core compute, whatever else the
+    # package contains: mis-classifying one inflates the core-compute table.
+    helpers = [
+        (name, category) for name, category in by_name.items()
+        if name.startswith(("per_token_group_quant", "generalLayerNorm", "rmsnorm"))
+    ]
+    assert all(category == "auxiliary" for _, category in helpers), helpers
 
 
 def test_external_skill_selection_uses_lightweight_pointer(tmp_path: Path) -> None:
@@ -237,8 +286,9 @@ def test_external_skill_selection_uses_lightweight_pointer(tmp_path: Path) -> No
 def test_zip_six_table_import_writes_only_to_selected_result(tmp_path: Path) -> None:
     require_package()
     archive_path = tmp_path / "shared-result.zip"
+    tables = package_tables()
     with zipfile.ZipFile(archive_path, "w") as archive:
-        for source in PACKAGE.glob("glm52_*.csv"):
+        for source in tables:
             archive.write(source, f"shared/csv/{source.name}")
     result_path = tmp_path / "imported-result"
     client = TestClient(create_app(settings(tmp_path)))
@@ -250,7 +300,7 @@ def test_zip_six_table_import_writes_only_to_selected_result(tmp_path: Path) -> 
         "hardware": "Nvidia B200",
         "existing_package_path": str(archive_path),
         "result_path": str(result_path),
-        "prefix": "glm52",
+        "prefix": package_prefix(),
     })
     assert response.status_code == 200, response.text
     job = response.json()
@@ -260,8 +310,8 @@ def test_zip_six_table_import_writes_only_to_selected_result(tmp_path: Path) -> 
             break
         time.sleep(0.05)
     assert job["status"] == "succeeded", job
-    assert len(list((result_path / "csv").glob("*.csv"))) == 6
-    assert len(list((result_path / "xlsx").glob("*.xlsx"))) == 6
+    assert len(list((result_path / "csv").glob("*.csv"))) == len(tables)
+    assert len(list((result_path / "xlsx").glob("*.xlsx"))) == len(tables)
     assert (result_path / "analysis.json").exists()
     assert (result_path / "nsysscope-package.json").exists()
     assert not list(tmp_path.glob("import-*"))
@@ -555,7 +605,7 @@ def test_log_pagination_and_conversion_retry(tmp_path: Path) -> None:
         "stage": "prefill",
         "hardware": "Nvidia B200",
         "existing_package_path": str(package),
-        "prefix": "glm52",
+        "prefix": package_prefix(),
     })
     job = response.json()
     for _ in range(100):
@@ -600,6 +650,9 @@ def test_log_pagination_and_conversion_retry(tmp_path: Path) -> None:
 
 def test_comate_provider_end_to_end_with_fake_zulu(tmp_path: Path) -> None:
     require_package()
+    # The fake agent copies a flattened package into its --cwd, so this test does
+    # not care how the fixture package arranges its tables and sidecars.
+    staged = package_copy(tmp_path)
     fake_zulu = tmp_path / "zulu"
     fake_zulu.write_text(textwrap.dedent(f"""\
         #!/usr/bin/env python3
@@ -628,12 +681,7 @@ def test_comate_provider_end_to_end_with_fake_zulu(tmp_path: Path) -> None:
             raise SystemExit(4)
         cwd = Path(sys.argv[sys.argv.index("--cwd") + 1])
         (cwd / "zulu-args.json").write_text(json.dumps(sys.argv))
-        package = Path({str(PACKAGE)!r})
-        sources = list(package.glob("glm52_*")) + [
-            package / "position_operator_stats.json",
-            package / "validation_report.json",
-        ]
-        for source in sources:
+        for source in sorted(Path({str(staged)!r}).iterdir()):
             if source.is_file():
                 shutil.copy2(source, cwd / source.name)
         print(json.dumps({{"type": "task-json", "message": "x" * 300000}}))
@@ -678,7 +726,7 @@ def test_comate_provider_end_to_end_with_fake_zulu(tmp_path: Path) -> None:
         "launch_path": str(launch),
         "source_path": str(source),
         "result_path": str(tmp_path / "result"),
-        "prefix": "glm52",
+        "prefix": package_prefix(),
     })
     assert response.status_code == 200, response.text
     job = response.json()
@@ -704,9 +752,10 @@ def test_comate_provider_end_to_end_with_fake_zulu(tmp_path: Path) -> None:
     job_log = log_path.read_text()
     assert "详细会话未写入日志" in job_log
     assert len(job_log.encode()) < 50_000
-    assert len(list((output / "csv").glob("*.csv"))) == 6
+    expected_tables = len(package_tables())
+    assert len(list((output / "csv").glob("*.csv"))) == expected_tables
     workbooks = list((output / "xlsx").glob("*.xlsx"))
-    assert len(workbooks) == 6
+    assert len(workbooks) == expected_tables
     for workbook in workbooks:
         with zipfile.ZipFile(workbook) as archive:
             assert "xl/worksheets/sheet1.xml" in archive.namelist()
@@ -714,7 +763,7 @@ def test_comate_provider_end_to_end_with_fake_zulu(tmp_path: Path) -> None:
     assert (output / "nsysscope-package.json").exists()
     analysis = client.get(job["analysis_url"], headers=headers).json()
     assert analysis["schemaVersion"] == "1.0"
-    assert len(analysis["operators"]) == 61
+    assert len(analysis["operators"]) == package_operator_count()
 
 
 def test_codex_model_catalog_from_local_cache(tmp_path: Path, monkeypatch) -> None:
@@ -1172,3 +1221,37 @@ def test_plugin_serves_the_bundled_skills() -> None:
         assert (exposed / name).resolve() == (bundled / name).resolve(), (
             f"plugin skill {name} is a separate copy, not the bundled skill"
         )
+
+
+def test_job_log_names_the_skill_and_warns_about_a_shadowing_copy(
+    tmp_path: Path,
+) -> None:
+    # skill_manager resolves ~/.codex/skills before bundled/, so an old copy runs
+    # instead of the repository's skill with nothing in the log to show it.
+    configured = settings(tmp_path)
+    configured.prepare()
+    runner = JobRunner(configured, JobStore(configured.data_dir / "jobs.sqlite"))
+
+    bundled_dir = tmp_path / "bundled"
+    bundled_dir.mkdir()
+    runner.log_skill_source(bundled_dir, {
+        "name": "sglang-nsys-static-analysis",
+        "source": "bundled",
+        "path": str(PROJECT / "bundled" / "skills" / "sglang-nsys-static-analysis"),
+        "sha256": "a" * 64,
+    })
+    bundled_log = JobRunner.job_log_path(bundled_dir).read_text(encoding="utf-8")
+    assert "sglang-nsys-static-analysis (bundled)" in bundled_log
+    assert "注意" not in bundled_log
+
+    shadowed_dir = tmp_path / "shadowed"
+    shadowed_dir.mkdir()
+    runner.log_skill_source(shadowed_dir, {
+        "name": "sglang-nsys-static-analysis",
+        "source": "codex",
+        "path": "/home/someone/.codex/skills/sglang-nsys-static-analysis",
+        "sha256": "b" * 64,
+    })
+    shadowed_log = JobRunner.job_log_path(shadowed_dir).read_text(encoding="utf-8")
+    assert "(codex)" in shadowed_log
+    assert "不是仓库自带的 skill" in shadowed_log

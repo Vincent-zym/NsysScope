@@ -293,9 +293,11 @@ class JobRunner:
                 context.update(request.model_dump())
                 metadata_dir = job_dir / "metadata"
                 metadata_dir.mkdir(exist_ok=True)
+                provenance = self.skill_provenance()
                 (metadata_dir / "skill.json").write_text(
-                    json.dumps(self.skill_provenance(), ensure_ascii=False, indent=2) + "\n",
+                    json.dumps(provenance, ensure_ascii=False, indent=2) + "\n",
                 )
+                self.log_skill_source(job_dir, provenance)
                 (metadata_dir / "context.json").write_text(
                     json.dumps(context, ensure_ascii=False, indent=2) + "\n",
                 )
@@ -821,6 +823,27 @@ supplied model source root.
             "path": str(root),
             "sha256": digest.hexdigest(),
         }
+
+    def log_skill_source(self, job_dir: Path, provenance: dict[str, str]) -> None:
+        """Say which copy of the skill is about to run, and warn if it is not ours.
+
+        skill_manager resolves ~/.codex/skills before bundled/, so a copy left
+        behind by an older install silently shadows the repository's skill and
+        the job produces the old behaviour with no sign of it. metadata/skill.json
+        has always recorded this; the job log is where someone actually looks.
+        """
+        source = provenance.get("source", "?")
+        line = (
+            f"[skill] 使用 {provenance.get('name')} ({source})："
+            f"{provenance.get('path')} sha256={provenance.get('sha256', '')[:12]}"
+        )
+        if source != "bundled":
+            line += (
+                "\n[skill] 注意：这不是仓库自带的 skill，行为可能与当前代码不一致。"
+                "要强制使用自带版本，请 unset NSYSSCOPE_SKILL_DIR、"
+                "执行 nsysscope skill reset，或移走 ~/.codex/skills 下的同名目录。"
+            )
+        self.log(job_dir, line)
 
     def run_codex(
         self, job_id: str, job_dir: Path, request: JobCreate,
