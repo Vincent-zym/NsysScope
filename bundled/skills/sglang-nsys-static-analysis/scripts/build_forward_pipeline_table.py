@@ -14,8 +14,16 @@ Captures without CUDA graphs (prefill, eager decode -- with or without speculati
 decoding) fall back to the step marker plus the layer segmentation the table
 pipeline already does: the target forward ends at its last layer, the draft forward
 starts at the marker's draft population and ends one layer stride after its last
-layer core. Each forward's tail then lands in the following prep phase; see
-``draft_boundary_source`` in the manifest.
+layer core. When the marker fires only once per step (prefill), the draft is found
+from the timeline's shape instead -- see ``detect_eager_draft``. Each forward's tail
+then lands in the following prep phase; see ``draft_boundary_source`` in the manifest.
+
+Every phase reports **busy** time. Idle before the first layer, between layers and in
+the prep windows is the ``步间间隙`` row, a sibling of the phases, so that
+
+    forward step = target [+ draft] + 步间间隙
+
+closes exactly. A hole inside a layer's own wall span stays in that layer.
 
 See references/output-spec.md ("Forward pipeline table") for the column contract,
 the closure invariants and the inter-token-gap definition.
@@ -70,9 +78,152 @@ def parse_args() -> argparse.Namespace:
                    help="pretend the capture has no graphId, forcing the marker + layer "
                         "segmentation path; useful to cross-check that path against a "
                         "graph-captured trace whose phases are already known")
+    p.add_argument("--model-config", default=None,
+                   help="the model's config.json; num_hidden_layers and "
+                        "num_nextn_predict_layers declare how many layers a step must "
+                        "contain, and in which phase")
+    p.add_argument("--launch", default=None,
+                   help="the launch command/script; --speculative-* flags declare "
+                        "whether a draft forward runs at all")
+    p.add_argument("--runtime-evidence", default=None,
+                   help="runtime_evidence.json from audit_runtime_evidence.py; its "
+                        "captured server args outrank the launch script")
+    p.add_argument("--stage", default=None,
+                   help="prefill or decode; a prefill step runs one draft extend, a "
+                        "decode step runs --speculative-num-steps of them")
+    p.add_argument("--on-declaration-conflict", choices=("degrade", "fail"),
+                   default="degrade",
+                   help="what to do when the trace does not reproduce the config/launch "
+                        "declaration: 'degrade' publishes the table with the conflict "
+                        "recorded in the manifest and in the total row's 备注 (default, "
+                        "so one disagreement never costs the whole table), 'fail' "
+                        "refuses to publish")
     p.add_argument("--manifest-out", default=None,
                    help="write the manifest fragment here as JSON")
     return p.parse_args()
+
+
+def _nested_get(payload: Dict[str, Any], key: str) -> Optional[Any]:
+    """Look a config key up at the root or in the usual sub-config nestings.
+
+    A multimodal checkpoint keeps the language model's layer count under
+    ``text_config`` / ``language_config``, so reading only the root would report a
+    model with no layers at all.
+    """
+    if key in payload:
+        return payload[key]
+    for nest in ("text_config", "language_config", "llm_config", "decoder"):
+        section = payload.get(nest)
+        if isinstance(section, dict) and key in section:
+            return section[key]
+    return None
+
+
+def _launch_flag(text: str, flag: str) -> Optional[str]:
+    match = re.search(rf"--{flag}[\s=]+([^\s\\]+)", text)
+    return match.group(1) if match else None
+
+
+def declared_topology(
+    model_config: Optional[str], launch: Optional[str],
+    runtime_evidence: Optional[str], stage: Optional[str],
+) -> Dict[str, Any]:
+    """What the config and the launch command say a forward step must contain.
+
+    The trace's job is to *verify* this, not to discover it. Layer counts and whether
+    a draft forward runs at all are decided before any kernel is read:
+
+    - ``num_hidden_layers`` is the target forward's layer count
+    - ``num_nextn_predict_layers`` is the draft model's, but only when the launch
+      command actually enables speculative decoding -- the weights can carry an MTP
+      layer that never runs
+    - a prefill step runs one draft extend; a decode step runs
+      ``--speculative-num-steps`` draft forwards before the verify
+
+    Captured server args (read out of the trace itself) outrank the launch script,
+    which can have been edited after the capture.
+    """
+    decl: Dict[str, Any] = {
+        "target_layers": None, "draft_layers": None, "speculative": None,
+        "speculative_tokens": None, "draft_forwards": None, "sources": {},
+    }
+    config: Dict[str, Any] = {}
+    if model_config and os.path.exists(model_config):
+        try:
+            with open(model_config, encoding="utf-8") as fh:
+                config = json.load(fh)
+        except (OSError, json.JSONDecodeError):
+            config = {}
+        else:
+            decl["sources"]["model_config"] = model_config
+    layers = _nested_get(config, "num_hidden_layers")
+    nextn = _nested_get(config, "num_nextn_predict_layers")
+    if isinstance(layers, int):
+        decl["target_layers"] = layers
+
+    algorithm: Optional[str] = None
+    tokens: Optional[Any] = None
+    steps: Optional[Any] = None
+    declared_anywhere = False
+    if runtime_evidence and os.path.exists(runtime_evidence):
+        try:
+            with open(runtime_evidence, encoding="utf-8") as fh:
+                evidence = json.load(fh)
+        except (OSError, json.JSONDecodeError):
+            evidence = {}
+        captured = evidence.get("captured_runtime") or {}
+        launch_material = evidence.get("launch_material") or {}
+        for block, label in ((captured, "captured_runtime"), (launch_material, "launch_material")):
+            if not isinstance(block, dict) or "speculative_algorithm" not in block:
+                continue
+            algorithm = block.get("speculative_algorithm")
+            tokens = block.get("speculative_num_draft_tokens")
+            steps = block.get("speculative_num_steps")
+            decl["sources"]["speculative"] = f"{runtime_evidence}:{label}"
+            declared_anywhere = True
+            break
+    if launch and os.path.exists(launch):
+        try:
+            text = open(launch, encoding="utf-8", errors="ignore").read()
+        except OSError:
+            text = ""
+        else:
+            declared_anywhere = True
+            # The captured args outrank the script, but they only outrank the fields
+            # they actually record -- num-steps is not among them, so fill the gaps.
+            if algorithm is None:
+                algorithm = _launch_flag(text, "speculative-algorithm")
+                if algorithm:
+                    decl["sources"]["speculative"] = launch
+            if tokens is None:
+                tokens = _launch_flag(text, "speculative-num-draft-tokens")
+            if steps is None:
+                steps = _launch_flag(text, "speculative-num-steps")
+                if steps is not None:
+                    decl["sources"]["speculative_num_steps"] = launch
+    if declared_anywhere:
+        # No --speculative-algorithm in a launch command that was actually read is a
+        # declaration too: the run has no draft forward, so nothing should look for one.
+        speculative = bool(algorithm) and str(algorithm).lower() not in {"none", "null"}
+        decl["speculative"] = speculative
+        decl["speculative_algorithm"] = algorithm or None
+        try:
+            decl["speculative_tokens"] = int(tokens) if tokens is not None else None
+        except (TypeError, ValueError):
+            decl["speculative_tokens"] = None
+        if speculative:
+            decl["draft_layers"] = nextn if isinstance(nextn, int) else None
+            try:
+                num_steps = int(steps) if steps is not None else None
+            except (TypeError, ValueError):
+                num_steps = None
+            decl["draft_forwards"] = (
+                1 if (stage or "").lower().startswith("prefill") else (num_steps or 1)
+            )
+        else:
+            decl["draft_layers"] = 0
+            decl["draft_forwards"] = 0
+    return decl
 
 
 def trace_fingerprint(path: str) -> Dict[str, Any]:
@@ -477,6 +628,101 @@ def _dominant_graph(entries: Sequence[Tuple[int, Optional[int]]]) -> Optional[in
     return max(counts, key=lambda k: counts[k]) if counts else None
 
 
+def detect_eager_draft(
+    cur: sqlite3.Cursor, device: int, info: Dict[str, Any], min_agreeing: int = 2,
+    forwards_per_step: int = 2, required: bool = False, policy: str = "degrade",
+) -> None:
+    """Locate the draft forward when the marker's gridX cannot split the step.
+
+    The *existence* of a draft forward is not discovered here -- the launch command
+    declares it (see ``declared_topology``). This only finds **where** it starts, and
+    verifies that the timeline really contains that many forwards.
+
+    The step marker separates target from draft only when its gridX scales with the
+    forward's token count. In prefill it fires once per step with a constant grid, so
+    the boundary comes from the timeline's shape instead: the per-forward host-side
+    prep kernels (position ids, attention metadata, sequence splitting) fire exactly
+    once per forward, so a kernel landing exactly ``forwards_per_step`` times in every
+    sampled step is per-forward, and its second launch opens the first draft forward.
+
+    Several such kernels must agree on that position, because one kernel firing twice
+    can also be a single forward's two-phase prep. The earliest agreeing launch becomes
+    the phase start, so the draft's own prologue (hidden-state concat, the EAGLE
+    projection GEMM) folds into the draft phase rather than into the target's tail.
+
+    Mutates ``info`` in place. With ``required`` set, a capture that does not show the
+    declared forwards raises instead of silently publishing a single-forward table.
+    """
+    starts = info["target_starts"]
+    if len(starts) < 3 or info["speculative"]:
+        return
+    windows = list(zip(starts, starts[1:]))
+    launches: Dict[str, List[int]] = {}
+    for name, start in cur.execute(
+        "select s.value, k.start from CUPTI_ACTIVITY_KIND_KERNEL k "
+        "join StringIds s on s.id = k.shortName "
+        "where k.deviceId = ? and k.start >= ? and k.start < ? order by k.start",
+        (device, starts[0], starts[-1]),
+    ).fetchall():
+        launches.setdefault(name, []).append(int(start))
+
+    seconds: Dict[str, List[int]] = {}
+    for name, occurrences in launches.items():
+        picks: List[int] = []
+        for lo, hi in windows:
+            inside = [s for s in occurrences if lo <= s < hi]
+            if len(inside) != forwards_per_step:
+                picks = []
+                break
+            picks.append(inside[1])
+        if picks:
+            seconds[name] = picks
+    # Position each candidate as a fraction of the step. A second forward starts in
+    # the step's second half; anything earlier is one forward's own repeated prep.
+    offsets = {
+        name: st.fmean(
+            (pick - lo) / (hi - lo) for pick, (lo, hi) in zip(picks, windows)
+        )
+        for name, picks in seconds.items()
+    }
+    agreeing = {n: p for n, p in seconds.items() if offsets[n] > 0.5}
+    spread = (
+        max(offsets[n] for n in agreeing) - min(offsets[n] for n in agreeing)
+        if agreeing else 1.0
+    )
+    if len(agreeing) < min_agreeing or spread > 0.05:
+        if required:
+            record_conflict(
+                info,
+                "the launch command declares speculative decoding, so a step should "
+                f"contain {forwards_per_step} forwards, but no {min_agreeing} kernels "
+                f"fire exactly {forwards_per_step} times per step and agree on the "
+                f"second launch's position (found {len(agreeing)} candidate(s), "
+                f"position spread {spread:.3f}). The draft forward could not be located, "
+                "so this table reports it inside the target phase -- the step total and "
+                "the gap are unaffected.",
+                policy,
+            )
+        return  # the candidates point at different places: not one phase boundary
+    info.update(
+        speculative=True,
+        draft_starts=[min(agreeing[n][i] for n in agreeing)
+                      for i in range(len(windows))],
+        draft_children_style="layers",
+        eager_draft_evidence={
+            "anchors": sorted(agreeing),
+            "forwards_per_step": forwards_per_step,
+            "step_offset_mean": round(st.fmean(offsets[n] for n in agreeing), 4),
+            "step_offset_spread": round(spread, 4),
+            "rule": (
+                f"{len(agreeing)} kernels fire exactly {forwards_per_step} times in "
+                "every sampled step and agree on the second launch's position; the "
+                "earliest one starts the draft phase, which runs to the step boundary"
+            ),
+        },
+    )
+
+
 def last_layer_end(
     rows: Sequence[Tuple[Any, ...]], window_start: int, window_end: int,
     layer_boundary: str, variant_cores: Dict[str, List[str]],
@@ -595,7 +841,13 @@ def segment_steps(
                 # the draft forward, so it is the phase start; its prologue folds into
                 # prep draft the same way the target's does.
                 draft_start = nxt[0]
-                draft_end = draft_forward_end(rows, draft_start, a2)
+                if info.get("draft_children_style") == "layers":
+                    # Found from the timeline's shape, not from a marker population:
+                    # the draft forward is the step's last work (its lm_head and the
+                    # sampling loop end the step), so the phase runs to the boundary.
+                    draft_end = a2
+                else:
+                    draft_end = draft_forward_end(rows, draft_start, a2)
                 if draft_end is None:
                     continue
 
@@ -626,9 +878,16 @@ def segment_steps(
                 prep_verify=(a2 - draft_end) / 1e3,
             )
             prep_windows = [(target_end, draft_start), (draft_end, a2)]
-            step["draft_children"] = draft_children(
-                rows, draft_start, draft_end, draft_graph if graph_mode else None,
-            )
+            if info.get("draft_children_style") == "layers":
+                # The draft model is the MTP/NextN layer, so segment it exactly like
+                # the target: its layer is one of the model's declared variants.
+                step["draft_children"] = target_children(
+                    rows, draft_start, draft_end, layer_boundary, variant_cores,
+                )
+            else:
+                step["draft_children"] = draft_children(
+                    rows, draft_start, draft_end, draft_graph if graph_mode else None,
+                )
         else:
             step.update(
                 target=(target_end - a) / 1e3,
@@ -640,17 +899,47 @@ def segment_steps(
         step["target_children"] = target_children(
             rows, a, target_end, layer_boundary, variant_cores,
         )
-        gap = 0.0
-        for lo, hi in prep_windows:
+
+        # Idle accounting. A hole inside a layer's wall span is that layer's own
+        # stall and stays in it; every other hole -- before the first layer, between
+        # layers, in the prep windows, inside the draft phase -- is the step's gap.
+        # The phases then report busy time only, so
+        #     forward step = target [+ draft] + 步间间隙
+        # closes exactly instead of the gap being a shadow number.
+        layer_spans = list(step["target_children"].get("_spans") or [])
+        layer_spans += list((step.get("draft_children") or {}).get("_spans") or [])
+
+        def gap_us(lo: int, hi: int) -> float:
+            total = 0.0
             for hs, he in holes(intervals, lo, hi):
+                if any(hs < ls_end and he > ls_start for ls_start, ls_end in layer_spans):
+                    continue  # a layer's own stall, already inside that layer's span
                 length = (he - hs) / 1e3
                 if length > gap_threshold_us:
-                    gap += length
+                    total += length
                     gap_holes.append({
                         "step_index": idx, "start_ns": hs, "end_ns": he,
                         "length_us": round(length, 3),
                     })
-        step["gap"] = gap
+            return total
+
+        first_layer = int(step["target_children"].get("_first_layer_start") or a)
+        prologue_gap = gap_us(a, first_layer)
+        body_gap = gap_us(first_layer, target_end)
+        prep_gap = sum(gap_us(lo, hi) for lo, hi in prep_windows)
+        draft_gap = (
+            gap_us(draft_start, draft_end)
+            if draft_start is not None and draft_end is not None else 0.0
+        )
+        step["gap"] = prologue_gap + body_gap + prep_gap + draft_gap
+        # The scheduler and input prep before the first layer: batch allocation, KV
+        # bookkeeping, position ids, attention metadata. It used to be invisible --
+        # folded into the target phase's 其他 together with its own idle.
+        step["prologue"] = (first_layer - a) / 1e3 - prologue_gap
+        step["body"] = (target_end - first_layer) / 1e3 - body_gap
+        step["prep_busy"] = sum((hi - lo) / 1e3 for lo, hi in prep_windows) - prep_gap
+        if step.get("draft") is not None:
+            step["draft"] = step["draft"] - draft_gap
         steps.append(step)
     if not steps:
         raise SystemExit("no step could be segmented; check the marker and graph ids")
@@ -684,6 +973,7 @@ def target_children(
         bounds.insert(0, phase_start)
     per_variant: Dict[str, float] = {name: 0.0 for name in variant_cores}
     counts: Dict[str, int] = {name: 0 for name in variant_cores}
+    spans: List[Tuple[int, int]] = []
     if bounds:
         edges = bounds + [phase_end]
         blocks: List[Tuple[int, int, Optional[str]]] = []
@@ -711,10 +1001,16 @@ def target_children(
                 continue
             per_variant[label] += (hi - pending_start) / 1e3
             counts[label] += 1
+            spans.append((pending_start, hi))
             pending_start = None
     covered = sum(per_variant.values())
     out = {name: value for name, value in per_variant.items() if counts[name]}
     out["_counts"] = counts  # type: ignore[assignment]
+    # Where the layers actually start and their wall spans: the caller needs both to
+    # tell a layer's own stall (which belongs to that layer) from the scheduling
+    # bubbles before the first layer and between layers (which are step gap).
+    out["_first_layer_start"] = spans[0][0] if spans else phase_start  # type: ignore[assignment]
+    out["_spans"] = spans  # type: ignore[assignment]
     out["其他"] = max(phase_us - covered, 0.0)
     return out
 
@@ -806,10 +1102,14 @@ def build_rows(
         })
         return avg
 
+    conflicts = list(info.get("declaration_conflicts") or [])
     add("forward step 总计", "total", series("period"),
         note=f"锚点 {info['marker_pattern']}，共 {len(info['target_starts'])} 步，"
              f"取样 {step_n} 步；总耗时列为取样步均值（均值可加，各环节之和严格闭合）"
-             + (f"；{info['shard_note']}" if info.get("shard_note") else ""))
+             + (f"；{info['shard_note']}" if info.get("shard_note") else "")
+             # A caveat on the row a reader looks at first, not only in the manifest.
+             + (f"；⚠ 与 config/启动命令声明不一致：{'；'.join(conflicts)}"
+                if conflicts else ""))
 
     variant_counts: Dict[str, int] = {}
     for s in steps:
@@ -821,51 +1121,93 @@ def build_rows(
     # the bookkeeping that follows it and is reported in the next prep phase.
     no_graph = info["target_graph"] is None
     tail_note = "无 CUDA graph：以最后一层结束为界，forward 尾部计入其他"
-    # prep draft / prep verify are the target/verify path's own host-side bookkeeping and
-    # do not scale with layer count, which is exactly what 其他 collects -- so they are
-    # folded into it rather than reported as separate environments. A step then splits
-    # into two top-level phases, target and draft.
+    speculative = info["speculative"]
+    # A step decomposes into its phases plus the idle gap between them:
+    #
+    #     forward step = target [+ draft] + 步间间隙
+    #
+    # Every phase reports busy time: the scheduling bubble before the first layer,
+    # the holes between layers and the holes in the prep windows all belong to the
+    # gap row. Folding them into the target phase used to make that phase equal the
+    # entire step at 100% and hid a five-figure microsecond bubble inside 其他.
+    tail_label = (
+        "prep draft / prep verify" if speculative else "forward 尾部（lm_head / 输出聚合 / 采样）"
+    )
     target_total = [
-        s["target"] + (s.get("prep_draft") or 0.0) + (s.get("prep_verify") or 0.0)
-        for s in steps
+        s["prologue"] + s["body"] + s["prep_busy"] for s in steps
     ]
     target_avg = add(
         "target 主模型", "phase", target_total, layers=total_layers or "",
-        note="含 prep draft / prep verify" + ("；" + tail_note if no_graph else ""),
+        note=f"忙碌时间：调度与输入准备＋各层＋{tail_label}（空洞计入步间间隙）"
+             + ("；" + tail_note if no_graph else ""),
     )
+    add("调度与输入准备", "stage", series("prologue"), parent=target_avg,
+        note="步锚点→第一层之间的忙碌部分：batch 分配、KV 记账、position / attention metadata")
     for name in [n for n in variant_counts if variant_counts[n]]:
         add(f"{name} 层", "variant",
             [s["target_children"].get(name, 0.0) for s in steps],
             layers=variant_counts[name], parent=target_avg)
+    # Residual against the phase, so the children close on the phase by construction.
+    covered = [
+        s["prologue"] + sum(s["target_children"].get(n, 0.0) for n in variant_counts)
+        for s in steps
+    ]
     add("其他", "other",
-        [s["target_children"].get("其他", 0.0)
-         + (s.get("prep_draft") or 0.0) + (s.get("prep_verify") or 0.0)
-         for s in steps],
+        [max(total - done, 0.0) for total, done in zip(target_total, covered)],
         parent=target_avg,
-        note="embedding / lm_head / 输出聚合 + prep draft / prep verify"
-             "（verify 判定、KV 记账、投机 token 拼接），不随层数变化")
+        note="embedding / 层间衔接 / lm_head / 输出聚合"
+             + ("＋prep draft / prep verify（verify 判定、KV 记账、投机 token 拼接）"
+                if speculative else "＋forward 尾部")
+             + "，不随层数变化")
 
-    if info["speculative"]:
-        layers = max((s["draft_children"].get("_layers") or 0) for s in steps)
-        draft_avg = add("draft 模型", "phase", series("draft"),
-                        layers=layers or "", substeps=info["speculative_tokens"] or "",
-                        note=tail_note if no_graph else "")
-        key = f"draft {layers} 层 forward"
-        add(key, "stage", [s["draft_children"].get(key, 0.0) for s in steps],
-            layers=layers or "", parent=draft_avg)
-        add("其他", "other", [s["draft_children"].get("其他", 0.0) for s in steps],
-            substeps=info["speculative_tokens"] or "", parent=draft_avg,
-            note="draft 前导 / lm_head / 投机采样循环")
+    if speculative:
+        draft_series = series("draft")
+        if info.get("draft_children_style") == "layers":
+            draft_counts: Dict[str, int] = {}
+            for s in steps:
+                for name, count in (s["draft_children"].get("_counts") or {}).items():
+                    draft_counts[name] = max(draft_counts.get(name, 0), count)
+            draft_counts = {k: v for k, v in draft_counts.items() if v}
+            anchors = (info.get("eager_draft_evidence") or {}).get("anchors") or []
+            anchor_note = "、".join(anchors[:3]) + (
+                f" 等 {len(anchors)} 个" if len(anchors) > 3 else ""
+            )
+            draft_avg = add(
+                "draft 模型", "phase", draft_series,
+                layers=sum(draft_counts.values()) or "",
+                substeps=info["speculative_tokens"] or "",
+                note="投机的 draft forward：由每步恰好出现两次的 per-forward anchor 切出"
+                     f"（{anchor_note}），忙碌时间，运行到步边界",
+            )
+            for name in draft_counts:
+                add(f"{name} 层（draft）", "variant",
+                    [s["draft_children"].get(name, 0.0) for s in steps],
+                    layers=draft_counts[name], parent=draft_avg)
+            draft_covered = [
+                sum(s["draft_children"].get(n, 0.0) for n in draft_counts) for s in steps
+            ]
+            add("其他", "other",
+                [max(total - done, 0.0)
+                 for total, done in zip(draft_series, draft_covered)],
+                parent=draft_avg,
+                note="draft 前导（hidden 拼接 / EAGLE 投影 GEMM）/ lm_head / 采样")
+        else:
+            layers = max((s["draft_children"].get("_layers") or 0) for s in steps)
+            draft_avg = add("draft 模型", "phase", draft_series,
+                            layers=layers or "", substeps=info["speculative_tokens"] or "",
+                            note=tail_note if no_graph else "")
+            key = f"draft {layers} 层 forward"
+            add(key, "stage", [s["draft_children"].get(key, 0.0) for s in steps],
+                layers=layers or "", parent=draft_avg)
+            add("其他", "other",
+                [max(total - s["draft_children"].get(key, 0.0), 0.0)
+                 for total, s in zip(draft_series, steps)], parent=draft_avg,
+                note="draft 前导 / lm_head / 投机采样循环")
 
-    # Spell the measurement windows out: prep draft / prep verify are folded into 其他,
-    # so "prep 段" would not correspond to any row a reader can find in the table.
-    windows = (
-        "target forward 结束→draft 开始、draft 结束→下一步开始 两段"
-        if info["speculative"] else "target forward 结束→下一步开始"
-    )
-    add("token 间间隙", "gap", series("gap"),
-        note=f"仅统计 {windows}内 >{gap_threshold_us:g}us 的空洞，"
-             f"命中 {gap_hole_count} 处；不参与求和")
+    add("步间间隙", "gap", series("gap"),
+        note=f"整步扫描 >{gap_threshold_us:g}us 的空洞（层内停顿归该层，不计入），"
+             f"命中 {gap_hole_count} 处；与各 phase 同级参与求和"
+             f"（forward step = target{' + draft' if speculative else ''} + 步间间隙）")
     return rows
 
 
@@ -928,8 +1270,18 @@ def excluded_layer_variant_counts(tax: Dict[str, Any]) -> Dict[str, int]:
     check below add this contribution back in, instead of assuming excluded
     layers emit no markers at all -- see references/architecture-taxonomy.md
     ("Machine-readable trace markers" / excluded_from_repeating_unit).
+
+    The block is accepted both at the taxonomy root and nested inside
+    ``repeating_unit``. The reference shows it next to ``repeating_unit.positions``
+    without pinning the level, so real taxonomies write it either way; reading only
+    the root silently produced an empty contribution and rejected a correct
+    taxonomy with "variant markers do not reproduce the declared repeating unit".
     """
-    excluded = tax.get("excluded_from_repeating_unit") or {}
+    excluded = (
+        tax.get("excluded_from_repeating_unit")
+        or (tax.get("repeating_unit") or {}).get("excluded_from_repeating_unit")
+        or {}
+    )
     layer_variants = excluded.get("layer_variants") or {}
     counts: Dict[str, int] = {}
     for name in layer_variants.values():
@@ -1109,11 +1461,86 @@ def device_candidates(
     return [device for _, _, device in ranked]
 
 
+def record_conflict(info: Dict[str, Any], message: str, policy: str) -> None:
+    """Note that the trace did not reproduce a declaration.
+
+    Default policy is to publish anyway: the step total, the phase split and the gap
+    are still measured, and losing the whole table over one disagreement is worse than
+    publishing it with the disagreement written down. So the conflict goes into the
+    manifest, into the total row's 备注 and into the job log, and the caller can pick a
+    different rank instead. ``--on-declaration-conflict fail`` restores the strict
+    behaviour for a pipeline that would rather have nothing than a caveat.
+    """
+    conflicts: List[str] = info.setdefault("declaration_conflicts", [])
+    if message not in conflicts:
+        conflicts.append(message)
+    if policy == "fail":
+        raise SystemExit(message)
+    print(f"[forward-pipeline] declaration conflict: {message}")
+
+
+def verify_declared_layers(
+    decl: Dict[str, Any], target_layers: int, draft_layers: int, gpu_count: int,
+    info: Dict[str, Any], policy: str = "degrade",
+) -> Optional[str]:
+    """Check the detected layer counts against config.json's declaration.
+
+    Returns a note when the declaration is satisfied only under an explanation (a
+    pipeline-parallel shard). A contradiction is never silently accepted: a table that
+    reports a different layer count than the checkpoint is either mis-segmented or
+    measured on the wrong rank. It is recorded as a conflict, and whether that stops
+    publication is the caller's policy, not this function's.
+    """
+    expected_target = decl.get("target_layers")
+    expected_draft = decl.get("draft_layers")
+    forwards = decl.get("draft_forwards")
+    if isinstance(expected_draft, int) and isinstance(forwards, int):
+        # A decode step runs the draft model once per speculative step, so the draft
+        # phase holds that many copies of its layer stack.
+        expected_draft *= forwards
+    note: Optional[str] = None
+    if isinstance(expected_target, int) and expected_target != target_layers:
+        if (
+            target_layers
+            and expected_target % target_layers == 0
+            and 1 < expected_target // target_layers <= max(gpu_count, 1)
+        ):
+            note = (
+                f"config declares {expected_target} layers and this rank runs "
+                f"{target_layers}: a 1/{expected_target // target_layers} "
+                "pipeline-parallel shard"
+            )
+        else:
+            record_conflict(
+                info,
+                f"config.json declares num_hidden_layers={expected_target} but the "
+                f"target forward segments into {target_layers} layers"
+                + (f" (+{draft_layers} in the draft forward)" if draft_layers else "")
+                + ". The step may be mis-segmented, the taxonomy's variant markers may "
+                "label the wrong kernels, or this rank may not be the one the config "
+                "describes -- the layer rows are suspect, the step total and the gap "
+                "are not.",
+                policy,
+            )
+    if isinstance(expected_draft, int) and expected_draft != draft_layers:
+        record_conflict(
+            info,
+            f"the launch command declares speculative decoding with "
+            f"num_nextn_predict_layers={decl.get('draft_layers')} × "
+            f"{forwards} draft forward(s) per step = {expected_draft} layer segment(s), "
+            f"but the draft phase segments into {draft_layers}. The draft boundary, the "
+            "stage or --speculative-num-steps does not match this capture.",
+            policy,
+        )
+    return note
+
+
 def analyse_device(
     cur: sqlite3.Cursor, device: int, args: argparse.Namespace,
     variant_cores: Dict[str, List[str]], expected_ratio: Dict[str, int],
     marker_source: str, layer_boundary: str,
     excluded_ratio: Optional[Dict[str, int]] = None,
+    declared: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Segment one device's timeline into forward steps and build the table rows."""
     info = detect_markers(cur, device, args.step_marker)
@@ -1133,18 +1560,44 @@ def analyse_device(
                 "boundary cannot be established from this capture -- pass "
                 "--step-marker explicitly"
             )
+    decl = declared or {}
+    policy = getattr(args, "on_declaration_conflict", "degrade")
+    if info["target_graph"] is None and decl.get("speculative") is not False:
+        # The launch command decides whether a draft forward exists; the trace only
+        # says where it starts. With no declaration at all, fall back to requiring the
+        # trace-shape evidence to speak for itself.
+        detect_eager_draft(
+            cur, device, info,
+            forwards_per_step=1 + (decl.get("draft_forwards") or 1),
+            required=bool(decl.get("speculative")), policy=policy,
+        )
+    if decl.get("speculative_tokens") and not info.get("speculative_tokens"):
+        info["speculative_tokens"] = decl["speculative_tokens"]
     steps, gap_holes = segment_steps(
         cur, device, info, args.max_steps, layer_boundary, variant_cores,
         args.gap_threshold_us,
     )
-    layers_per_step = max(
+    target_layers = max(
         (sum((s["target_children"].get("_counts") or {}).values()) for s in steps),
         default=0,
+    )
+    draft_layers = max(
+        (sum((s.get("draft_children", {}).get("_counts") or {}).values())
+         for s in steps),
+        default=0,
+    )
+    # The model's layers, wherever they ran: with speculative decoding the draft
+    # model's own layer (the MTP/NextN layer) is one of them, so counting only the
+    # target's would contradict the config's layer count.
+    layers_per_step = target_layers + draft_layers
+    # config.json declared these counts before any kernel was read; the trace's job is
+    # to reproduce them.
+    info["declared_note"] = verify_declared_layers(
+        decl, target_layers, draft_layers, device_count(cur), info, policy,
     )
     info["shard_note"] = layer_shard_note(
         cur, device, device_count(cur), layers_per_step, variant_cores,
     )
-    rows = build_rows(steps, info, args.gap_threshold_us, len(gap_holes))
 
     # Guard against markers that "work" but label the wrong layers -- the failure mode
     # of deriving them from prose, or of pairing a taxonomy with a different capture
@@ -1166,7 +1619,14 @@ def analyse_device(
     if marker_source == "taxonomy" and expected_ratio:
         detected: Dict[str, int] = {}
         for step in steps:
-            for name, count in (step["target_children"].get("_counts") or {}).items():
+            # Both phases: with speculative decoding one of the model's declared
+            # layers (the MTP/NextN layer) runs in the draft forward, so counting
+            # only the target's would contradict the taxonomy by construction.
+            per_step: Dict[str, int] = {}
+            for children in (step["target_children"], step.get("draft_children") or {}):
+                for name, count in (children.get("_counts") or {}).items():
+                    per_step[name] = per_step.get(name, 0) + count
+            for name, count in per_step.items():
                 detected[name] = max(detected.get(name, 0), count)
         detected = {k: v for k, v in detected.items() if v}
         excluded_ratio = excluded_ratio or {}
@@ -1197,19 +1657,25 @@ def analyse_device(
                 f" plus {excluded_ratio} from excluded_from_repeating_unit.layer_variants"
                 if excluded_ratio else ""
             )
-            raise SystemExit(
+            record_conflict(
+                info,
                 "taxonomy-derived variant markers do not reproduce the declared "
                 f"repeating unit: detected {detected}, expected {wanted_repr}"
-                f"{excluded_note} ({repeats}x {expected_ratio}). The markers were "
-                "parsed from prose evidence and are unreliable, the taxonomy belongs "
-                "to a different capture than this trace, or excluded_from_repeating_unit"
-                ".layer_variants is missing/wrong for a head or tail layer that runs "
-                "a variant's marker kernel. Pass --variant-marker NAME=SUBSTRING "
-                "explicitly instead of publishing a mislabelled table."
+                f"{excluded_note} ({repeats}x {expected_ratio}). The markers may have "
+                "been parsed from prose evidence, the taxonomy may belong to a different "
+                "capture than this trace, or excluded_from_repeating_unit.layer_variants "
+                "may be missing/wrong for a head or tail layer that runs a variant's "
+                "marker kernel -- pass --variant-marker NAME=SUBSTRING explicitly to "
+                "settle it. The variant rows are suspect; the step total and the gap "
+                "are not.",
+                policy,
             )
+    rows = build_rows(steps, info, args.gap_threshold_us, len(gap_holes))
     return {
         "device": device, "info": info, "steps": steps, "rows": rows,
         "layers_per_step": layers_per_step, "gap_holes": gap_holes,
+        "target_layers": target_layers, "draft_layers": draft_layers,
+        "conflicts": list(info.get("declaration_conflicts") or []),
     }
 
 
@@ -1238,18 +1704,32 @@ def main() -> None:
 
     con = sqlite3.connect(f"file:{args.sqlite}?mode=ro", uri=True)
     cur = con.cursor()
+    declared = declared_topology(
+        args.model_config, args.launch, args.runtime_evidence, args.stage,
+    )
     candidates = device_candidates(cur, args.device, variant_cores, expected_ratio)
     rejected: List[str] = []
     result: Optional[Dict[str, Any]] = None
     for device in candidates:
         try:
-            result = analyse_device(
+            attempt = analyse_device(
                 cur, device, args, variant_cores, expected_ratio, marker_source,
-                layer_boundary, excluded_ratio,
+                layer_boundary, excluded_ratio, declared,
             )
-            break
         except SystemExit as exc:
             rejected.append(f"device {device}: {exc}")
+            continue
+        # Keep the first device that segments at all, but keep looking for one that
+        # also reproduces the declaration: under pipeline or expert parallelism the
+        # ranks differ, and a conflict is often "wrong rank" rather than "wrong code".
+        if result is None:
+            result = attempt
+        if not attempt["conflicts"]:
+            result = attempt
+            break
+        rejected.append(
+            f"device {device}: {'; '.join(attempt['conflicts'])}"
+        )
     if result is None:
         raise SystemExit(
             "no device could be segmented into forward steps:\n" + "\n".join(rejected)
@@ -1280,6 +1760,21 @@ def main() -> None:
             "gpu_count": device_count(cur),
             "layer_shard_note": info.get("shard_note"),
             "layers_per_step": layers_per_step,
+            "target_layers_per_step": result["target_layers"],
+            "draft_layers_per_step": result["draft_layers"],
+            # What config.json and the launch command declared before the trace was
+            # read, and how the measurement reproduced it. A reader can check the
+            # segmentation against the checkpoint without opening the trace.
+            "declared_topology": declared,
+            "declaration_conflicts": info.get("declaration_conflicts") or [],
+            "declared_verification": (
+                "; ".join(info["declaration_conflicts"])
+                if info.get("declaration_conflicts")
+                else info.get("declared_note")
+                or ("layer counts and draft phase reproduce the declaration"
+                    if declared.get("target_layers") is not None else
+                    "no config/launch declaration was supplied; counts are trace-derived")
+            ),
             "step_marker": {
                 "pattern": info["marker_pattern"],
                 "launches": info["marker_launches"],
@@ -1296,22 +1791,40 @@ def main() -> None:
             "draft_boundary_source": (
                 None if not info["speculative"]
                 else "CUPTI graphId" if info["target_graph"] is not None
+                else "per-forward anchors firing twice per step; draft phase runs to "
+                     "the step boundary (its lm_head/sampling end the step)"
+                if info.get("draft_children_style") == "layers"
                 else "draft step marker + draft layer stride "
                      "(draft lm_head/sampling land in prep verify)"
             ),
+            "eager_draft_evidence": info.get("eager_draft_evidence"),
             "speculative": info["speculative"],
             "speculative_tokens": info["speculative_tokens"],
             "batch_size": info.get("batch_size"),
             "chunk_size": args.chunk_size,
             "batch_size_evidence": info.get("batch_size_evidence"),
             "sampled_steps": len(steps),
-            # folded into the target phase's 其他 row, so keep the split here where a
-            # consumer can still report it without re-reading the trace
-            "prep_draft_us": round(stat([s["prep_draft"] for s in steps
-                                         if s.get("prep_draft") is not None])[0], 1),
-            "prep_verify_us": round(stat([s["prep_verify"] for s in steps
-                                          if s.get("prep_verify") is not None])[0], 1),
+            # The window after the target forward. Without speculative decoding there is
+            # no draft to prepare for, so it is the forward tail (lm_head, output
+            # aggregation, sampling) plus host bookkeeping -- reporting it as
+            # "prep_draft" claimed work this run never did.
+            "step_tail_us": round(stat([s["prep_draft"] for s in steps
+                                        if s.get("prep_draft") is not None])[0], 1),
+            "prep_draft_us": (
+                round(stat([s["prep_draft"] for s in steps
+                            if s.get("prep_draft") is not None])[0], 1)
+                if info["speculative"] else None
+            ),
+            "prep_verify_us": (
+                round(stat([s["prep_verify"] for s in steps
+                            if s.get("prep_verify") is not None])[0], 1)
+                if info["speculative"] else None
+            ),
             "gap_threshold_us": args.gap_threshold_us,
+            "gap_scope": (
+                "whole step; a hole inside a layer's wall span stays in that layer"
+            ),
+            "prologue_us": round(stat([s["prologue"] for s in steps])[0], 1),
             "gap_holes": gap_holes,
             "variant_markers": variant_cores,
             "variant_marker_source": marker_source,

@@ -1558,6 +1558,10 @@ Requirements:
         chunk = self.chunked_prefill_size(metadata_dir)
         if chunk:
             command += ["--chunk-size", str(chunk)]
+        # config.json + launch command declare the step's layer counts and whether a
+        # draft forward runs at all, so the trace only has to reproduce them. Without
+        # this the builder has to guess both from the timeline's shape.
+        command += self.declaration_args(metadata_dir)
         completed = subprocess.run(command, text=True, capture_output=True)
         if completed.returncode != 0:
             detail = (completed.stderr or completed.stdout or "").strip()[:1500]
@@ -1663,6 +1667,39 @@ Requirements:
             except (SyntaxError, ZeroDivisionError, TypeError, ValueError):
                 return None
         return int(token)
+
+    @staticmethod
+    def declaration_args(metadata_dir: Path) -> list[str]:
+        """--model-config / --launch / --runtime-evidence / --stage for the builder.
+
+        These are the job's own inputs, recorded in context.json when the job started,
+        plus the runtime evidence the agent audited out of the trace. They declare how
+        many layers a step has and whether speculative decoding is on, which the
+        forward-pipeline table verifies rather than infers.
+        """
+        context_path = metadata_dir / "context.json"
+        if not context_path.is_file():
+            return []
+        try:
+            context = json.loads(context_path.read_text())
+        except (json.JSONDecodeError, OSError):
+            return []
+        args: list[str] = []
+        for flag, key in (("--model-config", "config_path"), ("--launch", "launch_path")):
+            value = context.get(key) or context.get(key.replace("_path", ""))
+            if value and Path(value).is_file():
+                args += [flag, str(value)]
+        stage = context.get("stage")
+        if stage:
+            args += ["--stage", str(stage)]
+        for candidate in (
+            metadata_dir / f"{context.get('prefix', 'analysis')}_runtime_evidence.json",
+            metadata_dir / "runtime_evidence.json",
+        ):
+            if candidate.is_file():
+                args += ["--runtime-evidence", str(candidate)]
+                break
+        return args
 
     def convert(
         self, package: Path, output: Path, prefix: str,

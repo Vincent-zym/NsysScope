@@ -426,35 +426,33 @@ def validate_forward_pipeline(path: Path, errors: list[str]) -> None:
                 f"adjusting the 其他 row"
             )
 
-    if abs(phase_sum - step_us) > tol:
-        errors.append(
-            f"forward pipeline phases do not close: sum {phase_sum:.1f}us vs step "
-            f"{step_us:.1f}us (tolerance {tol:.1f}us)"
-        )
-
-    # prep draft / prep verify are folded into the target phase's 其他 row, so the gap
-    # can only be bounded by the rows that carry them.
-    prep_total = sum(
-        number(r.get("总耗时(us)")) or 0.0
-        for r in rows
-        if r["环节类型"] == "other" or r["环节"].startswith("prep")
-    )
-    for row in rows:
-        if row["环节类型"] != "gap":
-            continue
+    # A step is its phases plus the idle gap between them:
+    #     forward step = target [+ draft] + 步间间隙
+    # The gap is a sibling of the phases, not a shadow number excluded from the sum.
+    # It used to be carved out of the target phase's prep window *and* folded into it,
+    # which made that phase equal the whole step at 100% and hid the gap from closure.
+    gap_rows = [r for r in rows if r["环节类型"] == "gap"]
+    gap_sum = 0.0
+    for row in gap_rows:
         gap = number(row.get("总耗时(us)"))
         if gap is None:
             errors.append("forward pipeline gap row has no 总耗时(us)")
-        elif gap > prep_total + tol:
-            errors.append(
-                f"forward pipeline gap {gap:.1f}us exceeds the prep phases "
-                f"{prep_total:.1f}us; the gap must be measured inside them only"
-            )
+            continue
+        if gap < 0:
+            errors.append(f"forward pipeline gap row '{row['环节']}' is negative: {gap:.1f}us")
+        gap_sum += gap
         if not row.get("备注"):
             errors.append(
                 "forward pipeline gap row needs 备注 stating the threshold and hole "
                 "count, so a 0.0 result is distinguishable from 'not measured'"
             )
+
+    if abs(phase_sum + gap_sum - step_us) > tol:
+        errors.append(
+            f"forward pipeline does not close: phases {phase_sum:.1f}us + gap "
+            f"{gap_sum:.1f}us = {phase_sum + gap_sum:.1f}us vs step {step_us:.1f}us "
+            f"(tolerance {tol:.1f}us) -- a step must equal target [+ draft] + gap"
+        )
 
 
 CJK = re.compile(r"[\u4e00-\u9fff]")
@@ -965,6 +963,18 @@ def main() -> None:
 
     validate_evidence_depth(origin_ops, core, errors)
     warnings: list[str] = []
+    # A forward-pipeline table whose layer counts disagree with config.json is still a
+    # valid package -- the step total, the phase split and the gap are measured the same
+    # way. Surface it as a warning so the caveat travels with the package instead of
+    # costing it the seventh table.
+    forward_sidecar = metadata_root / f"{args.prefix}_forward_pipeline.json"
+    if forward_sidecar.is_file():
+        try:
+            fragment = json.loads(forward_sidecar.read_text()).get("forward_pipeline") or {}
+        except (json.JSONDecodeError, OSError):
+            fragment = {}
+        for conflict in fragment.get("declaration_conflicts") or []:
+            warnings.append(f"forward pipeline vs config/launch declaration: {conflict}")
     check_naming_stability(
         origin_ops, stages, load_vocabulary(args.vocabulary), warnings,
     )

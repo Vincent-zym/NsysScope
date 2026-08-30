@@ -525,6 +525,13 @@ def build_forward_pipeline(
             "draftUs": (find("phase", "draft 模型") or {}).get("durationUs"),
             "prepDraftUs": info.get("prep_draft_us"),
             "prepVerifyUs": info.get("prep_verify_us"),
+            # The window after the target forward. prepDraftUs only carries it when the
+            # run really was speculative; otherwise it is the forward tail.
+            "stepTailUs": info.get("step_tail_us"),
+            # Scheduler and input prep before the first layer; its idle is in gapUs.
+            "prologueUs": info.get("prologue_us"),
+            # Empty unless the trace disagreed with config.json / the launch command.
+            "declarationConflicts": info.get("declaration_conflicts") or [],
             "gapUs": (find("gap") or {}).get("durationUs"),
         },
         "evidence": info or None,

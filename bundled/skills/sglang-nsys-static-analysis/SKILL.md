@@ -29,6 +29,13 @@ but do not fail the package when it cannot: a single forward step, no usable ste
 marker, or a schema this analyzer version does not yet handle should record the
 reason and continue with six tables rather than block the rest of the analysis.
 
+When generating the seventh table, always pass the job's own declarations --
+`--model-config` (config.json), `--launch`, `--runtime-evidence` and `--stage`. They
+decide the step's layer counts and whether a draft forward runs; the trace only has to
+reproduce them, and a contradiction is a hard failure. Inferring both from the
+timeline's shape is the fallback, not the plan (see references/output-spec.md,
+"Declaration first, trace second").
+
 Treat the trace as timing authority. Treat current-model design/config/runtime
 and verified source as semantic authority. Never use a previous model's labels
 as naming authority.

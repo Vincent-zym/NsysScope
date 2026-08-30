@@ -1388,10 +1388,18 @@ export default function Dashboard() {
           // 单卡 batch 来自 marker 的 gridX；整机 batch 由 trace 里的 GPU 数放大
           const gpus = fp.gpuCount || 0;
           const clusterBatch = fp.clusterBatchSize ?? null;
-          const variants = rows.filter((row) => row.kind === "variant");
-          // prep draft / prep verify 已并入 target 的「其他」，draft 的层 forward 按名字取
-          const draftStage = rows.find(
-            (row) => row.kind === "stage" && row.name.includes("forward"),
+          // 行是位置嵌套的：draft phase 之后的行属于 draft，之前的属于 target
+          const draftIdx = rows.findIndex(
+            (row) => row.kind === "phase" && String(row.name).includes("draft"),
+          );
+          const targetRows = draftIdx >= 0 ? rows.slice(0, draftIdx) : rows;
+          const draftRows = draftIdx >= 0 ? rows.slice(draftIdx) : [];
+          const variants = targetRows.filter((row) => row.kind === "variant");
+          // prep draft / prep verify 已并入 target 的「其他」；draft 的层可能是 stage
+          //（graph 模式的 draft N 层 forward）或 variant（prefill 下按层切分）
+          const draftStage = draftRows.find(
+            (row) => (row.kind === "stage" && String(row.name).includes("forward"))
+              || row.kind === "variant",
           );
           const isPrefill = String(data.metadata.stage || "").toLowerCase() === "prefill";
           return <section className="metrics forward-pipeline-metrics">
@@ -1436,7 +1444,7 @@ export default function Dashboard() {
               ]}
             />
             <Metric
-              label="Token 间间隔耗时"
+              label="步间间隙耗时"
               value={ms(fp.gapUs)}
               suffix=" ms"
               note={`占比 ${fmt(fp.gapUs / fp.stepDurationUs * 100)}%`}

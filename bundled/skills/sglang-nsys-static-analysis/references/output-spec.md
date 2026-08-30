@@ -313,9 +313,15 @@ They are **reported** as two top-level phases. `prep draft` and `prep verify` ar
 target/verify path's own host-side bookkeeping and do not scale with layer count,
 which is exactly what `other` collects, so they are folded into the `target` phase's
 `其他` row instead of being separate environments. A step therefore splits into
-`target` + `draft`, where `target` = target forward + prep draft + prep verify. Say so
-in the target row's and the `其他` row's `备注`, and keep the split available as
-`forward_pipeline.prep_draft_us` / `prep_verify_us` in the manifest.
+`target` + `draft` + `步间间隙`, where `target` = the busy part of (scheduler/input prep
++ target forward + prep draft + prep verify). Say so in the target row's and the `其他`
+row's `备注`, and keep the split available as `forward_pipeline.prep_draft_us` /
+`prep_verify_us` / `prologue_us` in the manifest.
+
+The interval before the first layer -- batch allocation, KV bookkeeping, position ids,
+attention metadata -- is reported as a `调度与输入准备` `stage` row under `target`, not
+merged into `其他`: on a prefill capture its idle alone can be over 1% of the step, and
+`其他` would hide both the work and the bubble.
 
 Without speculative decoding there is no draft model: emit only the `target` phase
 with its `prep draft` stage covering the inter-step bookkeeping, and record
@@ -331,7 +337,54 @@ Nested rows use `环节类型`:
   work such as embedding, lm_head, output all-gather and the sampling loop belongs
   here, because it does not scale with layer count and keeping it separate makes
   layer cost comparable across models.
-- `gap` — the inter-token gap; see below. Does not participate in any sum.
+- `gap` — the step gap; see below. It is a **sibling of the phases** and participates
+  in the step sum.
+
+### Declaration first, trace second
+
+What a step *must* contain is decided before any kernel is read, from the job's own
+inputs — never inferred from the timeline:
+
+- `config.json` → `num_hidden_layers` is the target forward's layer count (look under
+  `text_config` / `language_config` on a multimodal checkpoint), and
+  `num_nextn_predict_layers` is the draft model's
+- the launch command → `--speculative-algorithm` decides whether a draft forward runs
+  at all (weights can carry an MTP layer that never runs), `--speculative-num-steps`
+  how many draft forwards a decode step runs, `--speculative-num-draft-tokens` the
+  `子步数`
+- captured server args (`runtime_evidence.json`, read out of the trace itself) outrank
+  the launch script, but only for the fields they actually record
+
+Pass them as `--model-config` / `--launch` / `--runtime-evidence` / `--stage`; the
+builder records the result under `forward_pipeline.declared_topology` with the file each
+value came from. The trace's only job is to **reproduce** the declaration:
+
+- the target phase must segment into the declared layer count — or an exact
+  pipeline-parallel fraction of it, which is recorded as a note rather than accepted
+  silently
+- the draft phase must segment into `num_nextn_predict_layers × draft forwards per step`
+  layer segments
+- a declared draft forward that cannot be located is a **hard failure**, never a
+  silently non-speculative table
+
+Any contradiction is recorded, never swallowed — but by default it does **not** cost the
+table. `--on-declaration-conflict degrade` (the default) publishes the table with the
+conflict written into `forward_pipeline.declaration_conflicts`, into the total row's
+`备注` as a `⚠` prefix, into `analysis.json`'s `declarationConflicts` and as a validator
+**warning**; `fail` refuses to publish instead, for a pipeline that would rather have
+nothing than a caveat. The reasoning: a conflict makes the *layer rows* suspect, while
+the step total, the phase split and the gap are measured the same way regardless, so
+throwing the whole table away loses more than it protects.
+
+Before degrading, the builder tries the other ranks: under pipeline or expert
+parallelism a conflict is often "wrong rank", not "wrong code", so the first
+conflict-free device wins and the rejected ones are listed in
+`forward_pipeline.device_rejected`.
+
+A table that disagrees with the checkpoint is mis-segmented, labelled with the wrong
+markers, or measured on the wrong rank — read the conflict before trusting the layer
+rows. Only when no declaration is supplied does the builder fall back to trace-shape
+inference, and `declared_verification` says so.
 
 ### Step boundary detection
 
@@ -362,6 +415,16 @@ required rather than optional:
   `--taxonomy` is mandatory in this mode)
 - the draft forward **starts** at the draft population of the step marker, and
   **ends** one median layer stride after the last occurrence of its layer core
+- when the marker cannot split (prefill fires it once per step with a constant grid),
+  the draft's **position** is found from the timeline's shape — its existence still
+  comes from the launch command (see "Declaration first, trace second"). Kernels that
+  fire **exactly `1 + draft forwards` times in every sampled step** are per-forward
+  prep, so their second launch opens the draft. At least two must agree on the position
+  (within 5% of the step) and it must sit in the step's second half; the earliest
+  agreeing launch starts the draft phase, which then runs to the step boundary. The
+  draft model is one declared layer (the MTP/NextN layer), so it is segmented with the
+  same variant markers as the target and reported as a `variant` row under `draft` —
+  and the taxonomy's layer count is checked against **both** phases together.
 
 Consequence to record in `备注` and in `forward_pipeline.draft_boundary_source`: a
 forward's tail after its last layer — lm_head, output aggregation, the speculative
@@ -400,14 +463,19 @@ properties broke earlier versions of this table:
 
 ### Inter-token gap
 
-`token 间间隙` counts GPU idle **only inside the `prep draft` and `prep verify`
-phases**, and only holes longer than the gap threshold (default `50us`, exposed as
-`--gap-threshold-us`).
+`步间间隙` counts GPU idle across the **whole step**, and only holes longer than the
+gap threshold (default `50us`, exposed as `--gap-threshold-us`). Three regions
+contribute: before the first layer (scheduler and input prep), between layers, and
+in the prep windows around the forwards.
 
-Idle inside the `target` and `draft` phases is deliberately excluded: on a
-CUDA-graph replay path it is launch-gap scatter spread over hundreds of kernel
-boundaries, not a recoverable stall, and summing it produces a large number that
-looks like an optimization opportunity but is not.
+One region is deliberately excluded: a hole **inside a layer's own wall span** stays
+in that layer, because that is the layer's stall and the layer row already reports
+its wall time. On a CUDA-graph replay path this keeps launch-gap scatter out of the
+gap row, where it would look like a recoverable stall but is not.
+
+Scanning only the prep windows -- the earlier rule -- reports `0.0` on a capture
+whose tail is saturated while a five-figure microsecond scheduling bubble sits at the
+step head, so the gap must be measured over the whole step.
 
 Record the threshold and every qualifying hole (start, end, length, phase) in the
 manifest so the number is reproducible and can be recomputed under a different
@@ -417,14 +485,15 @@ answer — write the threshold and the hole count in `备注` so a reader can te
 
 ### Closure invariants
 
-All three must hold, with a tolerance no looser than `0.5%` of the step:
+All must hold, with a tolerance no looser than `0.5%` of the step:
 
-- `target + draft = forward step 总计`
-- inside `target`: `sum(variant rows) + other = target`, where `other` carries the
-  non-layer forward work plus prep draft / prep verify
-- inside `draft`: `sum(stage rows) + other = draft`
+- `target + draft + 步间间隙 = forward step 总计`
+- inside `target`: `调度与输入准备 + sum(variant rows) + other = target`, where
+  `other` carries the non-layer forward work plus prep draft / prep verify
+- inside `draft`: `sum(variant/stage rows) + other = draft`
 
-Plus one sanity bound: `token 间间隙 <= prep draft + prep verify`.
+Every phase reports **busy** time; the idle it contains is in the gap row. That is
+what makes the first invariant an equality rather than `target ≈ step`.
 
 These are the correctness test for the segmentation. A mis-placed boundary marker
 shows up as a closure failure, so never "fix" a closure error by adjusting the
