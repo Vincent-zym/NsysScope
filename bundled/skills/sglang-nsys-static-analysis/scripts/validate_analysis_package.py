@@ -8,7 +8,7 @@ import csv
 import json
 import math
 import re
-from collections import Counter
+from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +35,245 @@ CATEGORY_LABELS = {
     "通信": "communication",
     "辅助算子": "auxiliary",
 }
+VOCABULARY_PATH = Path(__file__).resolve().parents[1] / "references/functional-modules.json"
+IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def load_vocabulary(path: Path) -> set[str]:
+    """Every canonical 功能模块 name, across blocks and families.
+
+    Accepts both layouts: schema 2.0 keys stages by architectural block (plus
+    cross-block and communication stages), schema 1.x listed them per family.
+    """
+    if not path.is_file():
+        return set()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return set()
+    names = {
+        str(stage["name"])
+        for block in (data.get("blocks") or {}).values()
+        if isinstance(block, dict)
+        for stage in (block.get("stages") or [])
+        if isinstance(stage, dict) and stage.get("name")
+    }
+    for group in ("cross_block", "communication"):
+        for item in data.get(group) or []:
+            if not isinstance(item, dict):
+                continue
+            if item.get("name"):
+                names.add(str(item["name"]))
+            names |= {str(alias) for alias in (item.get("deprecated_aliases") or [])}
+    # A corrected name keeps its predecessor accepted, so packages produced
+    # before the correction do not start reporting drift warnings.
+    for block in (data.get("blocks") or {}).values():
+        if not isinstance(block, dict):
+            continue
+        for stage in block.get("stages") or []:
+            if isinstance(stage, dict):
+                names |= {
+                    str(alias) for alias in (stage.get("deprecated_aliases") or [])
+                }
+    names |= {
+        str(name)
+        for family in (data.get("families") or {}).values()
+        if isinstance(family, dict)
+        for name in (family.get("modules") or [])
+    }
+    return names
+
+
+def load_vocabulary_index(path: Path) -> dict[str, Any]:
+    """Canonical name -> block, plus alias -> canonical and the family lists.
+
+    load_vocabulary() answers "is this name allowed"; this answers the two
+    questions that decide whether two runs are comparable: which block a stage
+    belongs to, and which stages the family says a layer should have.
+    """
+    empty: dict[str, Any] = {"block_of": {}, "alias_to_canonical": {}, "families": {}}
+    if not path.is_file():
+        return empty
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return empty
+    block_of: dict[str, str] = {}
+    alias_to_canonical: dict[str, str] = {}
+    for block, body in (data.get("blocks") or {}).items():
+        if not isinstance(body, dict):
+            continue
+        for stage in body.get("stages") or []:
+            if not isinstance(stage, dict) or not stage.get("name"):
+                continue
+            name = str(stage["name"])
+            block_of[name] = str(block)
+            for alias in stage.get("deprecated_aliases") or []:
+                alias_to_canonical[str(alias)] = name
+                block_of.setdefault(str(alias), str(block))
+    for group in ("cross_block", "communication"):
+        for item in data.get(group) or []:
+            if not isinstance(item, dict) or not item.get("name"):
+                continue
+            name = str(item["name"])
+            block_of[name] = str(group)
+            for alias in item.get("deprecated_aliases") or []:
+                alias_to_canonical[str(alias)] = name
+                block_of.setdefault(str(alias), str(group))
+    families = {
+        str(fid): [str(n) for n in (body.get("typical_layer") or [])]
+        for fid, body in (data.get("families") or {}).items()
+        if isinstance(body, dict)
+    }
+    return {
+        "block_of": block_of,
+        "alias_to_canonical": alias_to_canonical,
+        "families": families,
+    }
+
+
+def check_naming_stability(
+    origin_ops: list[dict[str, str]],
+    stages: list[dict[str, str]],
+    vocabulary: set[str],
+    warnings: list[str],
+) -> None:
+    """Report names that only one run of the analysis would ever produce.
+
+    Both checks are warnings, not errors: a package whose numbers are right should
+    ship. But invented names make two analyses of the same model incomparable --
+    per-module timing cannot be diffed if the modules are renamed every run -- so
+    the drift has to be visible rather than silent.
+    """
+    if vocabulary:
+        used = {row.get("功能模块") for row in stages if row.get("功能模块")}
+        unknown = sorted(name for name in used if name not in vocabulary)
+        if unknown:
+            warnings.append(
+                "功能模块 outside references/functional-modules.json: "
+                f"{unknown}. Map them onto canonical names, or record the new names "
+                "and the reason in the taxonomy's functional_module_policy."
+            )
+    # A `module` leaf is supposed to be lifted from the source -- an attribute or the
+    # dispatching function -- not composed as prose. When none of the leaf's words
+    # appear anywhere in the row's own evidence, it was probably invented, and the
+    # next run will invent a different one. Matching is per word and by substring on
+    # purpose: `pre_norm_quant` legitimately abbreviates
+    # `fused_add_rmsnorm_per_token_quant`, and demanding a whole-identifier match
+    # would flag every such abbreviation.
+    unsupported = []
+    for row in origin_ops:
+        module = row.get("module") or ""
+        leaf = module.rsplit("/", 1)[-1]
+        words = [part for part in re.split(r"[^A-Za-z0-9]+", leaf) if len(part) > 2]
+        if not words:
+            continue
+        evidence = " ".join((
+            row.get("python_function") or "",
+            row.get("dispatch_code_snippet") or "",
+            row.get("operator_name") or "",
+        )).lower()
+        if not any(word.lower() in evidence for word in words):
+            unsupported.append(module)
+    if unsupported:
+        sample = sorted(set(unsupported))[:8]
+        warnings.append(
+            f"{len(unsupported)} rows have a module leaf that appears in no cited "
+            f"evidence (call chain, dispatch statement, kernel name), e.g. {sample}. "
+            "Derive the leaf from the source symbol so the label is reproducible."
+        )
+
+
+def check_stage_composition(
+    stages: list[dict[str, str]],
+    index: dict[str, Any],
+    taxonomy: dict[str, Any] | None,
+    warnings: list[str],
+) -> None:
+    """Report drift in *which* stages were emitted, not just how they are spelled.
+
+    Two runs can both use only canonical names and still be incomparable: one
+    splits MoE into 计算 + 输出合并, the other emits the fused 计算与输出合并.
+    Spelling is checked elsewhere; here the emitted set is compared against the
+    family's typical_layer, the per-variant stage count against the policy
+    window, and each stage against the ~2%-of-its-block fold rule.
+    """
+    block_of = index.get("block_of") or {}
+    if not block_of:
+        return
+    alias_to_canonical = index.get("alias_to_canonical") or {}
+    policy = (taxonomy or {}).get("functional_module_policy") or {}
+
+    rows = [
+        row for row in stages
+        if str(row.get("单元位置") or "").isdigit() and row.get("功能模块")
+    ]
+    used = {str(row["功能模块"]) for row in rows}
+    stale = sorted(name for name in used if name in alias_to_canonical)
+    if stale:
+        pairs = ", ".join(f"{name} -> {alias_to_canonical[name]}" for name in stale)
+        warnings.append(
+            f"功能模块 uses deprecated names: {pairs}. They still validate so old "
+            "packages keep working, but a new package should emit the canonical name."
+        )
+
+    per_position: dict[str, list[dict[str, str]]] = defaultdict(list)
+    for row in rows:
+        per_position[str(row["单元位置"])].append(row)
+    lo = number(policy.get("target_min")) or 5
+    hi = number(policy.get("target_max")) or 8
+    off_target = {
+        pos: len(items) for pos, items in per_position.items()
+        if not lo <= len(items) <= hi
+    }
+    if off_target:
+        warnings.append(
+            f"stage count per 单元位置 outside the {int(lo)}-{int(hi)} target: "
+            f"{dict(sorted(off_target.items()))}. Fold or split per the vocabulary "
+            "rules so two runs of this model land on the same granularity."
+        )
+
+    thin = []
+    for pos, items in sorted(per_position.items()):
+        by_block: dict[str, float] = defaultdict(float)
+        for row in items:
+            block = block_of.get(str(row["功能模块"]))
+            if block is None:
+                continue  # unknown name: already reported, block share is meaningless
+            by_block[block] += number(row.get("模块耗时(us)")) or 0.0
+        for row in items:
+            block = block_of.get(str(row["功能模块"]))
+            if block is None or block in {"cross_block", "communication"}:
+                continue
+            total = by_block[block]
+            duration = number(row.get("模块耗时(us)")) or 0.0
+            if total > 0 and duration / total < 0.02:
+                thin.append(
+                    f"{row['功能模块']}@{pos} ({duration / total * 100:.1f}% of {block})"
+                )
+    if thin:
+        warnings.append(
+            f"stages below ~2% of their block: {thin[:8]}. The vocabulary folds "
+            "these into the block's 计算 stage -- a 0.4% stage is a `module`, not a "
+            "functional module."
+        )
+
+    families = index.get("families") or {}
+    blob = json.dumps(policy, ensure_ascii=False)
+    declared = [fid for fid in families if fid and fid in blob]
+    if len(declared) == 1:
+        expected = set(families[declared[0]])
+        canonical_used = {alias_to_canonical.get(name, name) for name in used}
+        missing = sorted(expected - canonical_used)
+        extra = sorted(canonical_used - expected)
+        if missing or extra:
+            warnings.append(
+                f"emitted 功能模块 set differs from family '{declared[0]}' "
+                f"typical_layer: missing={missing} extra={extra}. Either emit the "
+                "family's stages, or update the family's typical_layer and say why "
+                "in functional_module_policy -- an undocumented difference means the "
+                "next run may pick either shape."
+            )
 
 
 def parse_args() -> argparse.Namespace:
@@ -44,6 +283,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--analysis-json", type=Path)
     parser.add_argument("--taxonomy", type=Path)
     parser.add_argument("--output", type=Path)
+    parser.add_argument(
+        "--vocabulary", type=Path, default=VOCABULARY_PATH,
+        help="canonical 功能模块 list; naming drift is reported as a warning",
+    )
     return parser.parse_args()
 
 
@@ -721,6 +964,13 @@ def main() -> None:
                 errors.append(f"variant {variant} has no distinguishing module in stage output")
 
     validate_evidence_depth(origin_ops, core, errors)
+    warnings: list[str] = []
+    check_naming_stability(
+        origin_ops, stages, load_vocabulary(args.vocabulary), warnings,
+    )
+    check_stage_composition(
+        stages, load_vocabulary_index(args.vocabulary), taxonomy, warnings,
+    )
     unit_duration = (
         number(total_rows["origin"][0].get("duration_avg_us"))
         or number(total_rows["origin"][0].get("duration_us"))
@@ -771,6 +1021,7 @@ def main() -> None:
         "schema_version": "1.1",
         "status": "failed" if errors else "passed",
         "errors": errors,
+        "warnings": warnings,
         "operator_count": len(overview),
         "category_totals": totals,
         "analysis_json_checked": analysis is not None,
@@ -780,6 +1031,8 @@ def main() -> None:
         args.output.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n")
     if errors:
         raise SystemExit("\n".join(errors))
+    for warning in warnings:
+        print(f"[validate] warning: {warning}")
     print(json.dumps(report, ensure_ascii=False))
 
 

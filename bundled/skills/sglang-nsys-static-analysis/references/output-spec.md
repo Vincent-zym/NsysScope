@@ -108,6 +108,20 @@ Stage:
 `代表墙钟跨度(us)` is its first-start to last-end span and includes internal
 gaps. None is automatically a critical-path attribution.
 
+Position-aware rows are ordered by execution, not by duration: within one
+`单元位置`, a functional module sits at the launch order of its first kernel, so
+reading that block top-to-bottom gives the single-unit stage sequence and each
+module appears exactly once. The `__pattern_total__` rows stay duration-sorted --
+that is where the ranking view belongs.
+
+A functional module is a role label over a nested call tree, so the operator
+table will show its kernels interleaved with another module's -- a stage that
+calls into communication and returns, or a torch.compile region whose fused
+kernels do not follow source order. That is expected and must not be "fixed"
+by splitting the module into first/second halves: the stage stays one row, and
+the interleaving is explained in `mapping_reason` on the operator rows
+involved.
+
 Origin keeps full demangled names. Other tables use compact CUDA leaf symbols.
 Put semantic descriptions in `功能介绍`, never in `算子名称`.
 

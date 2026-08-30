@@ -18,7 +18,7 @@ from fastapi.testclient import TestClient
 
 from backend.app import create_app
 from backend.config import Settings
-from backend.models import JobCreate
+from backend.models import BUILTIN_MODEL_CONFIGS, JobCreate
 from backend.runner import JobRunner
 from backend.store import JobStore
 from scripts.build_analysis_json import (
@@ -59,15 +59,19 @@ def settings(tmp_path: Path) -> Settings:
         job_log_max_bytes=1024 * 1024,
         job_log_line_max_bytes=16 * 1024,
         nsys_bin="nsys",
-        skill_dir=Path("/root/.codex/skills/sglang-nsys-static-analysis"),
+        skill_dir=PROJECT / "bundled" / "skills" / "sglang-nsys-static-analysis",
         operator_advisor_skill_dir=(
             PROJECT / "bundled" / "skills" / "sglang-operator-fusion-advisor"
+        ),
+        call_tree_skill_dir=(
+            PROJECT / "bundled" / "skills" / "reconstruct-profiler-call-tree"
         ),
         converter=PROJECT / "scripts/build_analysis_json.py",
         xlsx_converter=PROJECT / "scripts/csv_to_xlsx.py",
         subprocess_timeout_seconds=600,
         popo_username="",
         popo_upload_script=PROJECT / "does-not-exist" / "upload.py",
+        builtin_model_configs=dict(BUILTIN_MODEL_CONFIGS),
     )
 
 
@@ -1085,9 +1089,9 @@ def test_a_foreign_conversation_is_not_taken_for_ours(tmp_path: Path) -> None:
     assert JobRunner.find_agent_session(store, job_dir, time.time() + 60) is None
 
 
-def test_forward_pipeline_table_is_required(tmp_path: Path) -> None:
-    # The seventh table is mandatory: without a trace to build it from and without
-    # the table in the package, the job has to fail instead of shipping six tables.
+def test_forward_pipeline_table_is_optional(tmp_path: Path) -> None:
+    # The seventh table is a bonus view, not a gate: with neither the table nor a
+    # trace to rebuild it from, the package still ships its six tables.
     configured = settings(tmp_path)
     configured.prepare()
     runner = JobRunner(configured, JobStore(configured.data_dir / "jobs.sqlite"))
@@ -1095,9 +1099,8 @@ def test_forward_pipeline_table_is_required(tmp_path: Path) -> None:
     package = job_dir / "csv"
     package.mkdir(parents=True)
 
-    with pytest.raises(RuntimeError) as failure:
-        runner.ensure_forward_pipeline("job", job_dir, package, "analysis", None)
-    assert "forward 链路耗时表" in str(failure.value)
+    runner.ensure_forward_pipeline("job", job_dir, package, "analysis", None)
+    assert not (package / "analysis_forward_pipeline_table.csv").exists()
 
     # A package that ships the table needs no trace.
     (package / "analysis_forward_pipeline_table.csv").write_text(

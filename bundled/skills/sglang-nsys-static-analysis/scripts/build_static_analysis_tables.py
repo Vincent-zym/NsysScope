@@ -888,8 +888,10 @@ def main() -> None:
     module_rows: dict[tuple[str, str, str, str], list[dict[str, Any]]] = defaultdict(list)
     module_intro: dict[tuple[str, str, str, str], str] = {}
     module_intro_priority: dict[tuple[str, str, str, str], int] = {}
-    for row in enriched:
+    module_first_launch: dict[tuple[str, str, str, str], int] = {}
+    for order, row in enumerate(enriched):
         key = stage_key(row)
+        module_first_launch.setdefault(key, order)
         module_duration[key] += row["算子耗时(us)"]
         module_rows[key].append(row)
         priority = {"core": 3, "communication": 2, "auxiliary": 1}[row["category"]]
@@ -997,12 +999,17 @@ def main() -> None:
         "耗时占比(%)": fmt(accumulated_pct),
     })
 
+    # Position-aware rows are ordered by execution: within one structural
+    # position, a functional module sits at the launch order of its first
+    # kernel.  Reading the block top-to-bottom is therefore the single-unit
+    # stage sequence, and every module appears exactly once -- sorting by
+    # duration here would destroy that reading without adding information the
+    # pattern-total rows below do not already give.
     stage_source = sorted(
         module_duration.items(),
         key=lambda item: (
             int(item[0][0]) if item[0][0].isdigit() else 0,
-            -item[1],
-            item[0][3],
+            module_first_launch[item[0]],
         ),
     )
     stage_rows = [{

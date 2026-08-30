@@ -1,0 +1,175 @@
+{
+  "schema_version": "2.0",
+  "updated_at": "2026-08-30",
+  "purpose": "Canonical 功能模块 names, so two analyses of the same architecture can be compared without translating one naming scheme into the other. Two runs of this skill on one GLM5.2 prefill capture produced 8 functional modules each and agreed on only 2 names, which made per-module timing incomparable.",
+  "grammar": {
+    "shape": "Every stage belongs to one architectural block and, within it, to one phase: 输入处理 -> 计算 -> 输出处理. Naming a stage means picking the block, then the phase. The stage name itself stays descriptive (`MLA 输入投影与 KV 准备`, not `MLA 输入处理`) so a reader knows what is inside; the phase is recorded here as metadata so timing can also be aggregated per phase across models.",
+    "phases": ["输入处理", "计算", "输出处理"],
+    "kinds": {
+      "phase": "The normal case: one of the three phases of a block.",
+      "并行支路": "A branch that runs alongside the block's main path and is neither its input nor its output -- MoE's always-on shared expert, or an attention-side indexer whose output is consumed inside the core. Cost moves independently of the main path, which is why it is not folded in.",
+      "跨块共享": "Work shared by several blocks or layer variants, e.g. the residual aggregation and norms wrapped around the attention block of every variant. Attributing it to one block would be arbitrary.",
+      "融合例外": "One kernel spanning phases or blocks, so it cannot be attributed to any single one. Use only with a fused kernel in evidence, and say so in the mapping reason.",
+      "通信": "A collective that is its own stage. A collective fused inside a compute kernel belongs to that kernel's stage."
+    },
+    "rules": [
+      "Aim for 5-8 stages per layer variant. A block emits only the phases that actually exist -- an indexer with no separable output phase emits one stage, not three.",
+      "Test before adding a stage: would someone who knows the architecture name this block on their own? 'MoE 路由' passes. 'MoE topk 索引打包' does not -- that is a `module`.",
+      "When a phase is left holding only a fused tail worth under ~2% of its block, fold it into 计算 and use the 融合例外 name. Grammar consistency is not worth a 0.4% stage.",
+      "Pick the closest canonical name before inventing one. A new name is allowed only when no entry fits; record it and the reason in the taxonomy's functional_module_policy. The validator reports unknown names as warnings so drift stays visible.",
+      "Never rename a canonical entry to read better. Comparability is worth more than phrasing. A name that is actually wrong about what the stage contains may be corrected, but only by moving the old name into that stage's `deprecated_aliases` so existing packages keep validating.",
+      "These are functional stages, not source modules. Fine-grained attribution stays in the `module` column.",
+      "Write architecture terms in the form the code and the papers use -- Attention, MLA, KDA, MoE, FFN, MTP -- never their Chinese translations. `Attention 核心计算`, not `注意力核心计算`. Ordinary words describing what happens (输入, 投影, 残差聚合, 归一化, 路由, 专家) stay Chinese, so a name reads as `<架构术语> <中文描述>`."
+    ]
+  },
+  "blocks": {
+    "Attention-通用": {
+      "applies_to": "Stages that do not depend on the attention mechanism. Any new model reuses these unchanged and only adds a mechanism-specific block for the parts that differ.",
+      "reusable_across_models": true,
+      "stages": [
+        {"name": "Attention 输入与投影", "phase": "输入处理",
+         "note": "The projection front, whatever the mechanism: the fused qkv (or q/kv down) projection, the lora/input norms, the q/kv up projections."},
+        {"name": "Attention 核心计算", "phase": "计算",
+         "note": "Standard softmax attention -- MHA/GQA/MQA, sliding window, full or paged. Use a mechanism-specific core name only when the mechanism changes the cost structure: MLA absorption, KDA recurrence, NSA sparsity."},
+        {"name": "Attention 输出与投影", "phase": "输出处理",
+         "note": "Output reconstruction and o_proj. Use 输出门控与投影 of the mechanism's block instead when the output is gated before projection."}
+      ]
+    },
+    "Attention-MLA": {
+      "applies_to": "DeepSeek-V2/V3-style multi-head latent attention, with or without a sparse indexer",
+      "reusable_across_models": false,
+      "stages": [
+        {"name": "MLA 权重吸收与 KV 缓存读写", "phase": "输入处理",
+         "deprecated_aliases": ["MLA 输入吸收与 KV Cache"],
+         "note": "The absorbed-path input side: the W_KC/W_VC absorption GEMM and RoPE, then the KV cache traffic that feeds the core -- latent packing, quantized cache writes, and the paged dequant read. Its own stage because it scales with context length while the projections scale with token count -- 10.7% versus 3.6% on GLM5.2 prefill. Named for weight absorption, not 'input absorption': 吸收 is the W_UK/W_UV fold into q, and the second half is cache read/write, not preparation of an input tensor."},
+        {"name": "MLA 输入投影与 KV 准备", "phase": "输入处理",
+         "note": "Use instead of 'Attention 输入与投影' + 'MLA 权重吸收与 KV 缓存读写' when projections and KV preparation are not separately expensive -- on Kimi-K3 decode the whole MLA input side is 1.7% of the unit, so splitting it would create two stages nobody would name."},
+        {"name": "MLA 稀疏核心计算", "phase": "计算",
+         "deprecated_aliases": ["MLA 稀疏注意力核心"],
+         "note": "The attention kernel when a sparse/indexed path is used. Shares the 核心计算 wording with 'MLA 核心计算' because the two differ only in sparsity."},
+        {"name": "MLA 核心计算", "phase": "计算",
+         "note": "The attention kernel when the layer runs dense MLA."},
+        {"name": "MLA 输出门控与投影", "phase": "输出处理",
+         "note": "Use when the architecture gates the attention output before projecting it (Kimi-K3)."}
+      ]
+    },
+    "Attention-KDA": {
+      "applies_to": "Kimi-K3 gated-delta linear attention: short convolutions, a recurrent state, chunked recurrence",
+      "reusable_across_models": false,
+      "stages": [
+        {"name": "KDA 输入投影与预处理", "phase": "输入处理",
+         "note": "Fused QKVG projection plus everything conditioning the recurrence: q/k/v short convolutions, l2 norms, forget/beta projections, gate cumulative sum."},
+        {"name": "KDA 核心计算", "phase": "计算",
+         "note": "The chunked recurrence: intra/inter chunk solves, gated delta state update, GLA output, w/u recompute, state buffers and state gather/scatter."},
+        {"name": "KDA 输出门控与投影", "phase": "输出处理",
+         "note": "Gated output norm and output projection."}
+      ]
+    },
+    "NSA Indexer": {
+      "applies_to": "NSA/DSA sparse indexer selecting the keys the attention core reads",
+      "reusable_across_models": false,
+      "stages": [
+        {"name": "NSA Indexer 稀疏索引", "phase": "计算", "kind": "并行支路",
+         "note": "One stage, not three: its output is a set of indices consumed inside the attention core, so it has no separable output phase. Present only in layers whose indexer_types entry selects the full indexer; a shared-indexer layer legitimately omits it."}
+      ]
+    },
+    "MoE": {
+      "applies_to": "Routed-expert FFN with optional shared experts",
+      "reusable_across_models": true,
+      "stages": [
+        {"name": "MoE 输入与路由", "phase": "输入处理",
+         "note": "Everything between the attention output and the experts: post_attention_layernorm, the per-token quant feeding the router, the router GEMM, scoring/group/topk, and turning topk indices into per-expert work. No single piece of it is a block anyone would name on its own."},
+        {"name": "MoE 专家计算", "phase": "计算",
+         "note": "The routed expert GEMMs. Latent-path projections that exist only to produce routed output belong here."},
+        {"name": "MoE 输出合并", "phase": "输出处理",
+         "note": "Scaling routed output by routed_scaling_factor and adding the shared-expert output. Use when it is a separable kernel."},
+        {"name": "MoE 共享专家", "phase": "计算", "kind": "并行支路",
+         "note": "The always-on dense path (gate_up -> activation/quant -> down). Its cost is fixed while routed cost scales with topk, so the two move independently under tuning. Distinct from 稠密 FFN, which is for layers with no MoE at all."},
+        {"name": "MoE 专家计算与输出合并", "phase": "计算", "kind": "融合例外",
+         "note": "For a fused implementation (MegaMoE) that puts dispatch, both GEMM levels, the cross-rank exchange and the merge tail in one kernel. Also the right choice when the tail is separable but worth under ~2% of the block."},
+        {"name": "MoE 融合前置投影", "phase": "输入处理", "kind": "融合例外",
+         "note": "One kernel projecting across the shared, router and latent paths at once, so it belongs to none of them -- Kimi-K3's front GEMM emits [shared gate_up | router gate | latent down] in a single launch, 8% of that unit. Without such a kernel, do not create this stage. When this stage exists, the router kernels it leaves behind (topk, quant, expert-index building) are usually worth well under 2% of the block -- 0.4% on Kimi-K3 -- and fold in here rather than becoming a separate 输入与路由 stage; note the fold in the mapping reason. Keep 输入与路由 separate only when the routing residue is separately expensive."}
+      ]
+    },
+    "稠密 FFN": {
+      "applies_to": "Layers with a dense FFN instead of MoE (first_k_dense_replace), and dense transformers",
+      "reusable_across_models": true,
+      "stages": [
+        {"name": "稠密 FFN", "phase": "计算",
+         "note": "One stage unless a phase is separately expensive; gate_up/act/down are a single recognizable block."}
+      ]
+    },
+    "输出头": {
+      "applies_to": "Work outside the repeating layer that falls inside the selected unit",
+      "reusable_across_models": true,
+      "stages": [
+        {"name": "输出头与 MTP", "phase": "输出处理",
+         "note": "lm_head, final norm and speculative/MTP layers."}
+      ]
+    }
+  },
+  "cross_block": [
+    {"name": "Attention 残差聚合与输入归一化", "kind": "跨块共享",
+     "deprecated_aliases": ["注意力残差聚合与输入归一化"],
+     "note": "Residual aggregation and the input/post-attention norms wrapped around the attention block of every layer variant. Shared by KDA and MLA layers alike, so attributing it to either would be arbitrary."}
+  ],
+  "communication": [
+    {"name": "上下文并行与专家并行通信", "kind": "通信",
+     "note": "CP all-gather of index keys, EP dispatch/combine, when they are their own kernels."},
+    {"name": "张量并行通信", "kind": "通信",
+     "note": "all-reduce / reduce-scatter of a tensor-parallel layer."}
+  ],
+  "reuse": {
+    "purpose": "A new model is mostly not new. Only the blocks whose cost structure differs get new names; everything else must be reused verbatim so the same stage can be compared across models.",
+    "reuse_verbatim": {
+      "blocks": ["Attention-通用", "MoE", "稠密 FFN", "输出头"],
+      "groups": ["cross_block", "communication"],
+      "rule": "Never re-word these for a new model. A GQA model, a Mamba model and GLM5.2 all use 'Attention 输入与投影', 'MoE 专家计算', 'Attention 残差聚合与输入归一化' and '张量并行通信' with identical spelling. If a stage in one of these blocks does not fit, the mismatch is real architecture, so it belongs in a mechanism block -- do not bend the shared name."
+    },
+    "mechanism_specific": {
+      "blocks": ["Attention-MLA", "Attention-KDA", "NSA Indexer"],
+      "rule": "Never reuse one mechanism's name for another. MLA absorption, KDA recurrence and NSA sparsity have different cost drivers, so merging them into a generic 'Attention 输入投影' would make the per-stage number meaningless -- on Kimi-K3 the input side is 8520 us per KDA layer against 2004 us per MLA layer, a 4.3x gap inside what would be one name."
+    },
+    "new_mechanism_recipe": [
+      "1. Check whether the mechanism actually differs in cost structure. Sliding-window, paged and MQA/GQA variants of softmax attention do not -- they use Attention 核心计算 from Attention-通用.",
+      "2. If it does differ, add a block named 'Attention-<机制>' and give it only the stages that differ from Attention-通用. A mechanism whose projection front is ordinary keeps 'Attention 输入与投影' instead of inventing '<机制> 输入投影'.",
+      "3. Name its stages '<机制> 输入投影与预处理' / '<机制> 核心计算' / '<机制> 输出门控与投影', dropping any phase that is not separable. Follow the same 5-8 stage target for the whole layer.",
+      "4. Reuse MoE, 稠密 FFN, 输出头, cross_block and communication unchanged. In practice a new MoE model adds zero MoE names.",
+      "5. Add a family entry with its typical_layer so the next analysis of that model starts from the same list."
+    ],
+    "cross_model_comparison": "Comparing two models means comparing the reuse_verbatim stages directly, and comparing mechanism blocks only at the phase level (输入处理/计算/输出处理 totals). The phase metadata on every stage exists for exactly this: KDA 输入投影与预处理 and MLA 输入投影与 KV 准备 are not the same stage, but both are 输入处理 of the attention block and their totals are comparable."
+  },
+  "families": {
+    "mla-nsa-moe": {
+      "display_name": "MLA + NSA sparse attention with MoE FFN",
+      "applies_to": "GLM5.2, DeepSeekV4 and similar",
+      "blocks": ["Attention-通用", "Attention-MLA", "NSA Indexer", "MoE", "稠密 FFN", "输出头"],
+      "typical_layer": [
+        "Attention 输入与投影", "MLA 权重吸收与 KV 缓存读写", "NSA Indexer 稀疏索引",
+        "MLA 稀疏核心计算", "Attention 输出与投影", "MoE 输入与路由",
+        "MoE 共享专家", "MoE 专家计算与输出合并", "上下文并行与专家并行通信"
+      ]
+    },
+    "kda-mla-moe": {
+      "display_name": "KDA linear attention interleaved with MLA, plus MoE FFN",
+      "applies_to": "Kimi-K3 family: most layers KDA, a minority MLA, both feeding the same MoE",
+      "blocks": ["Attention-通用", "Attention-KDA", "Attention-MLA", "MoE", "输出头"],
+      "typical_layer": [
+        "Attention 残差聚合与输入归一化", "KDA 输入投影与预处理", "KDA 核心计算",
+        "KDA 输出门控与投影", "MoE 融合前置投影", "MoE 共享专家",
+        "MoE 专家计算", "MoE 输出合并"
+      ]
+    },
+    "dense-transformer": {
+      "display_name": "Dense attention with dense FFN",
+      "applies_to": "MHA/GQA attention without MoE",
+      "blocks": ["Attention-通用", "稠密 FFN", "输出头"],
+      "typical_layer": [
+        "Attention 输入与投影", "Attention 核心计算", "Attention 输出与投影",
+        "稠密 FFN", "张量并行通信"
+      ]
+    }
+  }
+}
+
+
