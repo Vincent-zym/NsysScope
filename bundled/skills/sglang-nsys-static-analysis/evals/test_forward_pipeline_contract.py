@@ -290,8 +290,10 @@ def test_head_exclusion_contributes_a_fixed_extra_count(tmp_path: Path):
 
 def test_head_exclusion_missing_layer_variants_still_rejects_wrong_counts(tmp_path: Path):
     # The inverse of the above: without layer_variants, the extra head KDA
-    # marker has no accounted-for source, so the mismatch must still be caught
-    # rather than silently accepted as "close enough".
+    # marker has no accounted-for source, so the mismatch must never be silently
+    # accepted. Since the builder gained --on-declaration-conflict, "not
+    # silently" means two things: the default run publishes the table with the
+    # conflict recorded, and `fail` refuses to publish at all.
     trace = tmp_path / "trace.sqlite"
     fabricate_trace(trace)
     con = sqlite3.connect(trace)
@@ -334,8 +336,18 @@ def test_head_exclusion_missing_layer_variants_still_rejects_wrong_counts(tmp_pa
         "--manifest-out", str(manifest_path),
     ]
     completed = subprocess.run(command, capture_output=True, text=True)
-    assert completed.returncode != 0
-    assert "do not reproduce the declared" in completed.stderr
+    assert completed.returncode == 0, completed.stderr
+    manifest = json.loads(manifest_path.read_text())
+    conflicts = manifest["forward_pipeline"]["declaration_conflicts"]
+    assert any("do not reproduce the declared" in item for item in conflicts), manifest
+    assert "do not reproduce the declared" in completed.stdout
+
+    strict = subprocess.run(
+        [*command, "--on-declaration-conflict", "fail"],
+        capture_output=True, text=True,
+    )
+    assert strict.returncode != 0
+    assert "do not reproduce the declared" in strict.stderr
 
 
 def test_gap_only_counts_holes_above_the_threshold(tmp_path: Path):
