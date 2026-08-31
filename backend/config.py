@@ -45,7 +45,6 @@ class Settings:
     job_log_line_max_bytes: int
     nsys_bin: str
     skill_dir: Path
-    operator_advisor_skill_dir: Path
     call_tree_skill_dir: Path
     converter: Path
     xlsx_converter: Path
@@ -62,9 +61,6 @@ class Settings:
             os.getenv("XDG_CACHE_HOME", Path.home() / ".cache")
         ).expanduser().resolve()
         bundled_skill = project / "bundled" / "skills" / "sglang-nsys-static-analysis"
-        bundled_advisor_skill = (
-            project / "bundled" / "skills" / "sglang-operator-fusion-advisor"
-        )
         bundled_call_tree_skill = (
             project / "bundled" / "skills" / "reconstruct-profiler-call-tree"
         )
@@ -124,10 +120,6 @@ class Settings:
             skill_dir=Path(os.getenv(
                 "NSYSSCOPE_SKILL_DIR",
                 bundled_skill,
-            )).resolve(),
-            operator_advisor_skill_dir=Path(os.getenv(
-                "NSYSSCOPE_OPERATOR_ADVISOR_SKILL_DIR",
-                bundled_advisor_skill,
             )).resolve(),
             # Optional: only used when a job supplies a torch profiler trace. A
             # missing directory disables the pre-pass instead of failing startup,

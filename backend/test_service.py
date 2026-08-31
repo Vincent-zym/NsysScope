@@ -101,9 +101,6 @@ def settings(tmp_path: Path) -> Settings:
         job_log_line_max_bytes=16 * 1024,
         nsys_bin="nsys",
         skill_dir=PROJECT / "bundled" / "skills" / "sglang-nsys-static-analysis",
-        operator_advisor_skill_dir=(
-            PROJECT / "bundled" / "skills" / "sglang-operator-fusion-advisor"
-        ),
         call_tree_skill_dir=(
             PROJECT / "bundled" / "skills" / "reconstruct-profiler-call-tree"
         ),

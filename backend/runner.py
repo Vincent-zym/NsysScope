@@ -158,33 +158,6 @@ class JobRunner:
     def submit_conversion_retry(self, job_id: str) -> None:
         self.pool.submit(self.retry_conversion, job_id)
 
-    def submit_operator_advisor(self, job_id: str) -> None:
-        self.pool.submit(self.run_operator_advisor_job, job_id)
-
-    def run_operator_advisor_job(self, job_id: str) -> None:
-        """Standalone entry point: (re)generate optimization.json on demand.
-
-        Unlike the follow-up pass inside run(), this can be invoked for any
-        job whose directory already has analysis.json and a complete
-        seven-table package — including jobs imported via existing_package
-        mode, not just ones that just finished the codex_skill pipeline.
-        """
-        job = self.store.get(job_id)
-        job_dir = Path(job["output_dir"])
-        request = JobCreate.model_validate(job["request"])
-        try:
-            self.run_operator_advisor(job_id, job_dir, request)
-            self.state(job_id, job_dir, "succeeded", 100, "算子优化建议已生成")
-        except Exception:
-            self.log(
-                job_dir,
-                "[optimization] 算子优化建议生成失败：\n" + traceback.format_exc(),
-            )
-            self.store.update(
-                job_id, error="算子优化建议生成失败，请查看日志",
-            )
-            raise
-
     @staticmethod
     def wipe_job_outputs(job_dir: Path) -> None:
         """Remove everything a cancelled job may have produced, keeping only
@@ -249,6 +222,10 @@ class JobRunner:
                 self.state(job_id, job_dir, "converting", 70, "正在转换已有七表分析包")
                 if package.is_file():
                     self.import_zip_package(package, job_dir, request, job_id=job_id)
+                    self.ensure_final_report(
+                        job_id, job_dir, job_dir,
+                        self.detect_prefix(job_dir / "csv", request.prefix),
+                    )
                 else:
                     csv_package = self.csv_package_dir(package)
                     analysis_path = package / "analysis.json"
@@ -268,6 +245,7 @@ class JobRunner:
                                 job_id=job_id,
                             )
                             self.ensure_xlsx(csv_package, package / "xlsx", job_id=job_id)
+                            self.ensure_final_report(job_id, job_dir, package, prefix)
                     else:
                         prefix = self.detect_prefix(csv_package, request.prefix)
                         self.ensure_forward_pipeline(
@@ -285,6 +263,7 @@ class JobRunner:
                             job_id=job_id,
                         )
                         self.ensure_xlsx(csv_package, package / "xlsx", job_id=job_id)
+                        self.ensure_final_report(job_id, job_dir, package, prefix)
             else:
                 if self.is_cancelled(job_id):
                     return
@@ -342,23 +321,12 @@ class JobRunner:
                 (metadata_dir / "context.json").write_text(
                     json.dumps(context, ensure_ascii=False, indent=2) + "\n",
                 )
+                self.ensure_final_report(job_id, job_dir, job_dir, request.prefix)
 
             if self.is_cancelled(job_id):
                 return
             self.state(job_id, job_dir, "validating", 95, "正在校验前端数据契约")
             self.validate_analysis(job_dir / "analysis.json")
-            if request.enable_operator_advisor and not self.is_cancelled(job_id):
-                try:
-                    self.run_operator_advisor(job_id, job_dir, request)
-                except Exception:
-                    # The operator-fusion advisor is an optional value-add
-                    # pass; its failure must never fail the main analysis,
-                    # which has already succeeded and validated by this point.
-                    self.log(
-                        job_dir,
-                        "[optimization] 算子优化建议生成失败，不影响主分析结果：\n"
-                        + traceback.format_exc(),
-                    )
             # Never let a terminal write clobber a cancellation that raced in
             # after the last cancellation check above.
             if not self.is_cancelled(job_id):
@@ -560,240 +528,6 @@ class JobRunner:
         else:
             self.run_codex(job_id, job_dir, request, paths, sqlite_path, dispatch_cache)
 
-    def run_operator_advisor(
-        self, job_id: str, job_dir: Path, request: JobCreate,
-    ) -> None:
-        """Optional follow-up pass: propose operator-fusion suggestions.
-
-        Runs the sglang-operator-fusion-advisor skill against the already
-        validated analysis.json/seven-table package plus the original
-        source_path. Writes job_dir/optimization.json. Any failure here is
-        caught by the caller and logged as a warning — it must never flip an
-        already-succeeded main analysis to failed.
-        """
-        skill_dir = self.settings.operator_advisor_skill_dir
-        if not (skill_dir / "SKILL.md").exists():
-            raise RuntimeError(f"operator-fusion-advisor skill is missing: {skill_dir}")
-        self.state(job_id, job_dir, "validating", 96, "正在生成算子优化建议")
-        analysis_path = job_dir / "analysis.json"
-        package_dir = self.find_package(job_dir, request.prefix)
-        source_path = self.settings.resolve_allowed(
-            request.source_path or "", kind="source_path",
-        ) if request.source_path else None
-        # Run the deterministic prescan here rather than trusting the agent to run
-        # it. candidates.json is the evidence the agent's verdicts are checked
-        # against, so it must not be agent-generated.
-        candidates_path = self.run_fusion_prescan(
-            job_id, job_dir, skill_dir, analysis_path, source_path,
-        )
-        prompt = self.build_advisor_prompt(
-            job_dir, request, analysis_path, package_dir, source_path,
-        )
-        prompt_path = job_dir / "metadata" / "advisor-prompt.md"
-        prompt_path.parent.mkdir(exist_ok=True)
-        prompt_path.write_text(prompt)
-        if request.agent_provider == "comate":
-            self.run_comate_advisor(job_id, job_dir, request, prompt, skill_dir, source_path)
-        else:
-            self.run_codex_advisor(job_id, job_dir, request, prompt, skill_dir, source_path)
-        optimization_path = job_dir / "optimization.json"
-        if not optimization_path.exists():
-            raise RuntimeError("operator-fusion-advisor did not produce optimization.json")
-        json.loads(optimization_path.read_text())  # fail fast on malformed JSON
-        self.validate_optimization(
-            job_id, job_dir, skill_dir, optimization_path, analysis_path, candidates_path,
-        )
-
-    def run_fusion_prescan(
-        self, job_id: str, job_dir: Path, skill_dir: Path, analysis_path: Path,
-        source_path: Path | None,
-    ) -> Path:
-        """Generate candidates.json deterministically, before the agent runs."""
-        candidates_path = job_dir / "candidates.json"
-        command = [
-            sys.executable,
-            str(skill_dir / "scripts" / "scan_fusion_candidates.py"),
-            "--analysis", str(analysis_path),
-            "--out", str(candidates_path),
-        ]
-        if source_path:
-            command += ["--source", str(source_path)]
-        completed = subprocess.run(command, text=True, capture_output=True)
-        self.log(job_dir, f"[prescan] {' '.join(command)}")
-        if completed.stdout:
-            self.log(job_dir, completed.stdout.strip())
-        if completed.returncode != 0:
-            raise RuntimeError(
-                f"fusion prescan failed ({completed.returncode}): "
-                f"{completed.stderr.strip()[:2000]}"
-            )
-        return candidates_path
-
-    def validate_optimization(
-        self, job_id: str, job_dir: Path, skill_dir: Path, optimization_path: Path,
-        analysis_path: Path, candidates_path: Path,
-    ) -> None:
-        """Enforce the output contract instead of trusting the agent's own check."""
-        command = [
-            sys.executable,
-            str(skill_dir / "scripts" / "validate_optimization_package.py"),
-            str(optimization_path),
-            "--analysis-json", str(analysis_path),
-            "--candidates-json", str(candidates_path),
-        ]
-        completed = subprocess.run(command, text=True, capture_output=True)
-        if completed.returncode != 0:
-            raise RuntimeError(
-                "optimization.json failed schema validation: "
-                f"{completed.stderr.strip()[:2000]}"
-            )
-        self.log(job_dir, "[prescan] optimization.json 通过 schema 校验")
-
-    def build_advisor_prompt(
-        self, job_dir: Path, request: JobCreate, analysis_path: Path,
-        package_dir: Path, source_path: Path | None,
-    ) -> str:
-        skill_dir = self.settings.operator_advisor_skill_dir
-        return f"""Use the `sglang-operator-fusion-advisor` skill at:
-{skill_dir}
-
-Read that SKILL.md completely before analysis. This exact path is the task's
-selected Skill version and overrides any older installed copy.
-
-This is an optional follow-up to an already-completed
-sglang-nsys-static-analysis job. Treat these as read-only input evidence:
-- analysis.json: {analysis_path}
-- seven-table package directory: {package_dir}
-- model source root: {source_path or 'not supplied — skip source-tree fusion checks'}
-
-Scope: analyze exactly one repeating unit at a time. If analysis.json
-contains multiple distinct (unitPosition, unitId, unitVariant) combinations,
-pick the single position whose distinct unitVariant best represents the
-job's `model`/`stage`, or the only position if there is just one; state
-which one you chose in `scope`. Do not compare or merge suggestions across
-two different positions or variants.
-
-Mandatory: candidates.json has already been generated for you by the
-deterministic prescan. Read it and work only from its rows — do not select
-candidates by judgement, do not invent registry matches, do not overrule its
-verdicts:
-- {job_dir / "candidates.json"}
-
-If you need a different repeating unit than the one it scoped, re-run the
-prescan with an explicit unit flag instead of reasoning around it:
-
-  python3 {skill_dir / "scripts" / "scan_fusion_candidates.py"} \\
-    --analysis {analysis_path} \\
-    {f"--source {source_path} " if source_path else ""}\\
-    --unit-variant <variant> \\
-    --out {job_dir / "candidates.json"}
-
-Your output is validated automatically after you finish; a schema or
-evidence violation fails the job. You can run the same check yourself:
-
-  python3 {skill_dir / "scripts" / "validate_optimization_package.py"} \\
-    {job_dir / "optimization.json"} \\
-    --analysis-json {analysis_path} \\
-    --candidates-json {job_dir / "candidates.json"}
-
-Write exactly one output file:
-- {job_dir / "optimization.json"} (final report, schemaVersion 1.1)
-
-Never edit analysis.json, the seven-table package, or any file under the
-supplied model source root.
-"""
-
-    def run_codex_advisor(
-        self, job_id: str, job_dir: Path, request: JobCreate, prompt: str,
-        skill_dir: Path, source_path: Path | None,
-    ) -> None:
-        if not self.settings.codex_enabled:
-            raise RuntimeError(
-                "Codex analyzer is disabled. Set NSYSSCOPE_CODEX_ENABLED=true on an isolated runner."
-            )
-        output_message = job_dir / "metadata" / "advisor-agent-final.txt"
-        command = [
-            self.settings.codex_bin, "--ask-for-approval", "never",
-        ]
-        if request.agent_model:
-            command.extend(["--model", request.agent_model])
-        command.extend([
-            "exec",
-            "--ephemeral", "--json", "--sandbox", "workspace-write",
-            "--skip-git-repo-check", "-C", str(job_dir),
-        ])
-        add_dirs = {str(skill_dir)}
-        if source_path is not None:
-            add_dirs.add(str(source_path if source_path.is_dir() else source_path.parent))
-        for directory in sorted(add_dirs):
-            command.extend(["--add-dir", directory])
-        command.extend(["--output-last-message", str(output_message), "-"])
-        self.run_process(
-            job_id, job_dir, command, stdin=prompt,
-            heartbeat_seconds=self.settings.agent_heartbeat_seconds,
-            stall_timeout_seconds=self.settings.agent_stall_timeout_seconds,
-            heartbeat_message="Codex 算子优化建议 Agent 仍在运行",
-        )
-
-    def run_comate_advisor(
-        self, job_id: str, job_dir: Path, request: JobCreate, prompt: str,
-        skill_dir: Path, source_path: Path | None,
-    ) -> None:
-        status = self._comate_status()
-        if not status["ready"]:
-            raise RuntimeError(status["message"])
-        self.stage_comate_advisor_skill(job_dir, skill_dir)
-        command = [
-            self.settings.comate_bin, "run",
-            "--query", prompt,
-            "--cwd", str(job_dir),
-            "--mode", "Agent",
-            "--activate-skill", "sglang-operator-fusion-advisor",
-            "--display", "task-json",
-            "--background-timeout", str(self.settings.comate_timeout_seconds),
-            "--disable-hooks",
-        ]
-        if self.settings.comate_username:
-            command.extend(["--username", self.settings.comate_username])
-        selected_model = request.agent_model or self.settings.comate_model
-        if selected_model:
-            command.extend(["--model", selected_model])
-        self.run_process(
-            job_id, job_dir, command, redacted_values={prompt},
-            # Use the same environment as the core static-analysis pass.
-            # Whether outbound research is possible is Comate's own call to
-            # make (via whatever mechanism it uses internally); this skill's
-            # research-and-estimation.md already requires it to say so
-            # explicitly and skip citations rather than fabricate them when
-            # no network research was available in a given run.
-            environment=self.comate_environment(),
-            output_formatter=self.format_comate_output,
-            heartbeat_seconds=self.settings.agent_heartbeat_seconds,
-            stall_timeout_seconds=self.settings.agent_stall_timeout_seconds,
-            session_store=self.settings.comate_store_dir,
-            heartbeat_message="Comate 算子优化建议 Agent 仍在运行",
-        )
-
-
-    def stage_comate_advisor_skill(self, job_dir: Path, skill_dir: Path) -> Path:
-        if not (skill_dir / "SKILL.md").exists():
-            raise RuntimeError(f"operator-fusion-advisor skill is missing: {skill_dir / 'SKILL.md'}")
-        target = job_dir / ".comate" / "skills" / "sglang-operator-fusion-advisor"
-        target.parent.mkdir(parents=True, exist_ok=True)
-        # Re-triggering /optimize on a job dir that already staged the skill must
-        # not fail. Replace rather than merge, so a stale file from an older skill
-        # version cannot survive into this run.
-        if target.exists():
-            shutil.rmtree(target)
-        shutil.copytree(
-            skill_dir,
-            target,
-            ignore=shutil.ignore_patterns(
-                "result", "evals", "agents", "__pycache__", "*.pyc",
-            ),
-        )
-        return target
-
     def skill_provenance(self) -> dict[str, str]:
         root = self.settings.skill_dir.resolve()
         project = Path(__file__).resolve().parents[1]
@@ -929,8 +663,8 @@ supplied model source root.
             raise RuntimeError(f"analysis skill is missing: {source / 'SKILL.md'}")
         target = job_dir / ".comate" / "skills" / "sglang-nsys-static-analysis"
         target.parent.mkdir(parents=True, exist_ok=True)
-        # Same reasoning as stage_comate_advisor_skill: re-running into an existing
-        # job dir must replace the staged skill, not fail or merge into it.
+        # Re-running into an existing job dir must replace the staged skill, not
+        # fail or merge into it.
         if target.exists():
             shutil.rmtree(target)
         shutil.copytree(
@@ -1077,6 +811,11 @@ Requirements:
    declared unit. Align the window to the layer-start kernel so positions of one
    variant hold the same operators, and never attribute a pipeline handoff wait
    (`SendRecv`) to a layer.
+12. Finish by writing `final_report.md` in {job_dir}: run
+   `scripts/build_final_report.py {job_dir} --prefix {request.prefix}` for the
+   tables, then replace every `<!-- TODO -->` marker with your own conclusions,
+   optimisation paths and analysis reasoning. It is the deliverable a human reads
+   instead of the tables, so keep it short, factual and number-backed.
 """
 
     @staticmethod
@@ -1596,6 +1335,36 @@ Requirements:
                 job_dir,
                 f"[forward-pipeline] 跳过：包内没有 {table.name}，也没有可用的 trace 来生成它",
             )
+
+    def ensure_final_report(
+        self, job_id: str, job_dir: Path, package_root: Path, prefix: str,
+    ) -> None:
+        """Make sure the package ships the human-readable `final_report.md`.
+
+        The agent is asked to write it (SKILL.md step 10) because the conclusions and
+        optimisation paths are judgement, not arithmetic. When it did not -- an
+        imported package, or an agent that stopped after the tables -- generate the
+        skeleton instead, so the reader always gets the four tables with their real
+        numbers and explicit `<!-- TODO -->` markers for the missing prose. Never
+        overwrite an existing report, and never fail the job over it.
+        """
+        report = package_root / "final_report.md"
+        if report.is_file():
+            return
+        script = self.settings.skill_dir / "scripts" / "build_final_report.py"
+        if not script.exists():
+            self.log(job_dir, f"[final-report] 跳过：缺少生成脚本 {script}")
+            return
+        command = [sys.executable, str(script), str(package_root), "--prefix", prefix]
+        completed = subprocess.run(command, text=True, capture_output=True)
+        if completed.returncode != 0:
+            detail = (completed.stderr or completed.stdout or "").strip()[:1500]
+            self.log(job_dir, f"[final-report] 生成分析文档失败，跳过（不影响任务其余产出）：{detail}")
+            return
+        self.log(
+            job_dir,
+            f"[final-report] Agent 未产出分析文档，已生成待补全骨架 {report}",
+        )
 
     @staticmethod
     def package_trace(package: Path) -> Path | None:
