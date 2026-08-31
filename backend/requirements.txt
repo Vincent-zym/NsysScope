@@ -1,3 +1,11 @@
-fastapi==0.134.0
-uvicorn==0.44.0
-pydantic==2.12.5
+# Minimum versions, not pins: a colleague installing this on their own machine
+# should get a working set from the official PyPI index without fighting a
+# resolver. Each floor is the oldest release the suite has actually been run
+# against (Python 3.10, see README "环境依赖与首次配置"); a fresh install resolves
+# to whatever is current. Lower a floor only after running
+# `pytest backend/test_service.py` against it.
+fastapi>=0.115.0
+uvicorn>=0.30.0
+pydantic>=2.9.0
+# stdlib tomllib only exists from 3.11; used to read Codex's configured model.
+tomli>=2.0.1; python_version < "3.11"

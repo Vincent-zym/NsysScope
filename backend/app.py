@@ -3,7 +3,7 @@ from __future__ import annotations
 import hmac
 import json
 import secrets
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response
@@ -64,11 +64,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         activity = updated
         log_path = runner.job_log_path(Path(job["output_dir"]))
         if log_path.exists():
-            log_activity = datetime.fromtimestamp(log_path.stat().st_mtime, UTC)
+            log_activity = datetime.fromtimestamp(log_path.stat().st_mtime, timezone.utc)
             activity = max(activity, log_activity)
         job["last_activity_at"] = activity
         job["idle_seconds"] = (
-            max(0, int((datetime.now(UTC) - activity).total_seconds()))
+            max(0, int((datetime.now(timezone.utc) - activity).total_seconds()))
             if job["status"] not in {"succeeded", "failed", "cancelled"} else None
         )
         return JobView.model_validate(job)

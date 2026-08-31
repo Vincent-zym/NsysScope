@@ -13,9 +13,18 @@ import sys
 import tempfile
 import threading
 import time
-import tomllib
 import traceback
 import zipfile
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10 ships no tomllib
+    try:
+        import tomli as tomllib  # type: ignore[no-redef]
+    except ModuleNotFoundError:
+        # Only used to read the default model out of Codex's config.toml, so a
+        # missing parser costs the configured default and nothing else.
+        tomllib = None  # type: ignore[assignment]
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Callable
@@ -1100,11 +1109,12 @@ Requirements:
         codex_home = Path(os.getenv("CODEX_HOME", Path.home() / ".codex"))
         configured_model = ""
         config_path = codex_home / "config.toml"
-        try:
-            config = tomllib.loads(config_path.read_text())
-            configured_model = str(config.get("model") or "")
-        except (OSError, tomllib.TOMLDecodeError):
-            pass
+        if tomllib is not None:
+            try:
+                config = tomllib.loads(config_path.read_text())
+                configured_model = str(config.get("model") or "")
+            except (OSError, tomllib.TOMLDecodeError):
+                pass
 
         payload: object | None = None
         executable = shutil.which(self.settings.codex_bin)

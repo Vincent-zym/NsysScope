@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -42,7 +42,7 @@ class JobStore:
                 db.execute("ALTER TABLE jobs ADD COLUMN popo_url TEXT")
 
     def create(self, job_id: str, request: JobCreate, output_dir: Path) -> dict[str, Any]:
-        now = datetime.now(UTC).isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         with self.lock, self.connect() as db:
             db.execute(
                 "INSERT INTO jobs "
@@ -61,7 +61,7 @@ class JobStore:
         message: str | None = None, error: str | None = None,
         popo_url: str | None = None,
     ) -> dict[str, Any]:
-        fields: dict[str, Any] = {"updated_at": datetime.now(UTC).isoformat()}
+        fields: dict[str, Any] = {"updated_at": datetime.now(timezone.utc).isoformat()}
         if status is not None:
             fields["status"] = status
         if progress is not None:
@@ -86,7 +86,7 @@ class JobStore:
         a run() completing concurrently cannot be overwritten after the fact,
         and this call cannot resurrect an already-finished job as cancelled.
         """
-        now = datetime.now(UTC).isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         with self.lock, self.connect() as db:
             db.execute(
                 "UPDATE jobs SET status = 'cancelled', progress = 100, "

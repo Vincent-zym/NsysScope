@@ -29,6 +29,65 @@ fail() {
   exit 1
 }
 
+DOWNLOAD_PROXY=""
+DOWNLOAD_PROXY_PROBED=false
+
+# Candidate ways out to the public internet, best first: whatever the caller
+# already exported, then the two office proxies. None of this is used unless a
+# direct connection fails.
+proxy_candidates() {
+  if [[ -n "${NSYSSCOPE_DOWNLOAD_PROXY:-}" ]]; then
+    printf '%s\n' "$NSYSSCOPE_DOWNLOAD_PROXY"
+    return
+  fi
+  printf '%s\n' "${https_proxy:-}" "${HTTPS_PROXY:-}" \
+    "http://agent.baidu.com:8891" "http://10.162.37.16:8128"
+}
+
+# Decide once how to reach PyPI / nodejs.org. Only the download steps use the
+# result: the agent CLIs must run with no proxy variables at all, so this is
+# deliberately never exported into the shell.
+probe_download_proxy() {
+  [[ "$DOWNLOAD_PROXY_PROBED" == true ]] && return 0
+  DOWNLOAD_PROXY_PROBED=true
+  # HEAD, not GET: https://pypi.org/simple/ is a ~45MB index page, and a GET that
+  # gets truncated by --max-time looks exactly like an unreachable proxy.
+  local probe_url="${NSYSSCOPE_PROXY_PROBE_URL:-https://pypi.org/simple/}"
+  if curl --head --noproxy '*' -fsS -o /dev/null --connect-timeout 5 --max-time 15 "$probe_url" 2>/dev/null; then
+    say "外网可直连，下载依赖不使用代理"
+    return 0
+  fi
+  local candidate
+  while read -r candidate; do
+    [[ -n "$candidate" ]] || continue
+    if curl --head -x "$candidate" -fsS -o /dev/null --connect-timeout 5 --max-time 15 "$probe_url" 2>/dev/null; then
+      DOWNLOAD_PROXY="$candidate"
+      say "下载依赖将通过代理：$candidate"
+      return 0
+    fi
+  done < <(proxy_candidates)
+  say "未找到可用的外网通路；如需指定代理请设置 NSYSSCOPE_DOWNLOAD_PROXY"
+  return 1
+}
+
+# Run one download command against the official index. A user-level pip.conf
+# pointing at an internal mirror is ignored on purpose: this tool is installed
+# from upstream releases and the mirror lags behind them.
+run_download() {
+  local -a proxy_env=()
+  if [[ -n "$DOWNLOAD_PROXY" ]]; then
+    proxy_env=(
+      "http_proxy=$DOWNLOAD_PROXY" "https_proxy=$DOWNLOAD_PROXY"
+      "HTTP_PROXY=$DOWNLOAD_PROXY" "HTTPS_PROXY=$DOWNLOAD_PROXY"
+    )
+  fi
+  env -u PIP_TRUSTED_HOST -u PIP_EXTRA_INDEX_URL \
+    PIP_CONFIG_FILE=/dev/null \
+    PIP_INDEX_URL="${NSYSSCOPE_PIP_INDEX_URL:-https://pypi.org/simple}" \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    "${proxy_env[@]}" "$@"
+}
+
 cleanup() {
   if [[ -n "${ANALYZER_PID:-}" ]]; then
     say "正在关闭 Analyzer"
@@ -66,29 +125,33 @@ PY
 
 try_install_node_pkgmgr() {
   local installed=1
+  # The distro mirror may itself need the proxy, and sudo drops the environment
+  # unless told to keep it, so both paths go through run_download.
+  probe_download_proxy || true
   if command -v apt-get >/dev/null 2>&1; then
     if [[ "$(id -u)" -eq 0 ]]; then
-      apt-get update -qq && apt-get install -y -qq nodejs npm
+      run_download apt-get update -qq && run_download apt-get install -y -qq nodejs npm
     elif command -v sudo >/dev/null 2>&1; then
-      sudo apt-get update -qq && sudo apt-get install -y -qq nodejs npm
+      run_download sudo -E apt-get update -qq \
+        && run_download sudo -E apt-get install -y -qq nodejs npm
     else
       return 1
     fi
     installed=$?
   elif command -v dnf >/dev/null 2>&1; then
     if [[ "$(id -u)" -eq 0 ]]; then
-      dnf install -y -q nodejs npm
+      run_download dnf install -y -q nodejs npm
     elif command -v sudo >/dev/null 2>&1; then
-      sudo dnf install -y -q nodejs npm
+      run_download sudo -E dnf install -y -q nodejs npm
     else
       return 1
     fi
     installed=$?
   elif command -v yum >/dev/null 2>&1; then
     if [[ "$(id -u)" -eq 0 ]]; then
-      yum install -y -q nodejs npm
+      run_download yum install -y -q nodejs npm
     elif command -v sudo >/dev/null 2>&1; then
-      sudo yum install -y -q nodejs npm
+      run_download sudo -E yum install -y -q nodejs npm
     else
       return 1
     fi
@@ -115,8 +178,9 @@ try_install_node_binary() {
   download_url="https://nodejs.org/dist/${node_version}/node-${node_version}-${arch}-${os_arch}.tar.xz"
   install_dir="${NSYSSCOPE_NODE_DIR:-$CACHE_BASE/node}"
   printf '    尝试直接下载 Node.js 二进制包: %s\n' "$download_url"
+  probe_download_proxy || true
   tmp_dir="$(mktemp -d)"
-  if ! curl -fsSL --connect-timeout 15 -o "$tmp_dir/node.tar.xz" "$download_url"; then
+  if ! run_download curl -fsSL --connect-timeout 15 -o "$tmp_dir/node.tar.xz" "$download_url"; then
     rm -rf -- "$tmp_dir"
     return 1
   fi
@@ -185,6 +249,17 @@ doctor() {
       failed=1
     fi
   done
+  # 3.10 is the verified floor: below it pydantic cannot evaluate the `str | None`
+  # annotations in backend/models.py, which fails at import rather than at use.
+  if command -v python3 >/dev/null 2>&1; then
+    if python3 -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)'; then
+      printf '  ✓ %-9s %s\n' "python>=3.10" "$(python3 -c 'import sys; print(".".join(map(str, sys.version_info[:3])))')"
+    else
+      printf '  ✗ python3 版本过低（需要 3.10 及以上，当前 %s）\n' \
+        "$(python3 -c 'import sys; print(".".join(map(str, sys.version_info[:3])))')"
+      failed=1
+    fi
+  fi
   if command -v nsys >/dev/null 2>&1; then
     printf '  ✓ %-9s %s\n' "nsys" "$(command -v nsys)"
   else
@@ -274,8 +349,10 @@ prepare_python() {
     printf '%s\n' "$requirements_hash" > "$stamp"
   elif [[ ! -x "$VENV_DIR/bin/uvicorn" ]] || [[ "$(<"$stamp")" != "$requirements_hash" ]]; then
     say "安装 Analyzer Python 依赖"
-    env -u PIP_INDEX_URL -u PIP_TRUSTED_HOST -u PIP_EXTRA_INDEX_URL \
-      "$VENV_DIR/bin/python3" -m pip install -r "$PROJECT_DIR/backend/requirements.txt"
+    probe_download_proxy || true
+    run_download "$VENV_DIR/bin/python3" -m pip install \
+      -r "$PROJECT_DIR/backend/requirements.txt" \
+      || fail "依赖安装失败；确认能访问 https://pypi.org 或设置 NSYSSCOPE_DOWNLOAD_PROXY"
     printf '%s\n' "$requirements_hash" > "$stamp"
   fi
 }
