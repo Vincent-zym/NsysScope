@@ -21,6 +21,7 @@ Generate:
 9. `<prefix>_analysis_manifest.json`
 10. a position-aware statistics sidecar
 11. `validation_report.json`
+12. `final_report.md` (the human-readable report; see step 10)
 
 The first six tables are required. The seventh relates the measured repeating unit
 to a whole forward step, so a package with it can additionally answer what fraction
@@ -379,6 +380,30 @@ Fail when:
 - a heterogeneous cycle is labeled generic single-layer duration;
 - a fused kernel is split without trace evidence;
 - runtime, shape, MFU or frontend parity is inconsistent.
+
+### 10. Write the analysis report
+
+Every task ends with `final_report.md` in the result directory -- the one
+deliverable a human reads instead of the tables. Generate its skeleton after the
+seventh table exists (tables 1 and 2 of the report come from it), then fill in the
+judgement:
+
+```bash
+python scripts/build_final_report.py /path/result --prefix model
+```
+
+The script fills all four tables from the package (forward step split, target's
+children, functional modules over the repeating unit, operator categories) and
+leaves `<!-- TODO ... -->` markers for the model-structure line, 结论, 潜在优化点,
+本节结论, 分析思路, the runtime-config note and the two operator-level notes.
+Replace every marker and keep the generated numbers -- if a number looks wrong,
+fix the table it came from, not the report.
+
+Write for a reader who will not open the CSVs: state facts with numbers, order
+conclusions by impact, and only claim a cause the package's data supports. See
+references/final-report-format.md for the section layout and the paste-fidelity
+rules the HTML tables depend on, and references/final_report.example.md for a
+complete filled-in report (glm5_next prefill) to match.
 
 ## Numerical and presentation rules
 
