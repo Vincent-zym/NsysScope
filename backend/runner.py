@@ -55,12 +55,38 @@ CSV_SUFFIXES = AGENT_CSV_SUFFIXES + (FORWARD_PIPELINE_SUFFIX,)
 
 # CPU time an agent must burn between two heartbeats to count as working. A dropped
 # model request leaves the process parked on a socket at roughly one clock tick per
-# 20 seconds, while a long reasoning turn keeps at least one core busy.
+# 20 seconds, while a long reasoning turn keeps at least one core busy. Expressed as a
+# floor; the effective threshold scales with the heartbeat interval, see
+# CPU_PROGRESS_FRACTION.
 CPU_PROGRESS_SECONDS = 1.0
 
 # The Comate Zulu CLI is a modern-JS bundle: on Node <= 12 it dies while loading and
 # still exits 0, so its version is a hard precondition rather than a warning.
 MIN_NODE_MAJOR = 18
+
+# Fraction of a heartbeat interval of CPU time that counts as "the agent is thinking".
+# A flat 1 second was too generous: an idle Node event loop, and especially the burst
+# of timers it catches up on after the host resumes from suspend, clears 1 second
+# easily and kept resetting the stall timer on an agent that had already finished.
+CPU_PROGRESS_FRACTION = 0.1
+
+
+def elapsed_seconds() -> float:
+    """A clock for measuring durations that keeps counting while the host sleeps.
+
+    `time.monotonic()` excludes suspend time on Linux, which made the stall timer
+    under-count badly: one job's heartbeat showed its agent session ageing 60
+    minutes (wall clock) while `idle` advanced only 9, so a 30-minute stall
+    timeout never fired. CLOCK_BOOTTIME includes suspend and, unlike
+    `time.time()`, cannot jump backwards when the clock is stepped.
+    """
+    boottime = getattr(time, "CLOCK_BOOTTIME", None)
+    if boottime is not None:
+        try:
+            return time.clock_gettime(boottime)
+        except OSError:
+            pass
+    return time.monotonic()
 
 # `nsys export` refuses a report produced by a newer Nsight Systems than itself, and a
 # .nsys-rep's first line carries the exact build that wrote it, e.g.
@@ -1254,6 +1280,24 @@ Requirements:
 """
 
     @staticmethod
+    def agent_outputs_complete(job_dir: Path) -> bool:
+        """Whether the agent's six tables already exist somewhere under the job dir.
+
+        Same contract as `find_package`, which runs after the process exits; asking
+        the question during the wait is what lets a finished-but-parked CLI be cut
+        short instead of held to its own timeout. Any prefix counts: the package
+        directory and its prefix are only resolved later.
+        """
+        for marker in job_dir.rglob("*_stage_table.csv"):
+            prefix = marker.name.removesuffix("_stage_table.csv")
+            if all(
+                (marker.parent / f"{prefix}{suffix}").exists()
+                for suffix in AGENT_CSV_SUFFIXES
+            ):
+                return True
+        return False
+
+    @staticmethod
     def newest_artifact(job_dir: Path) -> tuple[float, str | None]:
         """Newest file the agent produced under the job directory, and its mtime.
 
@@ -1396,13 +1440,20 @@ Requirements:
             self.processes[job_id] = process
         heartbeat_stop = threading.Event()
         stalled = threading.Event()
-        last_output = [time.monotonic()]
+        # Set when the heartbeat stops waiting because the agent's outputs are already
+        # complete. The process is killed to get there, so its exit code must not be
+        # reported as a failure.
+        finished_early = threading.Event()
+        last_output = [elapsed_seconds()]
         heartbeat_thread: threading.Thread | None = None
         if heartbeat_seconds > 0:
             def emit_heartbeat() -> None:
                 seen, artifact = self.newest_artifact(job_dir)
                 cpu = self.process_group_cpu_seconds(process.pid)
-                progress_at = time.monotonic()
+                cpu_threshold = max(
+                    CPU_PROGRESS_SECONDS, heartbeat_seconds * CPU_PROGRESS_FRACTION,
+                )
+                progress_at = elapsed_seconds()
                 session: Path | None = None
                 session_state = (0.0, 0)
                 while not heartbeat_stop.wait(heartbeat_seconds):
@@ -1411,15 +1462,15 @@ Requirements:
                     current, name = self.newest_artifact(job_dir)
                     if current > seen:
                         seen, artifact = current, name
-                        progress_at = time.monotonic()
+                        progress_at = elapsed_seconds()
                     # An agent can spend a long turn reading and reasoning without
                     # writing anything, and `--display task-json` keeps stdout silent
                     # until the end, so burnt CPU is the third progress signal. Only a
                     # process that produces nothing AND burns no CPU is really stuck.
                     busy = self.process_group_cpu_seconds(process.pid)
-                    if busy - cpu >= CPU_PROGRESS_SECONDS:
+                    if busy - cpu >= cpu_threshold:
                         cpu = busy
-                        progress_at = time.monotonic()
+                        progress_at = elapsed_seconds()
                     # The strongest signal: the agent's own conversation file. It grows
                     # on every message and tool result, so while it advances the agent
                     # is demonstrably still working, whatever the job dir looks like.
@@ -1430,7 +1481,7 @@ Requirements:
                             )
                             if session is not None:
                                 session_state = self.session_activity(session)
-                                progress_at = time.monotonic()
+                                progress_at = elapsed_seconds()
                                 self.log(
                                     job_dir,
                                     f"[heartbeat] 已定位 Agent 会话 {session.name}，"
@@ -1440,28 +1491,57 @@ Requirements:
                             state = self.session_activity(session)
                             if state > session_state:
                                 session_state = state
-                                progress_at = time.monotonic()
-                    idle = time.monotonic() - max(progress_at, last_output[0])
+                                progress_at = elapsed_seconds()
+                    idle = elapsed_seconds() - max(progress_at, last_output[0])
+                    # Age of the conversation file, in wall-clock terms. Once the file
+                    # exists this is the authoritative liveness signal, so it gets to
+                    # end the wait on its own -- the other signals can only extend it,
+                    # and CPU noise from an idle event loop was enough to keep a
+                    # finished agent parked until the CLI's own two-hour timeout.
+                    session_idle = (
+                        max(0.0, time.time() - session_state[0])
+                        if session is not None and session_state[0] else None
+                    )
                     produced = f"最近产出 {artifact}" if artifact else "尚未产出任何文件"
                     if session_store is None:
                         alive = ""
                     elif session is None:
                         alive = "，未找到 Agent 会话文件"
                     else:
-                        age = max(0.0, time.time() - session_state[0])
-                        alive = f"，会话 {age / 60:.0f} 分钟前更新"
+                        alive = f"，会话 {(session_idle or 0.0) / 60:.0f} 分钟前更新"
                     self.log(
                         job_dir,
                         f"[heartbeat] {heartbeat_message}（{produced}，"
                         f"距上次进展 {idle / 60:.0f} 分钟，累计 CPU {busy / 60:.1f} 分钟"
                         f"{alive}）",
                     )
-                    if stall_timeout_seconds and idle > stall_timeout_seconds:
+                    # The agent wrote everything the pipeline needs and then went quiet:
+                    # the model turn is over and only the CLI process is still parked.
+                    # Waiting for it buys nothing, so stop waiting and let the caller
+                    # proceed with the package that is already on disk. Checked before
+                    # the stall branch on purpose: with the outputs present this is a
+                    # success, and it must win when both thresholds are crossed.
+                    if (
+                        stall_timeout_seconds
+                        and session_idle is not None
+                        and session_idle > min(300, stall_timeout_seconds)
+                        and self.agent_outputs_complete(job_dir)
+                    ):
+                        self.log(
+                            job_dir,
+                            f"[heartbeat] Agent 产物已齐全且会话静默 "
+                            f"{session_idle / 60:.0f} 分钟，视为已完成，停止等待进程退出",
+                        )
+                        finished_early.set()
+                        self._kill_process_group(process)
+                        return
+                    stalled_for = max(idle, session_idle or 0.0)
+                    if stall_timeout_seconds and stalled_for > stall_timeout_seconds:
                         stalled.set()
                         self.log(
                             job_dir,
-                            f"[stalled] Agent {idle / 60:.0f} 分钟没有输出、没有新产物、"
-                            f"没有会话更新，也几乎没有消耗 CPU（{produced}），"
+                            f"[stalled] Agent {stalled_for / 60:.0f} 分钟没有输出、"
+                            f"没有新产物、没有会话更新（{produced}），"
                             "判定为停滞并终止（模型请求丢失时进程会活着但无事可做）",
                         )
                         self._kill_process_group(process)
@@ -1479,7 +1559,7 @@ Requirements:
                 process.stdin.write(stdin)
                 process.stdin.close()
             for line in process.stdout:
-                last_output[0] = time.monotonic()
+                last_output[0] = elapsed_seconds()
                 if line.strip():
                     rendered = output_formatter(line) if output_formatter else line
                     if rendered:
@@ -1489,7 +1569,7 @@ Requirements:
                 raise RuntimeError(
                     f"agent 停滞超过 {stall_timeout_seconds // 60} 分钟，已终止：{command[0]}"
                 )
-            if code:
+            if code and not finished_early.is_set():
                 raise RuntimeError(f"process exited with code {code}: {command[0]}")
         finally:
             heartbeat_stop.set()

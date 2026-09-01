@@ -22,7 +22,7 @@ from fastapi.testclient import TestClient
 from backend.app import create_app
 from backend.config import Settings
 from backend.models import BUILTIN_MODEL_CONFIGS, JobCreate
-from backend.runner import JobRunner
+from backend.runner import AGENT_CSV_SUFFIXES, JobRunner
 from backend.store import JobStore
 from scripts.build_analysis_json import (
     build_operator_payload,
@@ -1139,6 +1139,71 @@ def test_a_foreign_conversation_is_not_taken_for_ours(tmp_path: Path) -> None:
     assert JobRunner.find_agent_session(store, job_dir, 0.0) == mine
     # A conversation from before this process started belongs to an earlier run.
     assert JobRunner.find_agent_session(store, job_dir, time.time() + 60) is None
+
+
+def test_a_quiet_session_stalls_an_agent_that_still_burns_cpu(tmp_path: Path) -> None:
+    # The case that hung a colleague's job for two hours: the agent had finished its
+    # turn, so its conversation file stopped growing, but the CLI process stayed up
+    # with an idle event loop that burnt enough CPU to reset the progress timer on
+    # every heartbeat. A conversation that has gone quiet for longer than the timeout
+    # now ends the wait on its own, whatever the other signals say.
+    configured = replace(settings(tmp_path), agent_stall_timeout_seconds=2)
+    configured.prepare()
+    runner = JobRunner(configured, JobStore(configured.data_dir / "jobs.sqlite"))
+    job_dir = tmp_path / "parked"
+    job_dir.mkdir()
+    store = configured.comate_store_dir
+    store.mkdir(parents=True, exist_ok=True)
+    session = store / "chat_session_99999999-0000-0000-0000-000000000000"
+    session.write_text(json.dumps({"workspaceDirectory": str(job_dir)}), encoding="utf-8")
+    # The session is fresh, so it is located on the first heartbeat, and then never
+    # touched again -- the shape of an agent whose turn is over. Meanwhile the process
+    # keeps a core busy, which used to be enough to reset the progress timer forever.
+
+    with pytest.raises(RuntimeError):
+        runner.run_process(
+            "parked-job", job_dir,
+            [sys.executable, "-c",
+             "import time\ndeadline = time.time() + 20\nwhile time.time() < deadline: pass"],
+            heartbeat_seconds=1,
+            heartbeat_message="测试进程仍在运行",
+            stall_timeout_seconds=2,
+            session_store=store,
+        )
+    log = runner.job_log_path(job_dir).read_text()
+    assert "[stalled]" in log
+    assert "没有会话更新" in log
+
+
+def test_complete_outputs_end_the_wait_instead_of_failing(tmp_path: Path) -> None:
+    # Same parked CLI, but this time everything the pipeline needs is already on disk.
+    # Killing the process is then a success, not a stall: the caller carries on with
+    # the package, and the job must not be reported as failed.
+    configured = replace(settings(tmp_path), agent_stall_timeout_seconds=3)
+    configured.prepare()
+    runner = JobRunner(configured, JobStore(configured.data_dir / "jobs.sqlite"))
+    job_dir = tmp_path / "finished"
+    package = job_dir / "result"
+    package.mkdir(parents=True)
+    for suffix in AGENT_CSV_SUFFIXES:
+        (package / f"analysis{suffix}").write_text("序号\n1\n", encoding="utf-8")
+    store = configured.comate_store_dir
+    store.mkdir(parents=True, exist_ok=True)
+    session = store / "chat_session_88888888-0000-0000-0000-000000000000"
+    session.write_text(json.dumps({"workspaceDirectory": str(job_dir)}), encoding="utf-8")
+
+    runner.run_process(
+        "finished-job", job_dir,
+        [sys.executable, "-c",
+         "import time\ndeadline = time.time() + 20\nwhile time.time() < deadline: pass"],
+        heartbeat_seconds=1,
+        heartbeat_message="测试进程仍在运行",
+        stall_timeout_seconds=3,
+        session_store=store,
+    )
+    log = runner.job_log_path(job_dir).read_text()
+    assert "产物已齐全" in log
+    assert "[stalled]" not in log
 
 
 def test_forward_pipeline_table_is_optional(tmp_path: Path) -> None:
