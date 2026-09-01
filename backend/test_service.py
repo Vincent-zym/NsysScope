@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import io
 import json
 import os
 import shutil
@@ -12,6 +13,7 @@ import time
 import zipfile
 from dataclasses import replace
 from pathlib import Path
+from unittest import mock
 
 import pytest
 
@@ -1252,3 +1254,160 @@ def test_job_log_names_the_skill_and_warns_about_a_shadowing_copy(
     shadowed_log = JobRunner.job_log_path(shadowed_dir).read_text(encoding="utf-8")
     assert "(codex)" in shadowed_log
     assert "不是仓库自带的 skill" in shadowed_log
+
+
+def test_report_version_decides_which_nsys_can_export(tmp_path: Path) -> None:
+    # A .nsys-rep opens with the build that wrote it, and `nsys export` only reads
+    # its own version or older -- so this header is what decides whether the local
+    # nsys is usable at all.
+    report = tmp_path / "capture.nsys-rep"
+    report.write_bytes(
+        b"NVIDIA Tegra Profiler Report 2026@4@1@191-264138605071v0."
+        b"\n\x0bLocal (CLI)\x12\n"
+    )
+    assert JobRunner.report_tool_version(report) == (
+        (2026, 4, 1, 191), "2026.4.1.191-264138605071v0",
+    )
+
+    not_a_report = tmp_path / "plain.nsys-rep"
+    not_a_report.write_bytes(b"whatever")
+    assert JobRunner.report_tool_version(not_a_report) is None
+
+
+def test_nsys_package_is_picked_by_build_then_by_next_newer(tmp_path: Path) -> None:
+    configured = settings(tmp_path)
+    configured.prepare()
+    runner = JobRunner(configured, JobStore(configured.data_dir / "jobs.sqlite"))
+    index = textwrap.dedent("""\
+        Package: nsight-systems-cli-2025.3.1
+        Version: 2025.3.1.90-253135822126v0
+        Filename: ./NsightSystems-linux-cli-public-2025.3.1.90-3582212.deb
+
+        Package: nsight-systems-cli-2026.4.1
+        Version: 2026.4.1.191-264138605071v0
+        Filename: ./NsightSystems-linux-cli-public-2026.4.1.191-3860507.deb
+
+        Package: nsight-systems-2026.4.1
+        Version: 2026.4.1.191-264138605071v0
+        Filename: ./nsight-systems-2026.4.1_2026.4.1.191-1_amd64.deb
+    """)
+    runner.download_text = lambda url: index  # type: ignore[method-assign]
+
+    # Exact build wins, and never the multi-GB full package that shares its version.
+    assert runner.nsys_package_filename(
+        (2026, 4, 1, 191), "2026.4.1.191-264138605071v0",
+    ) == "NsightSystems-linux-cli-public-2026.4.1.191-3860507.deb"
+    # Unknown build: the lowest CLI that is still new enough to read the report.
+    assert runner.nsys_package_filename(
+        (2025, 3, 1, 90), "2025.3.1.90-unlisted",
+    ) == "NsightSystems-linux-cli-public-2025.3.1.90-3582212.deb"
+    with pytest.raises(RuntimeError):
+        runner.nsys_package_filename((2099, 1, 1, 1), "2099.1.1.1-x")
+
+
+def test_download_switches_proxy_and_resumes_from_what_it_has(tmp_path: Path) -> None:
+    # A proxy can answer a HEAD instantly and then deliver nothing on a 200 MB body,
+    # so reachability is not throughput: the transfer itself has to pick the path, and
+    # a failed chunk must resume rather than restart.
+    configured = settings(tmp_path)
+    configured.prepare()
+    runner = JobRunner(configured, JobStore(configured.data_dir / "jobs.sqlite"))
+    body = bytes(range(256)) * 40  # 10240 bytes
+    attempted: list[tuple[object, int]] = []
+
+    class Response:
+        def __init__(self, payload: bytes, start: int) -> None:
+            self.payload = payload
+            self.status = 206
+            self.headers = {
+                "Content-Range": f"bytes {start}-{start + len(payload) - 1}/{len(body)}",
+            }
+
+        def read(self):
+            return self.payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    def opener(proxy):
+        class Opener:
+            def open(self, request, timeout=None):
+                start = int(request.headers["Range"].split("=")[1].split("-")[0])
+                attempted.append((proxy, start))
+                # The first proxy stalls once, halfway through the file.
+                if proxy == "http://first:1" and start == 4096:
+                    raise TimeoutError("read timed out")
+                return Response(body[start:start + 4096], start)
+        return Opener()
+
+    runner._opener = opener  # type: ignore[method-assign]
+    artifact = tmp_path / "artifact.bin"
+    # The probe is a throughput measurement, not part of the transfer under test.
+    runner.fastest_download_path = lambda url, **kwargs: None  # type: ignore[method-assign]
+    with mock.patch.object(
+        JobRunner, "download_candidates",
+        lambda self: ["http://first:1", "http://second:1"],
+    ):
+        runner.download("https://example.invalid/artifact.bin", artifact, chunk_bytes=4096)
+
+    assert artifact.read_bytes() == body
+    # The stalled chunk resumed at the same offset on the next proxy, not from zero.
+    assert ("http://first:1", 4096) in attempted
+    assert ("http://second:1", 4096) in attempted
+    assert all(start % 4096 == 0 for _, start in attempted)
+
+    with mock.patch.object(
+        JobRunner, "download_candidates", lambda self: ["http://dead:1"],
+    ):
+        runner._opener = lambda proxy: mock.Mock(  # type: ignore[method-assign]
+            open=mock.Mock(side_effect=TimeoutError("read timed out")),
+        )
+        with pytest.raises(RuntimeError, match="下载失败"):
+            runner.download("https://example.invalid/artifact.bin", artifact)
+
+
+def test_download_path_is_chosen_by_measured_throughput(tmp_path: Path) -> None:
+    # Candidate order picks badly: the first *working* office proxy measured
+    # 0.24 MB/s while the second did 0.95 MB/s, which turned a 4-minute download
+    # into 13. Speed decides, not position.
+    configured = settings(tmp_path)
+    configured.prepare()
+    runner = JobRunner(configured, JobStore(configured.data_dir / "jobs.sqlite"))
+
+    class Response:
+        def __init__(self, payload: bytes, delay: float) -> None:
+            self.payload = payload
+            self.delay = delay
+
+        def read(self):
+            time.sleep(self.delay)
+            return self.payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    def opener(proxy):
+        class Opener:
+            def open(self, request, timeout=None):
+                if proxy is None:
+                    raise TimeoutError("read timed out")
+                # The slow path answers first in candidate order.
+                return Response(b"x" * 4096, 0.20 if proxy == "http://slow:1" else 0.02)
+        return Opener()
+
+    runner._opener = opener  # type: ignore[method-assign]
+    with mock.patch.object(
+        JobRunner, "download_candidates",
+        lambda self: [None, "http://slow:1", "http://fast:1"],
+    ):
+        chosen = runner.fastest_download_path(
+            "https://example.invalid/artifact.bin", probe_bytes=4096,
+        )
+    assert chosen == "http://fast:1"
+    assert runner._download_proxy == "http://fast:1"

@@ -19,6 +19,10 @@ PERSIST_DATA_DIR="${NSYSSCOPE_DATA_DIR:-$STATE_BASE}"
 CODEX_READY=false
 COMATE_BIN="${NSYSSCOPE_COMATE_BIN:-}"
 COMATE_PLATFORM="${NSYSSCOPE_COMATE_PLATFORM:-internal}"
+# The Comate Zulu CLI is a modern-JS bundle: on Node <= 12 it dies while loading and
+# still exits 0, so "node exists" is not a sufficient check. Keep this in step with
+# MIN_NODE_MAJOR in backend/runner.py.
+MIN_NODE_MAJOR="${NSYSSCOPE_MIN_NODE_MAJOR:-18}"
 
 say() {
   printf '[NsysScope] %s\n' "$*"
@@ -177,6 +181,14 @@ try_install_node_binary() {
   node_version="${NSYSSCOPE_NODE_VERSION:-v20.17.0}"
   download_url="https://nodejs.org/dist/${node_version}/node-${node_version}-${arch}-${os_arch}.tar.xz"
   install_dir="${NSYSSCOPE_NODE_DIR:-$CACHE_BASE/node}"
+  # A previous run already put a private node here; reuse it instead of downloading
+  # the same tarball again on every start.
+  if [[ -x "$install_dir/bin/node" ]]; then
+    export PATH="$install_dir/bin:$PATH"
+    if node_ready; then
+      return 0
+    fi
+  fi
   printf '    尝试直接下载 Node.js 二进制包: %s\n' "$download_url"
   probe_download_proxy || true
   tmp_dir="$(mktemp -d)"
@@ -194,18 +206,48 @@ try_install_node_binary() {
   [[ -x "$install_dir/bin/node" ]]
 }
 
+node_major() {
+  local raw
+  command -v node >/dev/null 2>&1 || return 1
+  raw="$(node --version 2>/dev/null)" || return 1
+  raw="${raw#v}"
+  raw="${raw%%.*}"
+  [[ "$raw" =~ ^[0-9]+$ ]] || return 1
+  printf '%s\n' "$raw"
+}
+
+node_ready() {
+  local major
+  major="$(node_major)" || return 1
+  [[ "$major" -ge "$MIN_NODE_MAJOR" ]]
+}
+
 try_install_node() {
-  if command -v node >/dev/null 2>&1; then
+  local major
+  if node_ready; then
     return 0
+  fi
+  if major="$(node_major)"; then
+    # An old node already on PATH is the case that used to slip through: the CLI
+    # crashed with "Error: Not supported" and still exited 0, so the job failed
+    # much later on missing tables. Install a private new-enough node in front of
+    # it rather than touching the system one other tooling may depend on.
+    printf '    检测到 Node.js 版本过低（v%s，需要 %s 及以上），尝试安装新版本...\n' \
+      "$major" "$MIN_NODE_MAJOR"
+    if try_install_node_binary && node_ready; then
+      printf '    ✓ Node.js 已就绪: %s (%s)\n' "$(command -v node)" "$(node --version)"
+      return 0
+    fi
+    return 1
   fi
   printf '    检测到缺少 Node.js，尝试自动安装...\n'
-  if try_install_node_pkgmgr && command -v node >/dev/null 2>&1; then
-    printf '    ✓ Node.js 安装成功: %s\n' "$(command -v node)"
+  if try_install_node_pkgmgr && node_ready; then
+    printf '    ✓ Node.js 安装成功: %s (%s)\n' "$(command -v node)" "$(node --version)"
     return 0
   fi
-  printf '    包管理器安装失败或不可用，尝试从 nodejs.org 下载二进制包...\n'
-  if try_install_node_binary && command -v node >/dev/null 2>&1; then
-    printf '    ✓ Node.js 安装成功: %s\n' "$(command -v node)"
+  printf '    包管理器安装失败、不可用或版本过低，尝试从 nodejs.org 下载二进制包...\n'
+  if try_install_node_binary && node_ready; then
+    printf '    ✓ Node.js 安装成功: %s (%s)\n' "$(command -v node)" "$(node --version)"
     return 0
   fi
   return 1
@@ -276,15 +318,36 @@ doctor() {
   fi
   COMATE_BIN="$(discover_zulu)"
   if [[ -n "$COMATE_BIN" ]]; then
+    # Check the runtime before asking the CLI anything: an old node makes zulu die
+    # while loading yet still exit 0, so "status" would report success.
+    if ! node_ready; then
+      if node_major >/dev/null 2>&1; then
+        printf '  △ Comate Zulu 需要 Node %s 及以上，当前 %s\n' \
+          "$MIN_NODE_MAJOR" "$(node --version)"
+      else
+        printf '  △ Comate Zulu 需要 Node.js 运行时，但未检测到 node\n'
+      fi
+      if ! try_install_node; then
+        printf '    自动安装失败，请手动安装 Node.js %s+ 后重新运行: ./nsysscope doctor\n' \
+          "$MIN_NODE_MAJOR"
+        printf '    Debian/Ubuntu: sudo apt install -y nodejs npm\n'
+      fi
+    fi
     set +e
     comate_status="$(run_comate_cli status 2>&1)"
     comate_status_code=$?
     set -e
     if [[ "$comate_status_code" -eq 0 ]] \
       && [[ "$comate_status" != *"未登录"* ]] \
-      && [[ "$comate_status" != *"not logged"* ]]; then
+      && [[ "$comate_status" != *"not logged"* ]] \
+      && [[ "$comate_status" != *"Error: Not supported"* ]]; then
       printf '  ✓ Comate Zulu 已登录\n'
       provider_ready=1
+    elif [[ "$comate_status" == *"Error: Not supported"* ]]; then
+      printf '  ✗ Comate Zulu 启动即崩溃（Error: Not supported），Node 运行时不兼容\n'
+      printf '    当前 node: %s；需要 Node %s 及以上\n' \
+        "$(node --version 2>/dev/null || echo '未检测到')" "$MIN_NODE_MAJOR"
+      failed=1
     elif [[ "$comate_status" == *"未登录"* ]] || [[ "$comate_status" == *"not logged"* ]]; then
       printf '  △ Comate Zulu 已安装但尚未登录\n'
       printf '    运行: ./nsysscope login comate\n'

@@ -11,9 +11,11 @@ import stat
 import subprocess
 import sys
 import tempfile
+import tarfile
 import threading
 import time
 import traceback
+import urllib.request
 import zipfile
 
 try:
@@ -56,6 +58,31 @@ CSV_SUFFIXES = AGENT_CSV_SUFFIXES + (FORWARD_PIPELINE_SUFFIX,)
 # 20 seconds, while a long reasoning turn keeps at least one core busy.
 CPU_PROGRESS_SECONDS = 1.0
 
+# The Comate Zulu CLI is a modern-JS bundle: on Node <= 12 it dies while loading and
+# still exits 0, so its version is a hard precondition rather than a warning.
+MIN_NODE_MAJOR = 18
+
+# `nsys export` refuses a report produced by a newer Nsight Systems than itself, and a
+# .nsys-rep's first line carries the exact build that wrote it, e.g.
+# "NVIDIA Tegra Profiler Report 2026@4@1@191-264138605071v0." -- which is the same
+# build string the public devtools apt repo uses for its CLI-only packages. That makes
+# "which nsys can read this file" a lookup, not a guess.
+REPORT_VERSION_RE = re.compile(rb"Report (\d+)@(\d+)@(\d+)@(\d+)-(\S+?)\.")
+NSYS_VERSION_RE = re.compile(r"version (\d+)\.(\d+)\.(\d+)\.(\d+)")
+NSYS_REPO_URL = os.getenv(
+    # Overridable so an air-gapped site can point at an internal mirror of the same
+    # layout (a Packages index plus the .deb files beside it).
+    "NSYSSCOPE_NSYS_REPO",
+    "https://developer.download.nvidia.com/devtools/repos/ubuntu2004/amd64",
+)
+# Same candidates, same order as the launcher's proxy_candidates(): caller's own
+# setting first, then the environment's, then the two office proxies. Only downloads
+# use them; agent CLIs must run with no proxy variables at all.
+DOWNLOAD_PROXY_CANDIDATES = (
+    "http://agent.baidu.com:8891",
+    "http://10.162.37.16:8128",
+)
+
 
 class JobRunner:
     def __init__(self, settings: Settings, store: JobStore):
@@ -67,6 +94,8 @@ class JobRunner:
         self.processes: dict[str, subprocess.Popen[str]] = {}
         self.lock = threading.Lock()
         self.log_lock = threading.Lock()
+        # Ellipsis = "not probed yet"; None is a valid result meaning "direct".
+        self._download_proxy: object = ...
 
     def _run_tracked(
         self, job_id: str | None, command: list[str], *,
@@ -186,6 +215,17 @@ class JobRunner:
         structured = job_dir / "logs" / "job.log"
         legacy = job_dir / "job.log"
         return legacy if legacy.exists() and not structured.exists() else structured
+
+    def log_tail(self, job_dir: Path, limit: int = 64 * 1024) -> str:
+        """Tail of the job log, for post-run inspection of an agent's own output."""
+        path = self.job_log_path(job_dir)
+        try:
+            with path.open("rb") as handle:
+                handle.seek(0, os.SEEK_END)
+                handle.seek(max(0, handle.tell() - limit))
+                return handle.read().decode("utf-8", "replace")
+        except OSError:
+            return ""
 
     def log(self, job_dir: Path, message: str) -> None:
         log_path = self.job_log_path(job_dir)
@@ -451,13 +491,318 @@ class JobRunner:
             raise RuntimeError("report must end with .nsys-rep or .sqlite")
         sqlite_path = job_dir / f"{report.stem}.sqlite"
         self.state(job_id, job_dir, "exporting", 10, "正在导出 Nsight Systems SQLite")
+        nsys_bin = self.resolve_nsys(job_dir, report)
         self.run_process(
             job_id, job_dir,
-            [self.settings.nsys_bin, "export", "--type", "sqlite", "--output", str(sqlite_path), str(report)],
+            [nsys_bin, "export", "--type", "sqlite", "--output", str(sqlite_path), str(report)],
         )
         if not sqlite_path.exists():
             raise RuntimeError("nsys export completed without producing SQLite")
         return sqlite_path
+
+    def resolve_nsys(self, job_dir: Path, report: Path) -> str:
+        """The nsys that can export this report -- the installed one, or a fetched CLI.
+
+        Reports carry the build that wrote them and `nsys export` only reads its own
+        version or older, so a machine with an older nsys than the capture cannot
+        export at all. Rather than failing, fetch the CLI-only package for that exact
+        build into our own cache (~200 MB, no root, nothing installed system-wide) and
+        use it just for this step. Any failure here falls back to the configured nsys,
+        whose own error message is the honest one to show.
+        """
+        needed = self.report_tool_version(report)
+        if needed is None:
+            return self.settings.nsys_bin
+        current = self.nsys_version(self.settings.nsys_bin)
+        if current is not None and current >= needed[0]:
+            return self.settings.nsys_bin
+        label = ".".join(str(part) for part in needed[0])
+        have = ".".join(str(part) for part in current) if current else "未检测到"
+        self.log(
+            job_dir,
+            f"[nsys] 报告由 Nsight Systems {label} 生成，本机 nsys 为 {have}，"
+            "尝试获取可解析该版本的 CLI",
+        )
+        try:
+            fetched = self.fetch_nsys_cli(job_dir, needed[0], needed[1])
+        except Exception as exc:
+            self.log(job_dir, f"[nsys] 获取 Nsight Systems CLI 失败，仍用本机 nsys：{exc}")
+            return self.settings.nsys_bin
+        self.log(job_dir, f"[nsys] 使用 {fetched}")
+        return str(fetched)
+
+    @staticmethod
+    def report_tool_version(report: Path) -> tuple[tuple[int, ...], str] | None:
+        """(version tuple, full build string) of the tool that wrote a .nsys-rep."""
+        try:
+            with report.open("rb") as handle:
+                head = handle.read(256)
+        except OSError:
+            return None
+        match = REPORT_VERSION_RE.search(head)
+        if not match:
+            return None
+        numbers = tuple(int(match.group(index)) for index in range(1, 5))
+        build = f"{'.'.join(str(n) for n in numbers)}-{match.group(5).decode()}"
+        return numbers, build
+
+    @staticmethod
+    def nsys_version(binary: str) -> tuple[int, ...] | None:
+        try:
+            completed = subprocess.run(
+                [binary, "--version"], text=True, capture_output=True, timeout=30,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        match = NSYS_VERSION_RE.search(completed.stdout + completed.stderr)
+        if not match:
+            return None
+        return tuple(int(match.group(index)) for index in range(1, 5))
+
+    @staticmethod
+    def nsys_cache_dir() -> Path:
+        """Where fetched CLIs live -- same cache root the launcher uses for node."""
+        base = Path(os.getenv("XDG_CACHE_HOME", Path.home() / ".cache"))
+        return base / "nsysscope" / "nsys"
+
+    @classmethod
+    def cached_nsys(cls, build: str) -> Path | None:
+        root = cls.nsys_cache_dir() / build
+        for pattern in ("**/target-linux-x64/nsys", "**/bin/nsys", "**/nsys"):
+            for candidate in sorted(root.glob(pattern)):
+                if candidate.is_file() and os.access(candidate, os.X_OK):
+                    return candidate
+        return None
+
+    def fetch_nsys_cli(self, job_dir: Path, version: tuple[int, ...], build: str) -> Path:
+        """Download and unpack the CLI-only Nsight Systems package for one build."""
+        cached = self.cached_nsys(build)
+        if cached is not None:
+            return cached
+        filename = self.nsys_package_filename(version, build)
+        target = self.nsys_cache_dir() / build
+        target.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="nsys-cli-") as temporary:
+            archive = Path(temporary) / filename
+            url = f"{NSYS_REPO_URL}/{filename}"
+            self.log(job_dir, f"[nsys] 下载 {url}")
+            self.download(url, archive, log_to=job_dir)
+            # dpkg-deb keeps this to one call; ar + tar is the fallback for hosts
+            # without dpkg (the package is a plain ar archive either way).
+            if shutil.which("dpkg-deb"):
+                extract = [shutil.which("dpkg-deb"), "-x", str(archive), str(target)]
+                completed = subprocess.run(extract, text=True, capture_output=True)
+                if completed.returncode != 0:
+                    raise RuntimeError(f"dpkg-deb 解包失败：{completed.stderr.strip()[:500]}")
+            else:
+                self.extract_deb_without_dpkg(archive, target)
+        binary = self.cached_nsys(build)
+        if binary is None:
+            raise RuntimeError(f"{filename} 解包后没有找到 nsys 可执行文件")
+        return binary
+
+    @staticmethod
+    def extract_deb_without_dpkg(archive: Path, target: Path) -> None:
+        work = archive.parent
+        for command in (
+            [shutil.which("ar") or "ar", "x", str(archive)],
+        ):
+            completed = subprocess.run(command, text=True, capture_output=True, cwd=work)
+            if completed.returncode != 0:
+                raise RuntimeError(f"ar 解包失败：{completed.stderr.strip()[:500]}")
+        data = next((path for path in work.glob("data.tar*")), None)
+        if data is None:
+            raise RuntimeError("deb 包内没有 data.tar*")
+        with tarfile.open(data) as handle:
+            handle.extractall(target)
+
+    def nsys_package_filename(self, version: tuple[int, ...], build: str) -> str:
+        """Look the exact build up in the repo's Packages index.
+
+        Matching on the full build string rather than composing a filename: the
+        filename embeds an internal build id (…-3860507.deb) that cannot be derived
+        from the version, and only the index knows it.
+        """
+        index = self.download_text(f"{NSYS_REPO_URL}/Packages")
+        entries: dict[str, str] = {}
+        for block in index.split("\n\n"):
+            # `nsight-systems-cli-*` only: the same index also carries the full
+            # package (GUI plus target binaries, several GB) and export needs none
+            # of it.
+            if "Package: nsight-systems-cli" not in block:
+                continue
+            fields = dict(re.findall(r"^(\w+): (.+)$", block, re.M))
+            recorded = fields.get("Version", "")
+            filename = fields.get("Filename", "")
+            if recorded and filename:
+                entries[recorded] = filename.rsplit("/", 1)[-1]
+        if build in entries:
+            return entries[build]
+        # No exact build: any newer CLI can read this report, so take the lowest one
+        # that is new enough rather than failing.
+        newer = sorted(
+            (parsed, name)
+            for recorded, name in entries.items()
+            if (parsed := tuple(
+                int(part) for part in recorded.split("-", 1)[0].split(".")
+                if part.isdigit()
+            )) >= version
+        )
+        if not newer:
+            raise RuntimeError(f"仓库索引里没有 {build} 或更新的 CLI 包")
+        return newer[0][1]
+
+    def download_candidates(self) -> list[str | None]:
+        """Ways out to the public internet, best first, same order as the launcher's
+        proxy_candidates(): direct, the caller's own setting, the environment's, then
+        the two office proxies. A proxy that already carried a transfer in this
+        process is tried first.
+        """
+        ordered: list[str | None] = [
+            None,
+            os.getenv("NSYSSCOPE_DOWNLOAD_PROXY"),
+            os.getenv("https_proxy"),
+            os.getenv("HTTPS_PROXY"),
+            *DOWNLOAD_PROXY_CANDIDATES,
+        ]
+        if self._download_proxy is not ...:
+            ordered.insert(0, self._download_proxy)  # type: ignore[arg-type]
+        seen: list[str | None] = []
+        for candidate in ordered:
+            if candidate == "" or candidate in seen:
+                continue
+            seen.append(candidate)
+        return seen
+
+    @staticmethod
+    def _opener(proxy: str | None) -> urllib.request.OpenerDirector:
+        return urllib.request.build_opener(
+            urllib.request.ProxyHandler(
+                {} if proxy is None else {"http": proxy, "https": proxy}
+            )
+        )
+
+    def fastest_download_path(
+        self, url: str, probe_bytes: int = 4 * 1024 * 1024, timeout: int = 30,
+        log_to: Path | None = None,
+    ) -> str | None:
+        """Time a small ranged read on every candidate and keep the quickest.
+
+        Order alone picks badly here: the first *working* path was one of the office
+        proxies at ~0.24 MB/s while the other does ~0.95 MB/s, and settling on the
+        former turned a 4-minute download into 13. One 4 MB probe per candidate costs
+        seconds and is paid once per process.
+        """
+        best: tuple[float, str | None] | None = None
+        for candidate in self.download_candidates():
+            request = urllib.request.Request(
+                url, headers={"Range": f"bytes=0-{probe_bytes - 1}"},
+            )
+            started = time.monotonic()
+            try:
+                with self._opener(candidate).open(request, timeout=timeout) as response:
+                    read = len(response.read())
+            except Exception:
+                continue
+            rate = read / max(time.monotonic() - started, 1e-6)
+            if best is None or rate > best[0]:
+                best = (rate, candidate)
+        if best is None:
+            return None
+        self._download_proxy = best[1]
+        if log_to is not None:
+            self.log(
+                log_to,
+                f"[download] 选用通路 {best[1] or '直连'}（实测 {best[0] / 1048576:.2f} MB/s）",
+            )
+        return best[1]
+
+    def download_text(self, url: str) -> str:
+        errors = []
+        for proxy in self.download_candidates():
+            try:
+                with self._opener(proxy).open(url, timeout=20) as response:
+                    payload = response.read().decode("utf-8", "replace")
+            except Exception as exc:
+                errors.append(f"{proxy or '直连'}: {exc}")
+                continue
+            self._download_proxy = proxy
+            return payload
+        raise RuntimeError(
+            "无法访问下载源（可设置 NSYSSCOPE_DOWNLOAD_PROXY，"
+            f"或用 NSYSSCOPE_NSYS_REPO 指向内网镜像）：{'; '.join(errors)}"
+        )
+
+    def download(
+        self, url: str, destination: Path, stall_seconds: int = 30,
+        chunk_bytes: int = 16 * 1024 * 1024, log_to: Path | None = None,
+    ) -> None:
+        """Fetch a large file in ranged chunks, switching proxies on failure.
+
+        Measured on the office proxies, two things make a single long-lived GET the
+        wrong shape for a 200 MB package:
+
+        - throughput decays badly on one connection (a fresh one moves ~1 MB/s while
+          the same transfer had dropped to ~0.1 MB/s after a few minutes);
+        - one proxy buffers a whole body before it forwards anything, so a plain GET
+          looks dead for minutes while a ranged GET answers in seconds.
+
+        So: sequential `Range` requests, each a fresh connection, appended to the file.
+        A failed chunk is retried on the next proxy and resumes from what is already
+        on disk rather than starting over. Reachability is never probed separately --
+        the transfer itself decides which proxy is usable.
+        """
+        errors: list[str] = []
+        written = 0
+        total: int | None = None
+        # Pick by measured throughput before committing to a 200 MB transfer; chunks
+        # still fail over on their own if the chosen path dies mid-download.
+        self.fastest_download_path(url, log_to=log_to)
+        with destination.open("wb") as sink:
+            while total is None or written < total:
+                chunk, total, complete = self.download_range(
+                    url, written, chunk_bytes, stall_seconds, errors, log_to,
+                )
+                sink.write(chunk)
+                written += len(chunk)
+                if complete or not chunk:
+                    return
+        return
+
+    def download_range(
+        self, url: str, offset: int, length: int, stall_seconds: int,
+        errors: list[str], log_to: Path | None,
+    ) -> tuple[bytes, int | None, bool]:
+        """One chunk, tried across every candidate path.
+
+        Returns the bytes, the file's total size when the server reported it, and
+        whether the response was the whole file (a server that ignores `Range`).
+        """
+        for proxy in self.download_candidates():
+            try:
+                request = urllib.request.Request(
+                    url, headers={"Range": f"bytes={offset}-{offset + length - 1}"},
+                )
+                with self._opener(proxy).open(request, timeout=stall_seconds) as response:
+                    payload = response.read()
+                    content_range = response.headers.get("Content-Range", "")
+                    status = response.status
+            except Exception as exc:
+                errors.append(f"{proxy or '直连'}: {exc}")
+                if log_to is not None:
+                    self.log(
+                        log_to,
+                        f"[download] {errors[-1]}（偏移 {offset // 1048576}MB），改用下一个通路",
+                    )
+                continue
+            self._download_proxy = proxy
+            total = None
+            if "/" in content_range:
+                tail = content_range.rsplit("/", 1)[1]
+                total = int(tail) if tail.isdigit() else None
+            # 200 instead of 206: the server ignored Range and sent everything.
+            return payload, total, status == 200 and offset == 0
+        raise RuntimeError(f"下载失败：{'; '.join(errors[-4:])}")
 
     def build_dispatch_cache(
         self, job_id: str, job_dir: Path, request: JobCreate,
@@ -665,6 +1010,12 @@ class JobRunner:
             session_store=self.settings.comate_store_dir,
             heartbeat_message="Comate Agent 仍在运行",
         )
+        # zulu can crash at parse time and still exit 0 (see node_runtime_problem),
+        # so a zero return code is not evidence that the agent ran. Fail here with
+        # the real cause instead of later, on the missing tables.
+        problem = self.node_runtime_problem(self.log_tail(job_dir))
+        if problem:
+            raise RuntimeError(problem)
 
     def stage_comate_skill(self, job_dir: Path) -> Path:
         source = self.settings.skill_dir
@@ -1228,6 +1579,9 @@ Requirements:
             or not os.access(executable, os.X_OK)
         ):
             return {"enabled": True, "ready": False, "message": "找不到 Comate Zulu CLI"}
+        node_problem = self.node_version_problem()
+        if node_problem:
+            return {"enabled": True, "ready": False, "message": node_problem}
         command = [executable, "status"]
         if self.settings.comate_username:
             command.extend(["--username", self.settings.comate_username])
@@ -1239,6 +1593,9 @@ Requirements:
         except (OSError, subprocess.TimeoutExpired) as exc:
             return {"enabled": True, "ready": False, "message": f"Comate 状态检查失败：{exc}"}
         output = (completed.stdout + completed.stderr).strip()
+        node_problem = self.node_runtime_problem(output)
+        if node_problem:
+            return {"enabled": True, "ready": False, "message": node_problem}
         not_logged_in = "未登录" in output or "not logged" in output.lower()
         ready = completed.returncode == 0 and not not_logged_in
         if ready:
@@ -1253,6 +1610,66 @@ Requirements:
             "ready": ready,
             "message": message,
         }
+
+    def node_version_problem(self) -> str | None:
+        """Reject a Node runtime the Zulu CLI cannot run on, before any job starts.
+
+        This is the primary gate: checked up front, independent of how a given Node
+        version happens to fail. `node_runtime_problem` stays as a backstop for the
+        case where node itself is new enough but zulu still dies at load time.
+
+        An unreadable or absent `node --version` is not treated as a failure -- a CLI
+        may ship its own runtime, and a genuinely missing node fails loudly on its
+        own -- so only a version we can read and know is too old blocks a job.
+        """
+        try:
+            probe = subprocess.run(
+                ["node", "--version"], text=True, capture_output=True, timeout=5,
+                env=self.comate_environment(),
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        version = (probe.stdout or probe.stderr).strip()
+        match = re.match(r"v?(\d+)\.", version)
+        if not match:
+            return None
+        major = int(match.group(1))
+        if major >= MIN_NODE_MAJOR:
+            return None
+        return (
+            f"node 版本过低：{version}，Comate Zulu CLI 需要 Node {MIN_NODE_MAJOR} 及以上"
+            "（低版本会在加载时以 Error: Not supported 崩溃且仍返回退出码 0）。"
+            "请升级 node，或把新版 node 放到 PATH 前面后重试"
+        )
+
+    def node_runtime_problem(self, output: str) -> str | None:
+        """Explain a zulu crash caused by the machine's `node` being too old.
+
+        The Zulu CLI is a modern-JS bundle. On Node <= 12 it dies at parse time with
+        `Error: Not supported` plus `UnhandledPromiseRejectionWarning`, and -- because
+        unhandled rejections were only warnings back then -- the process still exits
+        0. Every downstream step therefore looks like "the agent ran and produced
+        nothing", which surfaced as the misleading "did not produce the six agent
+        tables". Name the real cause instead.
+        """
+        crashed = "Error: Not supported" in output or (
+            "UnhandledPromiseRejectionWarning" in output and "zulu" in output
+        )
+        if not crashed:
+            return None
+        version = ""
+        try:
+            probe = subprocess.run(
+                ["node", "--version"], text=True, capture_output=True, timeout=5,
+                env=self.comate_environment(),
+            )
+            version = (probe.stdout or probe.stderr).strip()
+        except (OSError, subprocess.TimeoutExpired):
+            version = "未找到 node"
+        return (
+            f"Comate Zulu CLI 启动即崩溃（Error: Not supported），当前 node 版本：{version}。"
+            "Zulu 需要 Node 18 及以上，请升级 node 或把新版 node 放到 PATH 前面后重试"
+        )
 
     def build_forward_pipeline(
         self, job_id: str, job_dir: Path, package: Path, prefix: str,
