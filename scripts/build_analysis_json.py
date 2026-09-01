@@ -743,8 +743,19 @@ def main() -> None:
             "name": label,
             "count": len(selected),
             "durationUs": duration,
+            # Two denominators, both needed. durationPct is the table contract's
+            # (repeating-unit wall span) and is what the report quotes; it sums
+            # above 100% whenever streams overlap. sharePct is the composition
+            # view, normalised across the three classes, and is the only one a
+            # pie chart may label. Carrying both keeps the UI and the report
+            # showing the same numbers instead of one each.
             "durationPct": duration / total_duration * 100,
         })
+    classification_total = sum(row["durationUs"] for row in classifications)
+    for row in classifications:
+        row["sharePct"] = (
+            row["durationUs"] / classification_total * 100 if classification_total else 0
+        )
     if len(classes) != 3:
         raise ValueError("classification table must contain exactly three rows")
     class_rows = {row["算子类型"]: row for row in classes}

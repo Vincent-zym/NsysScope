@@ -227,12 +227,14 @@ function ClassificationDonut({ classifications }) {
     }),
   }));
   const totalDuration = baseRows.reduce((sum, row) => sum + row.durationUs, 0);
-  // 这块面板是构成比，必须归一化到三类累计之和：多流并行下累计算子耗时会超过
-  // 单元墙钟（此处 927.3 vs 801.8 us），若改用表格的墙钟口径，三项相加会是
-  // 115.66%，还会和自己的环形弧长对不上。指标卡另用墙钟口径，两处都注明分母。
+  // 两个分母都要露出来，否则前端和报告各说一个数就没法对齐：share 归一化到三类
+  // 累计（合计 100%，环形弧长只能用它），durationPct 的分母是单元墙钟（表格与报告
+  // 的口径，多流重叠时三项相加会超过 100%）。
   const rows = baseRows.map((row) => ({
     ...row,
-    share: totalDuration ? row.durationUs / totalDuration * 100 : 0,
+    share: row.sharePct != null
+      ? row.sharePct
+      : (totalDuration ? row.durationUs / totalDuration * 100 : 0),
   }));
   const adviceText = {
     核心计算: "优先检查高耗时、低 MFU 的核心算子，结合 Shape 评估矩阵尺寸、精度和布局是否匹配硬件。",
@@ -269,7 +271,10 @@ function ClassificationDonut({ classifications }) {
         <div className="classification-legend">
           {rows.map((row) => <div key={row.name}>
             <i style={{ background: row.color }} />
-            <span><b>{row.label}</b><small>{row.count} 个算子 · {fmt(row.durationUs)} us</small></span>
+            <span><b>{row.label}</b><small>
+              {row.count} 个算子 · {fmt(row.durationUs)} us
+              {row.durationPct != null && ` · 占墙钟 ${fmt(row.durationPct)}%`}
+            </small></span>
             <strong>{fmt(row.share)}%</strong>
           </div>)}
         </div>
@@ -1241,7 +1246,7 @@ export default function Dashboard() {
           </article>
 
           <article className="panel classification-panel">
-            <div className="panel-head"><div><span>COMPOSITION</span><h2>计算 · 通信 · 辅助算子占比</h2></div><small>按三类累计耗时归一化 · 合计 100%</small></div>
+            <div className="panel-head"><div><span>COMPOSITION</span><h2>计算 · 通信 · 辅助算子占比</h2></div><small>右侧按三类累计归一化（合计 100%）· 括注为占单元墙钟</small></div>
             <ClassificationDonut classifications={visibleClassifications} />
           </article>
         </section>
