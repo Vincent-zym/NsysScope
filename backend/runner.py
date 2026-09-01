@@ -69,11 +69,18 @@ MIN_NODE_MAJOR = 18
 # "which nsys can read this file" a lookup, not a guess.
 REPORT_VERSION_RE = re.compile(rb"Report (\d+)@(\d+)@(\d+)@(\d+)-(\S+?)\.")
 NSYS_VERSION_RE = re.compile(r"version (\d+)\.(\d+)\.(\d+)\.(\d+)")
-NSYS_REPO_URL = os.getenv(
-    # Overridable so an air-gapped site can point at an internal mirror of the same
-    # layout (a Packages index plus the .deb files beside it).
-    "NSYSSCOPE_NSYS_REPO",
-    "https://developer.download.nvidia.com/devtools/repos/ubuntu2004/amd64",
+NSYS_REPO_URLS = tuple(
+    url for url in (
+        # Overridable so an air-gapped site can point at an internal mirror of the same
+        # layout (a Packages index plus the .deb files beside it).
+        os.getenv("NSYSSCOPE_NSYS_REPO"),
+        # NVIDIA's China CDN first: it serves a byte-identical index and measured
+        # faster from here (0.47 vs 0.33 MB/s on a 64 MB sample). The domestic
+        # university/Aliyun mirrors are not an option -- they only ever carried the
+        # CUDA repo, and those paths now 404.
+        "https://developer.download.nvidia.cn/devtools/repos/ubuntu2004/amd64",
+        "https://developer.download.nvidia.com/devtools/repos/ubuntu2004/amd64",
+    ) if url
 )
 # Same candidates, same order as the launcher's proxy_candidates(): caller's own
 # setting first, then the environment's, then the two office proxies. Only downloads
@@ -96,6 +103,7 @@ class JobRunner:
         self.log_lock = threading.Lock()
         # Ellipsis = "not probed yet"; None is a valid result meaning "direct".
         self._download_proxy: object = ...
+        self.nsys_repo_url = NSYS_REPO_URLS[0]
 
     def _run_tracked(
         self, job_id: str | None, command: list[str], *,
@@ -491,7 +499,7 @@ class JobRunner:
             raise RuntimeError("report must end with .nsys-rep or .sqlite")
         sqlite_path = job_dir / f"{report.stem}.sqlite"
         self.state(job_id, job_dir, "exporting", 10, "正在导出 Nsight Systems SQLite")
-        nsys_bin = self.resolve_nsys(job_dir, report)
+        nsys_bin = self.resolve_nsys(job_id, job_dir, report)
         self.run_process(
             job_id, job_dir,
             [nsys_bin, "export", "--type", "sqlite", "--output", str(sqlite_path), str(report)],
@@ -500,7 +508,7 @@ class JobRunner:
             raise RuntimeError("nsys export completed without producing SQLite")
         return sqlite_path
 
-    def resolve_nsys(self, job_dir: Path, report: Path) -> str:
+    def resolve_nsys(self, job_id: str, job_dir: Path, report: Path) -> str:
         """The nsys that can export this report -- the installed one, or a fetched CLI.
 
         Reports carry the build that wrote them and `nsys export` only reads its own
@@ -524,7 +532,7 @@ class JobRunner:
             "尝试获取可解析该版本的 CLI",
         )
         try:
-            fetched = self.fetch_nsys_cli(job_dir, needed[0], needed[1])
+            fetched = self.fetch_nsys_cli(job_id, job_dir, needed[0], needed[1])
         except Exception as exc:
             self.log(job_dir, f"[nsys] 获取 Nsight Systems CLI 失败，仍用本机 nsys：{exc}")
             return self.settings.nsys_bin
@@ -574,19 +582,31 @@ class JobRunner:
                     return candidate
         return None
 
-    def fetch_nsys_cli(self, job_dir: Path, version: tuple[int, ...], build: str) -> Path:
+    def fetch_nsys_cli(
+        self, job_id: str, job_dir: Path, version: tuple[int, ...], build: str,
+    ) -> Path:
         """Download and unpack the CLI-only Nsight Systems package for one build."""
         cached = self.cached_nsys(build)
         if cached is not None:
+            self.log(job_dir, f"[nsys] 命中缓存 {cached}")
             return cached
+        label = ".".join(str(part) for part in version)
         filename = self.nsys_package_filename(version, build)
         target = self.nsys_cache_dir() / build
         target.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(prefix="nsys-cli-") as temporary:
             archive = Path(temporary) / filename
-            url = f"{NSYS_REPO_URL}/{filename}"
+            url = f"{self.nsys_repo_url}/{filename}"
             self.log(job_dir, f"[nsys] 下载 {url}")
-            self.download(url, archive, log_to=job_dir)
+            self.download(
+                url, archive, log_to=job_dir,
+                on_progress=self.nsys_progress_reporter(job_id, job_dir, label),
+            )
+            self.state(
+                job_id, job_dir, "exporting", 16,
+                f"正在解包 Nsight Systems {label} CLI"
+                f"（{archive.stat().st_size // 1048576}MB）",
+            )
             # dpkg-deb keeps this to one call; ar + tar is the fallback for hosts
             # without dpkg (the package is a plain ar archive either way).
             if shutil.which("dpkg-deb"):
@@ -600,6 +620,42 @@ class JobRunner:
         if binary is None:
             raise RuntimeError(f"{filename} 解包后没有找到 nsys 可执行文件")
         return binary
+
+    def nsys_progress_reporter(
+        self, job_id: str, job_dir: Path, label: str,
+    ) -> Callable[[int, int | None, float], None]:
+        """Turn chunk progress into a status line with a bar, a rate and an ETA.
+
+        This is the one step that can take ten minutes with nothing else happening, so
+        it reports like a foreground task: the UI's status message carries the bar and
+        the job log keeps one line per chunk as the durable record.
+        """
+        def report(written: int, total: int | None, rate: float) -> None:
+            done = written / 1048576
+            speed = rate / 1048576
+            if total:
+                share = written / total
+                filled = int(share * 20)
+                bar = "=" * filled + " " * (20 - filled)
+                remaining = (total - written) / rate if rate > 0 else 0
+                eta = (
+                    f"{remaining / 60:.0f} 分钟" if remaining >= 60
+                    else f"{remaining:.0f} 秒"
+                )
+                detail = (
+                    f"[{bar}] {share * 100:.0f}%  {done:.0f}/{total / 1048576:.0f}MB  "
+                    f"{speed:.2f}MB/s  剩余约 {eta}"
+                )
+                # 10 -> 16% spans the fetch, keeping the export itself above it.
+                progress = 10 + int(share * 6)
+            else:
+                detail = f"{done:.0f}MB  {speed:.2f}MB/s"
+                progress = 10
+            self.state(
+                job_id, job_dir, "exporting", progress,
+                f"正在获取 Nsight Systems {label} CLI {detail}",
+            )
+        return report
 
     @staticmethod
     def extract_deb_without_dpkg(archive: Path, target: Path) -> None:
@@ -623,7 +679,19 @@ class JobRunner:
         filename embeds an internal build id (…-3860507.deb) that cannot be derived
         from the version, and only the index knows it.
         """
-        index = self.download_text(f"{NSYS_REPO_URL}/Packages")
+        index = ""
+        for base in NSYS_REPO_URLS:
+            try:
+                index = self.download_text(f"{base}/Packages")
+            except Exception:
+                continue
+            # Remember which mirror answered; the package comes from the same one.
+            self.nsys_repo_url = base
+            break
+        if not index:
+            raise RuntimeError(
+                "无法读取 Nsight Systems 仓库索引（可用 NSYSSCOPE_NSYS_REPO 指向内网镜像）"
+            )
         entries: dict[str, str] = {}
         for block in index.split("\n\n"):
             # `nsight-systems-cli-*` only: the same index also carries the full
@@ -736,14 +804,17 @@ class JobRunner:
     def download(
         self, url: str, destination: Path, stall_seconds: int = 30,
         chunk_bytes: int = 16 * 1024 * 1024, log_to: Path | None = None,
+        on_progress: Callable[[int, int | None, float], None] | None = None,
     ) -> None:
         """Fetch a large file in ranged chunks, switching proxies on failure.
 
         Measured on the office proxies, two things make a single long-lived GET the
         wrong shape for a 200 MB package:
 
-        - throughput decays badly on one connection (a fresh one moves ~1 MB/s while
-          the same transfer had dropped to ~0.1 MB/s after a few minutes);
+        - sustained throughput is a fraction of what a short read suggests (1.7 MB/s
+          on the first 4 MB, ~0.35 MB/s averaged over the whole package), and
+          client-side parallelism does not lift it -- 1, 4 and 8 concurrent ranges all
+          measured ~0.95 MB/s, so the cap is the proxy's, not the connection's;
         - one proxy buffers a whole body before it forwards anything, so a plain GET
           looks dead for minutes while a ranged GET answers in seconds.
 
@@ -758,6 +829,7 @@ class JobRunner:
         # Pick by measured throughput before committing to a 200 MB transfer; chunks
         # still fail over on their own if the chosen path dies mid-download.
         self.fastest_download_path(url, log_to=log_to)
+        started = time.monotonic()
         with destination.open("wb") as sink:
             while total is None or written < total:
                 chunk, total, complete = self.download_range(
@@ -765,6 +837,9 @@ class JobRunner:
                 )
                 sink.write(chunk)
                 written += len(chunk)
+                if on_progress is not None:
+                    elapsed = max(time.monotonic() - started, 1e-6)
+                    on_progress(written, total, written / elapsed)
                 if complete or not chunk:
                     return
         return

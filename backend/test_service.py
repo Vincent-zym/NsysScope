@@ -1411,3 +1411,29 @@ def test_download_path_is_chosen_by_measured_throughput(tmp_path: Path) -> None:
         )
     assert chosen == "http://fast:1"
     assert runner._download_proxy == "http://fast:1"
+
+
+def test_nsys_fetch_reports_a_bar_with_rate_and_eta(tmp_path: Path) -> None:
+    # A ten-minute download with no output looks like a hung job, so the fetch
+    # reports progress into both the job status and the log.
+    configured = settings(tmp_path)
+    configured.prepare()
+    runner = JobRunner(configured, JobStore(configured.data_dir / "jobs.sqlite"))
+    reported: list[tuple[int, str]] = []
+    runner.state = (  # type: ignore[method-assign]
+        lambda job_id, job_dir, status, progress, message: reported.append(
+            (progress, message),
+        )
+    )
+
+    report = runner.nsys_progress_reporter("job", tmp_path, "2026.4.1.191")
+    report(64 * 1048576, 200 * 1048576, 0.35 * 1048576)
+    report(200 * 1048576, 200 * 1048576, 1.0 * 1048576)
+
+    first, last = reported[0], reported[-1]
+    assert "2026.4.1.191" in first[1] and "32%" in first[1]
+    assert "64/200MB" in first[1] and "0.35MB/s" in first[1]
+    assert "剩余约 6 分钟" in first[1]
+    # Progress stays inside the slice reserved for the fetch, below the export.
+    assert 10 <= first[0] < last[0] <= 16
+    assert "100%" in last[1] and "剩余约 0 秒" in last[1]
