@@ -14,7 +14,7 @@ from pathlib import Path
 
 
 PROJECT = Path(__file__).resolve().parents[1]
-VERSION = "0.2.5"
+VERSION = "0.2.6"
 INCLUDE = (
     "nsysscope",
     "README.md",
