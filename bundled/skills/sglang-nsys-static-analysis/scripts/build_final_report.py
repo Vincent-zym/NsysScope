@@ -130,7 +130,7 @@ def forward_tables(rows: list[dict[str, str]]) -> list[str]:
     draft_pct = pct(draft.get("占forward步(%)")) if draft else "—"
     first = table(
         "Token 链路耗时",
-        ["阶段", "Forward 耗时", "Target 耗时", "Draft 耗时", "Token间间隙"],
+        ["阶段", "Forward step", "Target 主模型", "Draft 模型", "Token间间隙"],
         [
             ("耗时(ms)", [
                 ms(total.get("总耗时(us)")), ms(target.get("总耗时(us)")),

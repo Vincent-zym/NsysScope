@@ -30,9 +30,9 @@
 <table border="1" cellspacing="0" cellpadding="6" style="border-collapse:collapse;border:1px solid #999;text-align:center;margin:0">
 <tr>
 <th style="border:1px solid #999;background:#b4c7e7;text-align:center;vertical-align:middle">阶段</th>
-<th style="border:1px solid #999;background:#b4c7e7;text-align:center;vertical-align:middle">Forward 耗时</th>
-<th style="border:1px solid #999;background:#b4c7e7;text-align:center;vertical-align:middle">Target 耗时</th>
-<th style="border:1px solid #999;background:#b4c7e7;text-align:center;vertical-align:middle">Draft 耗时</th>
+<th style="border:1px solid #999;background:#b4c7e7;text-align:center;vertical-align:middle">Forward step</th>
+<th style="border:1px solid #999;background:#b4c7e7;text-align:center;vertical-align:middle">Target 主模型</th>
+<th style="border:1px solid #999;background:#b4c7e7;text-align:center;vertical-align:middle">Draft 模型</th>
 <th style="border:1px solid #999;background:#b4c7e7;text-align:center;vertical-align:middle">Token间间隙</th>
 </tr>
 <tr>

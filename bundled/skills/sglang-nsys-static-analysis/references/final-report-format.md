@@ -51,8 +51,8 @@ survives, and what does not, is not obvious -- these were established by trial:
 - **Dropped**: every width declaration -- `style="width"`, `min-width`,
   `padding`, `<table width>`, `<colgroup><col width>`, `<th width>`. Column
   widths are recomputed from the content, so do not try to set them. Widen a
-  column by making its header wording longer (`Forward 耗时` instead of
-  `Forward`); leading/trailing full-width spaces get trimmed and do not work.
+  column by making its header wording longer (`Target 主模型` instead of
+  `Target`); leading/trailing full-width spaces get trimmed and do not work.
 - A blank line in the markdown source, and any rendered `margin-bottom` on the
   block above a table, both come through as an extra blank line. Hence
   `margin:0` on every block, and no blank line between a block and the table
