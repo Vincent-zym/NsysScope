@@ -124,31 +124,41 @@ def mfu_peak_label(manifest: dict[str, Any]) -> str | None:
     return f"{value:g} TFLOPS/GPU effective dense peak" if isinstance(value, (int, float)) else None
 
 
-def stable_sample_count(stats: dict[str, Any], manifest: dict[str, Any]) -> int:
-    stable = (
-        manifest.get("stable_statistics")
-        or manifest.get("stable_aggregation")
-        or manifest.get("stable_stats")
-        or {}
-    )
-    value = first_value(
+SAMPLE_COUNT_KEYS = (
+    "accepted_unit_count",
+    "accepted_full_template_sample_count",
+    "accepted_occurrence_count",
+    "accepted_sample_count",
+    # The name real skill runs write into <prefix>_stable_statistics.json and
+    # into manifest["sampling"].
+    "accepted_samples",
+)
+
+
+def sampling_sources(stats: dict[str, Any], manifest: dict[str, Any]) -> list[dict[str, Any]]:
+    """Every place a package may record how the repeating unit was sampled.
+
+    The sidecar is authoritative when present, but its filename and the
+    manifest key pointing at it have both varied across skill versions, and the
+    manifest embeds the same fields under ``sampling``. Reading all of them
+    keeps a package from silently falling back to "1 sample, 1 layer".
+    """
+    candidates = (
         stats,
-        "accepted_unit_count",
-        "accepted_full_template_sample_count",
-        "accepted_occurrence_count",
-        "accepted_sample_count",
+        manifest.get("sampling"),
+        manifest.get("stable_statistics"),
+        manifest.get("stable_aggregation"),
+        manifest.get("stable_stats"),
     )
-    if value is None and isinstance(stable, dict):
-        value = first_value(
-            stable,
-            "accepted_unit_count",
-            "accepted_full_template_sample_count",
-            "accepted_occurrence_count",
-            "accepted_sample_count",
-        )
-    if value is None:
-        raise KeyError("stable sample count is missing from statistics and manifest")
-    return int(value)
+    return [source for source in candidates if isinstance(source, dict) and source]
+
+
+def stable_sample_count(stats: dict[str, Any], manifest: dict[str, Any]) -> int:
+    for source in sampling_sources(stats, manifest):
+        value = first_value(source, *SAMPLE_COUNT_KEYS)
+        if value is not None:
+            return int(value)
+    raise KeyError("stable sample count is missing from statistics and manifest")
 
 
 def device_id(value: Any) -> int:
@@ -170,22 +180,19 @@ def device_id(value: Any) -> int:
 
 
 def included_devices(stats: dict[str, Any], manifest: dict[str, Any]) -> list[int]:
-    stable = (
-        manifest.get("stable_statistics")
-        or manifest.get("stable_aggregation")
-        or manifest.get("stable_stats")
-        or {}
-    )
-    devices = stats.get("included_devices") or stats.get("included_devices_ranks")
-    if devices is None and isinstance(stable, dict):
-        devices = stable.get("included_devices") or stable.get("included_devices_ranks")
-    if devices is None:
-        counts = stats.get("per_device_sample_counts") or (
-            stable.get("per_device_sample_counts") if isinstance(stable, dict) else None
-        )
-        if isinstance(counts, dict):
-            devices = counts.keys()
-    if devices is None:
+    sources = sampling_sources(stats, manifest)
+    devices = None
+    for source in sources:
+        devices = source.get("included_devices") or source.get("included_devices_ranks")
+        if devices:
+            break
+    if not devices:
+        for source in sources:
+            counts = source.get("per_device_sample_counts")
+            if isinstance(counts, dict) and counts:
+                devices = counts.keys()
+                break
+    if not devices:
         raise KeyError("included devices are missing from statistics and manifest")
     return sorted(device_id(device) for device in devices)
 
@@ -676,13 +683,23 @@ def main() -> None:
         metadata_root / manifest_name,
     )
     manifest = json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
-    stats = optional_json_artifact(
-        metadata_root,
-        manifest.get("position_statistics_sidecar")
-        or (manifest.get("stable_statistics") or {}).get("sidecar")
-        or (manifest.get("stable_stats") or {}).get("sidecar"),
+    # The sampling sidecar has shipped under two names. Trying both matters: with
+    # neither found, stats stays empty and the summary silently degrades to
+    # "1 stable sample / 1 layer" even though the package states 268 and 4.
+    stats = {}
+    for default_name in (
+        f"{prefix}_stable_statistics.json",
         f"{prefix}_position_operator_stats.json",
-    )
+    ):
+        stats = optional_json_artifact(
+            metadata_root,
+            manifest.get("position_statistics_sidecar")
+            or (manifest.get("stable_statistics") or {}).get("sidecar")
+            or (manifest.get("stable_stats") or {}).get("sidecar"),
+            default_name,
+        )
+        if stats:
+            break
     semantic = optional_json_artifact(
         metadata_root, manifest.get("semantic_map"), f"{prefix}_semantic_map.json",
     )
@@ -763,6 +780,26 @@ def main() -> None:
         "layer_count", "unit_layer_count",
         default=manifest.get("unit_layer_count"),
     )
+    if layer_count is None:
+        # The sampling sidecar states the cycle length directly, and its
+        # per-position list is the same count. Without this, a heterogeneous
+        # 4-layer cycle reports "1 个异构单元/周期" in the UI.
+        for source in sampling_sources(stats, manifest):
+            layer_count = first_value(source, "layer_count", "unit_layer_count")
+            if layer_count is None:
+                positions = source.get("per_structural_position")
+                if isinstance(positions, list) and positions:
+                    layer_count = len(positions)
+            if layer_count is not None:
+                break
+    if layer_count is None:
+        # Last resort: the units the operator table itself describes.
+        positions = {
+            operator.get("unitPosition")
+            for operator in operators
+            if operator.get("unitPosition") is not None
+        }
+        layer_count = len(positions) or None
     composition = (
         selected_unit.get("composition", [])
         if isinstance(selected_unit, dict)
@@ -785,6 +822,13 @@ def main() -> None:
         })
     heterogeneous = len(distinct_variants or []) > 1
     normalized_layer_duration = manifest.get("normalized_single_layer_duration_us")
+    if normalized_layer_duration is None:
+        for source in sampling_sources(stats, manifest):
+            normalized_layer_duration = first_value(
+                source, "normalized_wall_per_layer_us", "normalized_single_layer_duration_us",
+            )
+            if normalized_layer_duration is not None:
+                break
     if normalized_layer_duration is None and isinstance(layer_count, int) and layer_count > 0:
         normalized_layer_duration = total_duration / layer_count
     if heterogeneous:
@@ -839,6 +883,26 @@ def main() -> None:
             operator.get("unitVariant"),
         )
         unit_groups.setdefault(group_key, []).append(operator)
+    # Averaged per-position wall spans, when the package records them. Operator
+    # durations are averages over every accepted sample while startNs/endNs come
+    # from one representative sample, so a span derived from the timestamps can
+    # sit well below the averaged numbers the tables and report use.
+    position_wall_avg: dict[Any, float] = {}
+    for source in sampling_sources(stats, manifest):
+        positions = source.get("per_structural_position")
+        if not isinstance(positions, list):
+            continue
+        for entry in positions:
+            if not isinstance(entry, dict):
+                continue
+            value = first_value(entry, "wall_avg_us", "wall_span_avg_us")
+            if value is None:
+                continue
+            for key in (entry.get("unit_position"), entry.get("unit_id")):
+                if key is not None:
+                    position_wall_avg.setdefault(key, float(value))
+        if position_wall_avg:
+            break
     units = []
     for (position, unit_id, variant), rows in sorted(
         unit_groups.items(), key=lambda item: (item[0][0] is None, item[0][0] or 0),
@@ -853,13 +917,21 @@ def main() -> None:
             "operatorCount": len(rows),
             "kernelTimeSumUs": sum(row["durationUs"] or 0 for row in rows),
             "representativeWallSpanUs": (max(ends) - min(starts)) / 1000 if starts and ends else None,
-            "stageCount": len(stage_payload) if pattern_stages else sum(
+            "wallAvgUs": first_value(position_wall_avg, position, unit_id),
+            # How many functional modules this unit actually has, which differs
+            # per position in a heterogeneous cycle (a KDA layer has 9 where the
+            # DSA layer has 10). The pattern-level stage list is the union, so
+            # counting it would report the same number for every unit.
+            "stageCount": len({
+                row["stage"] for row in rows if row.get("stage")
+            }) or sum(
                 1 for stage_row in stage_payload
                 if stage_row["unitPosition"] == position
                 and stage_row["unitId"] == unit_id
                 and stage_row["unitVariant"] == variant
             ),
         })
+
     payload = {
         "schemaVersion": "1.0",
         "metadata": {

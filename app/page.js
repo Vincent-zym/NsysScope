@@ -1024,9 +1024,18 @@ export default function Dashboard() {
   const topStage = [...visibleStages].sort((a, b) => b.durationUs - a.durationUs)[0];
   const compute = visibleClassifications.find((x) => x.name === "核心计算");
   const classificationTotal = visibleClassifications.reduce((sum, row) => sum + row.durationUs, 0);
-  const computePct = classificationTotal ? compute?.durationUs / classificationTotal * 100 : 0;
+  // 包自带的 durationPct 用重复单元墙钟做分母，和 CSV / 最终报告同口径。按单元
+  // 筛选后没有对应的墙钟口径，只能退回三类累计归一化，note 里注明分母。
+  const computePct = compute?.durationPct != null
+    ? compute.durationPct
+    : (classificationTotal ? compute?.durationUs / classificationTotal * 100 : 0);
   const selectedUnitData = data.units?.find((unit) => unitKey(unit) === selectedUnit);
-  const primaryDurationUs = selectedUnitData?.representativeWallSpanUs ||
+  // 算子耗时是全样本均值，representativeWallSpanUs 却只来自单个代表样本，两者可
+  // 差一成；包给出平均墙钟时优先用它，口径才和表格一致。
+  const selectedUnitWallUs = selectedUnitData
+    ? (selectedUnitData.wallAvgUs || selectedUnitData.representativeWallSpanUs)
+    : null;
+  const primaryDurationUs = selectedUnitWallUs ||
     data.summary.primaryDurationUs ||
     data.summary.normalizedLayerDurationUs ||
     data.summary.totalDurationUs;
@@ -1059,7 +1068,9 @@ export default function Dashboard() {
   };
 
   const unitNote = selectedUnitData
-    ? `位置 ${selectedUnitData.position} · Layer ${selectedUnitData.layerId ?? "—"} · 代表墙钟跨度`
+    ? `位置 ${selectedUnitData.position} · Layer ${selectedUnitData.layerId ?? "—"} · ${
+        selectedUnitData.wallAvgUs ? "平均墙钟跨度" : "代表墙钟跨度"
+      }`
     : data.summary.heterogeneous
       ? `${data.summary.unitLayerCount || data.units?.length || 1} 个异构单元/周期 · ${(data.summary.distinctUnitVariants || []).join(" / ")}`
       : `${data.summary.stableSamples} 个稳定样本`;
@@ -1179,7 +1190,7 @@ export default function Dashboard() {
               onClick={() => selectUnit(unitKey(unit))}
             >
               <b>{unit.position}. {unit.variant || unit.id}</b>
-              <small>Layer {unit.layerId ?? "—"} · {fmt(unit.representativeWallSpanUs)} μs</small>
+              <small>Layer {unit.layerId ?? "—"} · {fmt(unit.wallAvgUs || unit.representativeWallSpanUs)} μs</small>
             </button>
           ))}
         </section>}
@@ -1208,7 +1219,15 @@ export default function Dashboard() {
                 ]
               : "—"}
           />
-          <Metric label="核心计算占比" value={fmt(computePct)} suffix="%" note={`${compute?.count || 0} 个核心算子`} />
+          <Metric
+            label="核心计算占比"
+            value={fmt(computePct)}
+            suffix="%"
+            note={`${compute?.count || 0} 个核心算子 · ${
+              compute?.durationPct != null ? "占单元墙钟" : "按三类累计归一化"
+            }`}
+          />
+
           <Metric label="Overlap 率" value={fmt(overlapPct)} suffix="%" note="基于算子时间区间并集" />
         </section>
 
