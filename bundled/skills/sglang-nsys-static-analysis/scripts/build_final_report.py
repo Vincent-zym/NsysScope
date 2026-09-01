@@ -277,11 +277,22 @@ def build(package: Path, prefix: str) -> str:
         float(row.get("模块耗时(us)") or 0) for row in stage_rows
         if (row.get("序号") or "").strip().isdigit()
     )
-    body.append(
-        '<p style="margin:0">以下口径为<b>一个重复单元</b>内、稳定样本逐算子平均耗时之和，'
-        f"单元合计 {ms(pattern_us)} ms，下表覆盖其中 {ms(covered)} ms"
-        f"（{covered / pattern_us * 100:.1f}%，余量为未归类的零散算子）。</p>"
-    )
+    # Modules can sum above the unit wall span when variants run on their own
+    # streams, and calling that excess "unclassified leftovers" -- as this line
+    # used to unconditionally -- is both self-contradictory and wrong.
+    if covered > pattern_us:
+        body.append(
+            '<p style="margin:0">以下口径为<b>一个重复单元</b>内、稳定样本逐算子平均耗时之和。'
+            f"单元墙钟 {ms(pattern_us)} ms，各模块累计 {ms(covered)} ms，"
+            f"因部分模块在独立 CUDA 流上与主流并行而超出墙钟 "
+            f"{covered / pattern_us * 100 - 100:.1f}%，按实测原样呈现、不归一化到 100%。</p>"
+        )
+    else:
+        body.append(
+            '<p style="margin:0">以下口径为<b>一个重复单元</b>内、稳定样本逐算子平均耗时之和，'
+            f"单元合计 {ms(pattern_us)} ms，下表覆盖其中 {ms(covered)} ms"
+            f"（{covered / pattern_us * 100:.1f}%，余量为未归类的零散算子）。</p>"
+        )
     modules = module_table(stage_rows, operator_rows, pattern_us)
     if modules:
         body.append(modules)
@@ -290,7 +301,14 @@ def build(package: Path, prefix: str) -> str:
     categories = category_table(read_csv(csv_dir / f"{prefix}_op_classification_table.csv"))
     if categories:
         body.append(categories)
-    body.append("<!-- TODO 小算子 Top 5、MFU/MBU 上界参考 -->")
+    body.append(SPACER)
+    # A list, not a comma-run: five kernel names with two numbers each is what a
+    # reviewer scans to pick a fusion target.
+    body.append('<p style="margin:0"><b>小算子 Top 5</b>（单元内合计 / 启动次数）</p>')
+    body.append('<ul style="margin:0;padding-left:22px">')
+    body.append("<!-- TODO 每行一个：<li><code>kernel</code> X.XX ms / N 次</li> -->")
+    body.append("</ul>")
+    body.append("<!-- TODO 效率上界参考：本包内 MFU / MBU 最高值，以及占比最大算子的实测值 -->")
 
     tail = [
         "",

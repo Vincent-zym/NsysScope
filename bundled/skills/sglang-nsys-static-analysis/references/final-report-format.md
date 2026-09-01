@@ -60,6 +60,16 @@ survives, and what does not, is not obvious -- these were established by trial:
   `<p style="margin:0">&nbsp;</p>` spacer -- a `<br>` stacks with the
   surrounding margins and yields three blank lines.
 
+## List conventions
+
+Anything that would otherwise become a long comma-run goes in
+`<ul style="margin:0;padding-left:22px">`, one item per line, with a
+`<p style="margin:0"><b>title</b></p>` above it. This applies to the 小算子 Top 5
+block and to the notes under the functional-module table. Reviewers read these to
+pick a fusion target, and five kernel names with two numbers each are unreadable
+strung into one sentence. Keep each item to name plus numbers -- commentary that
+applies to the whole list goes in a `<p>` after the `</ul>`, not inside an item.
+
 ## Table conventions
 
 - Metrics are rows, entities are columns, so a table stays readable when it has

@@ -163,7 +163,15 @@
 <td style="border:1px solid #999;text-align:center;vertical-align:middle">42.55%</td>
 </tr>
 </table>
-<p style="margin:0">小算子 Top 5（单元内合计 / 启动次数）：<code>elementwise_kernel</code> 10.89 ms / 26 次、<code>act_and_mul_kernel</code> 3.19 ms / 4 次、<code>mhc_post_tilelang_kernel</code> 2.86 ms / 8 次、<code>CatArrayBatchedCopy_vectorized</code> 2.77 ms / 4 次、<code>mhc_pre_big_fuse_with_norm_tilelang_kernel</code> 1.89 ms / 8 次。</p>
+<p style="margin:0">&nbsp;</p>
+<p style="margin:0"><b>小算子 Top 5</b>（单元内合计 / 启动次数）</p>
+<ul style="margin:0;padding-left:22px">
+<li><code>elementwise_kernel</code> 10.89 ms / 26 次</li>
+<li><code>act_and_mul_kernel</code> 3.19 ms / 4 次</li>
+<li><code>mhc_post_tilelang_kernel</code> 2.86 ms / 8 次</li>
+<li><code>CatArrayBatchedCopy_vectorized</code> 2.77 ms / 4 次</li>
+<li><code>mhc_pre_big_fuse_with_norm_tilelang_kernel</code> 1.89 ms / 8 次</li>
+</ul>
 <p style="margin:0">效率上界参考：本包内单算子 MFU 最高 78.65%、MBU 最高 78.18%；而占比最大的 4 个路由专家 GEMM 只有 MFU 36.8% / MBU 5.1%。</p>
 
 # 3. 算子分析工具数据
