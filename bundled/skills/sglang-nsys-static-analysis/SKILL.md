@@ -22,6 +22,8 @@ Generate:
 10. a position-aware statistics sidecar
 11. `validation_report.json`
 12. `final_report.md` (the human-readable report; see step 10)
+13. `analysis.json` (the stable frontend contract; see step 7)
+14. `xlsx/` (one workbook per CSV; see step 7)
 
 The first six tables are required. The seventh relates the measured repeating unit
 to a whole forward step, so a package with it can additionally answer what fraction
@@ -336,6 +338,21 @@ Keep model function separate from operator category. A quantization or norm
 kernel inside an attention stage remains auxiliary. Core compute is restricted
 to GEMM/BMM/matmul, verified grouped expert GEMMs and actual
 attention/state-update score/normalization/value-aggregation kernels.
+
+Then produce the two derived artifacts every package ships, so a package built
+here is complete on its own rather than only after a tool re-processes it:
+
+```bash
+python scripts/build_analysis_json.py /path/result /path/result/analysis.json \
+  --prefix model --model GLM5.2 --stage decode --hardware "Nvidia B300"
+python scripts/csv_to_xlsx.py /path/result /path/result/xlsx
+```
+
+`analysis.json` is the stable frontend contract -- step 9 validates the tables
+against it (`--analysis-json`), so generate it before validating. `xlsx/` holds
+one dependency-free workbook per CSV, for readers who open spreadsheets rather
+than CSVs. Both are derived views: never hand-edit them, fix the table they came
+from and regenerate.
 
 ### 8. Compute shapes and MFU
 

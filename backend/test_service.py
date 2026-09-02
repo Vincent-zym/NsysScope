@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import importlib.util
 import io
 import json
 import os
@@ -24,17 +25,25 @@ from backend.config import Settings
 from backend.models import BUILTIN_MODEL_CONFIGS, JobCreate
 from backend.runner import AGENT_CSV_SUFFIXES, JobRunner
 from backend.store import JobStore
-from scripts.build_analysis_json import (
-    build_operator_payload,
-    included_devices,
-    is_total_row,
-    metadata_directory,
-    parallel_config,
-    stable_sample_count,
-)
 
 
 PROJECT = Path(__file__).resolve().parents[1]
+SKILL = PROJECT / "bundled" / "skills" / "sglang-nsys-static-analysis"
+# The frontend converter lives in the Skill so a standalone Skill run produces the
+# same analysis.json the tool does. The Skill directory name is not an importable
+# module path, so load it by file.
+_converter_spec = importlib.util.spec_from_file_location(
+    "nsysscope_build_analysis_json", SKILL / "scripts" / "build_analysis_json.py",
+)
+assert _converter_spec is not None and _converter_spec.loader is not None
+build_analysis_json = importlib.util.module_from_spec(_converter_spec)
+_converter_spec.loader.exec_module(build_analysis_json)
+build_operator_payload = build_analysis_json.build_operator_payload
+included_devices = build_analysis_json.included_devices
+is_total_row = build_analysis_json.is_total_row
+metadata_directory = build_analysis_json.metadata_directory
+parallel_config = build_analysis_json.parallel_config
+stable_sample_count = build_analysis_json.stable_sample_count
 # A real seven-table package to exercise import/conversion against. It is too
 # large to commit, so point NSYSSCOPE_TEST_PACKAGE at one; the tests that need it
 # skip loudly rather than passing vacuously when it is absent.
@@ -106,8 +115,8 @@ def settings(tmp_path: Path) -> Settings:
         call_tree_skill_dir=(
             PROJECT / "bundled" / "skills" / "reconstruct-profiler-call-tree"
         ),
-        converter=PROJECT / "scripts/build_analysis_json.py",
-        xlsx_converter=PROJECT / "scripts/csv_to_xlsx.py",
+        converter=SKILL / "scripts/build_analysis_json.py",
+        xlsx_converter=SKILL / "scripts/csv_to_xlsx.py",
         subprocess_timeout_seconds=600,
         popo_username="",
         popo_upload_script=PROJECT / "does-not-exist" / "upload.py",

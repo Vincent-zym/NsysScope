@@ -60,6 +60,10 @@ def validate_skill(path: Path) -> list[str]:
         "scripts/extract_layer_operator_csv.py",
         "scripts/audit_runtime_evidence.py",
         "scripts/validate_analysis_package.py",
+        # The frontend contract and the workbooks are generated from the Skill, so an
+        # external Skill without them cannot serve a job end to end.
+        "scripts/build_analysis_json.py",
+        "scripts/csv_to_xlsx.py",
         "references/output-spec.md",
         "references/hardware-peaks.json",
     ):

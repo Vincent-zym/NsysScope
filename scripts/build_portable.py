@@ -14,14 +14,12 @@ from pathlib import Path
 
 
 PROJECT = Path(__file__).resolve().parents[1]
-VERSION = "0.2.7"
+VERSION = "0.2.8"
 INCLUDE = (
     "nsysscope",
     "README.md",
     "ARCHITECTURE.md",
     "backend",
-    "scripts/build_analysis_json.py",
-    "scripts/csv_to_xlsx.py",
     "scripts/skill_manager.py",
     "bundled",
 )

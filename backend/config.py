@@ -65,6 +65,9 @@ class Settings:
             project / "bundled" / "skills" / "reconstruct-profiler-call-tree"
         )
         comate_bin = os.getenv("NSYSSCOPE_COMATE_BIN", "") or _discover_zulu()
+        # Resolved before the constructor call because the two converters default to
+        # scripts inside the selected Skill.
+        skill_dir = Path(os.getenv("NSYSSCOPE_SKILL_DIR", bundled_skill)).resolve()
         return cls(
             data_dir=Path(os.getenv(
                 "NSYSSCOPE_DATA_DIR", default_cache / "nsysscope" / "state",
@@ -117,10 +120,7 @@ class Settings:
                 1024, int(os.getenv("NSYSSCOPE_JOB_LOG_LINE_MAX_BYTES", str(16 * 1024))),
             ),
             nsys_bin=os.getenv("NSYSSCOPE_NSYS_BIN", "nsys"),
-            skill_dir=Path(os.getenv(
-                "NSYSSCOPE_SKILL_DIR",
-                bundled_skill,
-            )).resolve(),
+            skill_dir=skill_dir,
             # Optional: only used when a job supplies a torch profiler trace. A
             # missing directory disables the pre-pass instead of failing startup,
             # so prepare() deliberately does not check it.
@@ -128,13 +128,17 @@ class Settings:
                 "NSYSSCOPE_CALL_TREE_SKILL_DIR",
                 bundled_call_tree_skill,
             )).resolve(),
+            # Both live in the Skill, not here: a standalone Skill run has to be able
+            # to produce the same analysis.json and xlsx/ the tool produces, and one
+            # copy is the only way that stays true. They follow the selected Skill,
+            # so swapping Skill versions swaps the generators with it.
             converter=Path(os.getenv(
                 "NSYSSCOPE_CONVERTER",
-                project / "scripts/build_analysis_json.py",
+                skill_dir / "scripts/build_analysis_json.py",
             )).resolve(),
             xlsx_converter=Path(os.getenv(
                 "NSYSSCOPE_XLSX_CONVERTER",
-                project / "scripts/csv_to_xlsx.py",
+                skill_dir / "scripts/csv_to_xlsx.py",
             )).resolve(),
             subprocess_timeout_seconds=max(
                 30, int(os.getenv("NSYSSCOPE_SUBPROCESS_TIMEOUT_SECONDS", "600")),
@@ -157,6 +161,10 @@ class Settings:
             "scripts/build_static_analysis_tables.py",
             "scripts/audit_runtime_evidence.py",
             "scripts/validate_analysis_package.py",
+            # The frontend contract and the workbook are generated from the Skill too,
+            # so a Skill that cannot produce them is incomplete for this tool.
+            "scripts/build_analysis_json.py",
+            "scripts/csv_to_xlsx.py",
             "references/hardware-peaks.json",
         )
         missing = [
