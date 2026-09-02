@@ -14,7 +14,7 @@ from pathlib import Path
 
 
 PROJECT = Path(__file__).resolve().parents[1]
-VERSION = "0.2.6"
+VERSION = "0.2.7"
 INCLUDE = (
     "nsysscope",
     "README.md",
@@ -71,10 +71,23 @@ INSTALL_DIR="$RUNTIME_BASE/runtime-{runtime_id}"
 PAYLOAD_LINE="$(awk '/^__NSYSSCOPE_ARCHIVE_BELOW__$/ {{ print NR + 1; exit }}' "$0")"
 MATERIAL_ROOT="$(pwd -P)"
 
-if [[ ! -x "$INSTALL_DIR/nsysscope" ]]; then
-  mkdir -p "$INSTALL_DIR" "$CACHE_BASE"
-  tail -n +"$PAYLOAD_LINE" "$0" | tar -xzf - -C "$INSTALL_DIR"
-  chmod +x "$INSTALL_DIR/nsysscope"
+# `-x nsysscope` became true halfway through extraction, so an interrupted first
+# run left a partial runtime that every later run happily reused (and failed in,
+# with "Skill 无法解析"). Extract to a staging dir, stamp it, then move it into
+# place, and treat a missing stamp as "extract again".
+if [[ ! -f "$INSTALL_DIR/.nsysscope-complete" ]]; then
+  mkdir -p "$RUNTIME_BASE" "$CACHE_BASE"
+  STAGE_DIR="$(mktemp -d "$RUNTIME_BASE/.stage-XXXXXX")"
+  trap 'rm -rf -- "$STAGE_DIR"' EXIT
+  tail -n +"$PAYLOAD_LINE" "$0" | tar -xzf - -C "$STAGE_DIR"
+  chmod +x "$STAGE_DIR/nsysscope"
+  touch "$STAGE_DIR/.nsysscope-complete"
+  if [[ ! -f "$INSTALL_DIR/.nsysscope-complete" ]]; then
+    rm -rf -- "$INSTALL_DIR"
+    mv "$STAGE_DIR" "$INSTALL_DIR"
+  fi
+  rm -rf -- "$STAGE_DIR"
+  trap - EXIT
 fi
 
 export NSYSSCOPE_VENV_DIR="${{NSYSSCOPE_VENV_DIR:-$CACHE_BASE/venv-{version}}}"

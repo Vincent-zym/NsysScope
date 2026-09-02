@@ -89,7 +89,7 @@ run_download() {
     PIP_CONFIG_FILE=/dev/null \
     PIP_INDEX_URL="${NSYSSCOPE_PIP_INDEX_URL:-https://pypi.org/simple}" \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    "${proxy_env[@]}" "$@"
+    ${proxy_env[@]+"${proxy_env[@]}"} "$@"
 }
 
 cleanup() {
@@ -192,7 +192,10 @@ try_install_node_binary() {
   printf '    尝试直接下载 Node.js 二进制包: %s\n' "$download_url"
   probe_download_proxy || true
   tmp_dir="$(mktemp -d)"
-  if ! run_download curl -fsSL --connect-timeout 15 -o "$tmp_dir/node.tar.xz" "$download_url"; then
+  # No --max-time: a 25 MB tarball over a slow office line legitimately takes
+  # minutes. --speed-time/--speed-limit aborts a stalled transfer instead.
+  if ! run_download curl -fsSL --connect-timeout 15 \
+    --speed-time 60 --speed-limit 1024 -o "$tmp_dir/node.tar.xz" "$download_url"; then
     rm -rf -- "$tmp_dir"
     return 1
   fi
@@ -265,12 +268,37 @@ discover_zulu() {
     -type f -perm -111 2>/dev/null | sort | tail -1 || return 0
 }
 
+bounded() {
+  # Wrap a probe that talks to the network. Both agent CLIs can hang on a dead
+  # endpoint, and `doctor` runs before every `start`, so an unbounded probe means an
+  # unbootable tool. `timeout` is coreutils and always present in practice; without
+  # it, run the probe unwrapped rather than refusing to check.
+  local seconds="$1"; shift
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$seconds" "$@"
+  else
+    "$@"
+  fi
+}
+
 run_comate_cli() {
   if [[ "$COMATE_PLATFORM" == "internal" ]]; then
     env -u HTTPS_PROXY -u HTTP_PROXY -u https_proxy -u http_proxy \
       -u ALL_PROXY -u all_proxy PLATFORM=internal "$COMATE_BIN" "$@"
   else
     env PLATFORM=saas "$COMATE_BIN" "$@"
+  fi
+}
+
+comate_status_probe() {
+  # `status` is a network call, so it gets a deadline -- unlike `login`, which is
+  # interactive and must be allowed to wait for the user. `timeout` cannot run a
+  # shell function, so the deadline is applied to `env` and the CLI directly.
+  if [[ "$COMATE_PLATFORM" == "internal" ]]; then
+    bounded 20 env -u HTTPS_PROXY -u HTTP_PROXY -u https_proxy -u http_proxy \
+      -u ALL_PROXY -u all_proxy PLATFORM=internal "$COMATE_BIN" status
+  else
+    bounded 20 env PLATFORM=saas "$COMATE_BIN" status
   fi
 }
 
@@ -283,7 +311,7 @@ resolve_skill() {
 doctor() {
   local failed=0 provider_ready=0 comate_status comate_status_code
   say "检查运行环境"
-  for command_name in python3 curl flock; do
+  for command_name in python3 curl flock sha256sum awk tar mktemp find; do
     if command -v "$command_name" >/dev/null 2>&1; then
       printf '  ✓ %-9s %s\n' "$command_name" "$(command -v "$command_name")"
     else
@@ -307,7 +335,7 @@ doctor() {
   else
     printf '  - nsys 未安装；仍可导入已有七表包，不能分析 .nsys-rep\n'
   fi
-  if command -v codex >/dev/null 2>&1 && codex login status >/dev/null 2>&1; then
+  if command -v codex >/dev/null 2>&1 && bounded 20 codex login status >/dev/null 2>&1; then
     printf '  ✓ Codex 已登录\n'
     CODEX_READY=true
     provider_ready=1
@@ -334,7 +362,7 @@ doctor() {
       fi
     fi
     set +e
-    comate_status="$(run_comate_cli status 2>&1)"
+    comate_status="$(comate_status_probe 2>&1)"
     comate_status_code=$?
     set -e
     if [[ "$comate_status_code" -eq 0 ]] \
@@ -355,7 +383,7 @@ doctor() {
       printf '  △ Comate Zulu 需要 Node.js 运行时，但未检测到 node\n'
       if try_install_node; then
         set +e
-        comate_status="$(run_comate_cli status 2>&1)"
+        comate_status="$(comate_status_probe 2>&1)"
         comate_status_code=$?
         set -e
         if [[ "$comate_status_code" -eq 0 ]] \
@@ -399,6 +427,17 @@ doctor() {
   say "环境检查通过"
 }
 
+venv_ready() {
+  # `bin/uvicorn` exists as soon as pip starts unpacking, so its presence is not
+  # evidence of a complete install. Importing what the Analyzer imports at boot is.
+  [[ -x "$VENV_DIR/bin/python3" ]] || return 1
+  "$VENV_DIR/bin/python3" - <<'PY' >/dev/null 2>&1
+import importlib
+for module in ("fastapi", "uvicorn", "pydantic"):
+    importlib.import_module(module)
+PY
+}
+
 prepare_python() {
   if [[ ! -x "$VENV_DIR/bin/python3" ]]; then
     say "首次运行：创建 Python 虚拟环境"
@@ -408,16 +447,27 @@ prepare_python() {
   local requirements_hash
   requirements_hash="$(sha256sum "$PROJECT_DIR/backend/requirements.txt" | awk '{print $1}')"
   local stamp="$VENV_DIR/.nsysscope-requirements.sha256"
-  if [[ -x "$VENV_DIR/bin/uvicorn" ]] && [[ ! -f "$stamp" ]]; then
-    printf '%s\n' "$requirements_hash" > "$stamp"
-  elif [[ ! -x "$VENV_DIR/bin/uvicorn" ]] || [[ "$(<"$stamp")" != "$requirements_hash" ]]; then
-    say "安装 Analyzer Python 依赖"
-    probe_download_proxy || true
-    run_download "$VENV_DIR/bin/python3" -m pip install \
-      -r "$PROJECT_DIR/backend/requirements.txt" \
-      || fail "依赖安装失败；确认能访问 https://pypi.org 或设置 NSYSSCOPE_DOWNLOAD_PROXY"
-    printf '%s\n' "$requirements_hash" > "$stamp"
+  local installed_hash=""
+  [[ -f "$stamp" ]] && installed_hash="$(<"$stamp")"
+  # An interrupted first install used to be grandfathered in by the stamp and then
+  # never repaired, so every later run failed on a missing import. Reinstall
+  # whenever the venv cannot import the Analyzer's dependencies, whatever the
+  # stamp says; the stamp alone only guards against a requirements change.
+  if venv_ready; then
+    if [[ -z "$installed_hash" ]]; then
+      printf '%s\n' "$requirements_hash" > "$stamp"
+      return
+    fi
+    [[ "$installed_hash" == "$requirements_hash" ]] && return
   fi
+  say "安装 Analyzer Python 依赖"
+  rm -f "$stamp"
+  probe_download_proxy || true
+  run_download "$VENV_DIR/bin/python3" -m pip install \
+    -r "$PROJECT_DIR/backend/requirements.txt" \
+    || fail "依赖安装失败；确认能访问 https://pypi.org 或设置 NSYSSCOPE_DOWNLOAD_PROXY=<代理地址>，内网机器可改用 NSYSSCOPE_PIP_INDEX_URL=<内网 PyPI 源>"
+  venv_ready || fail "依赖安装后仍无法导入 Analyzer 依赖，请删除 $VENV_DIR 后重试"
+  printf '%s\n' "$requirements_hash" > "$stamp"
 }
 
 start() {
@@ -476,7 +526,17 @@ start() {
     fi
     sleep 0.1
   done
-  [[ "$ready" -eq 1 ]] || fail "Analyzer 健康检查超时，请查看 $RUNTIME_DIR/analyzer.log"
+  if [[ "$ready" -ne 1 ]]; then
+    # cleanup() removes RUNTIME_DIR on exit, so pointing the user at the log there
+    # left them roughly eight seconds to read it. Print it and keep a copy.
+    local kept="${TMPDIR:-/tmp}/nsysscope-analyzer-$$.log"
+    cp -f "$RUNTIME_DIR/analyzer.log" "$kept" 2>/dev/null || kept=""
+    tail -40 "$RUNTIME_DIR/analyzer.log" >&2 || true
+    if [[ -n "$kept" ]]; then
+      fail "Analyzer 健康检查超时，完整日志已保留在 $kept"
+    fi
+    fail "Analyzer 健康检查超时"
+  fi
 
   printf '\n'
   say "启动完成"
