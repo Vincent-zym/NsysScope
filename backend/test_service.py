@@ -1350,13 +1350,43 @@ def test_the_skill_and_the_service_lay_a_package_out_the_same_way(
     )
 
 
-def test_packaging_refuses_an_analysis_the_frontend_cannot_render(
-    tmp_path: Path,
-) -> None:
-    # The contract check is not a command someone has to remember: it runs at the one
-    # step every package passes through, so a package with a manifest is a checked
-    # package. Here a heterogeneous cycle collapsed to a single averaged layer --
-    # arithmetically invisible, visibly wrong on the dashboard.
+def test_packaging_repairs_a_derivable_contract_violation(tmp_path: Path) -> None:
+    # analysis.json is derived from the tables, so a violation in it is repairable
+    # without judgement. Failing a finished analysis over a derived file would waste
+    # the whole run, so packaging rebuilds it and only fails if that does not help.
+    require_package()
+    result_dir = package_copy(tmp_path)
+    (result_dir / "analysis.json").write_text(json.dumps({
+        "schemaVersion": "1.0",
+        # A partial write: most operators never made it, so the count disagrees and
+        # the device scope is gone.
+        "summary": {"operatorCount": 99, "devices": [], "stableSamples": 1},
+        "operators": [{"category": "core"}],
+        "metadata": {"model": "GLM5.2", "stage": "decode", "hardware": "Nvidia B200"},
+    }) + "\n", encoding="utf-8")
+
+    completed = subprocess.run(
+        [
+            sys.executable, str(SKILL / "scripts" / "finalize_package.py"),
+            str(result_dir), "--prefix", package_prefix(),
+        ],
+        capture_output=True, text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "rebuilding it from" in completed.stderr
+    assert (result_dir / "nsysscope-package.json").is_file()
+    # The rejected document is kept as evidence rather than dropped.
+    assert (result_dir / "metadata" / "analysis.rejected.json").is_file()
+    repaired = json.loads((result_dir / "analysis.json").read_text())
+    assert repaired["summary"]["operatorCount"] == len(repaired["operators"])
+    assert repaired["metadata"]["model"] == "GLM5.2"
+
+
+def test_packaging_refuses_what_it_cannot_repair(tmp_path: Path) -> None:
+    # The one case that must still fail: the tables themselves lack what the
+    # frontend needs, so rebuilding cannot conjure it. Silently shipping a cycle
+    # collapsed into one averaged layer would mislead every reader of the dashboard.
     result_dir = flat_analysis_dir(tmp_path / "collapsed")
     (result_dir / "analysis.json").write_text(json.dumps({
         "schemaVersion": "1.0",
@@ -1384,7 +1414,7 @@ def test_packaging_refuses_an_analysis_the_frontend_cannot_render(
 
     assert completed.returncode != 0
     assert "frontend contract" in completed.stderr
-    assert "loses heterogeneous unit variants" in completed.stderr
+    assert "after rebuilding it from the tables" in completed.stderr
     assert not (result_dir / "nsysscope-package.json").exists()
 
 

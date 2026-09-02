@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import json
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -164,30 +165,105 @@ def write_manifest(
     return path
 
 
-def check_contract(result_dir: Path) -> None:
-    """Refuse to package an analysis the frontend cannot render.
+def describe(result_dir: Path) -> dict[str, str]:
+    """Model/stage/hardware for a rebuild, from whatever recorded them.
+
+    `analysis.json` carries them in `metadata`; a job also writes them into
+    `metadata/context.json` under the request's own names. Missing values are
+    passed as empty, exactly as a first conversion without them would.
+    """
+    for path, keys in (
+        (result_dir / "analysis.json", ("model", "stage", "hardware")),
+        (result_dir / "metadata" / "context.json", ("model_name", "stage", "hardware")),
+    ):
+        try:
+            payload = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        source = payload.get("metadata") if "metadata" in payload else payload
+        if not isinstance(source, dict):
+            continue
+        found = {
+            name: str(source.get(key) or "")
+            for name, key in zip(("model", "stage", "hardware"), keys)
+        }
+        if any(found.values()):
+            return found
+    return {"model": "", "stage": "", "hardware": ""}
+
+
+def rebuild_analysis_json(result_dir: Path, csv_dir: Path, prefix: str) -> list[str]:
+    """Regenerate `analysis.json` from the tables. Returns the errors that remain.
+
+    `analysis.json` is a derived view, so a document that fails the contract is
+    almost always a stale or half-written conversion over tables that are fine --
+    and that is repairable without judgement, by deriving it again. Reaching the end
+    of an analysis and then throwing it away over a derived file would be the worst
+    possible trade. The rejected document is kept as evidence rather than deleted.
+    """
+    target = result_dir / "analysis.json"
+    described = describe(result_dir)
+    if target.is_file():
+        rejected = result_dir / "metadata" / "analysis.rejected.json"
+        rejected.parent.mkdir(exist_ok=True)
+        shutil.copy2(target, rejected)
+    command = [
+        sys.executable, str(Path(__file__).resolve().parent / "build_analysis_json.py"),
+        str(csv_dir), str(target), "--prefix", prefix,
+        "--model", described["model"],
+        "--stage", described["stage"],
+        "--hardware", described["hardware"],
+    ]
+    completed = subprocess.run(command, text=True, capture_output=True)
+    if completed.returncode:
+        detail = (completed.stderr or completed.stdout or "").strip()
+        return [f"could not rebuild analysis.json from {csv_dir}: {detail[:500]}"]
+    try:
+        return contract_errors(json.loads(target.read_text()))
+    except (OSError, ValueError) as exc:
+        return [f"rebuilt analysis.json is unreadable: {exc}"]
+
+
+def check_contract(result_dir: Path, csv_dir: Path, prefix: str) -> None:
+    """Refuse to package an analysis the frontend cannot render -- after repairing.
 
     The gate lives here, at the one step every package must pass through, rather
     than in a command someone has to remember: a malformed `analysis.json` that
     reaches a reader looks like a broken tool, and by then the trace and the
-    reasoning are gone. `analysis.json` is a required artifact, so its absence is
-    an error too, not a reason to skip the check.
+    reasoning are gone. But failing is the last resort, not the first: the document
+    is derived from the tables, so it is rebuilt and re-checked first, and only a
+    violation that survives that is a real defect in the tables themselves.
     """
     path = result_dir / "analysis.json"
-    if not path.is_file():
-        raise SystemExit(
-            f"{path} is missing; run build_analysis_json.py before packaging"
-        )
-    try:
-        payload = json.loads(path.read_text())
-    except ValueError as exc:
-        raise SystemExit(f"{path} is not valid JSON: {exc}") from exc
-    errors = contract_errors(payload)
-    if errors:
-        joined = "\n".join(f"  - {error}" for error in errors)
-        raise SystemExit(
-            f"{path} does not meet the NsysScope frontend contract:\n{joined}"
-        )
+    errors = []
+    if path.is_file():
+        try:
+            errors = contract_errors(json.loads(path.read_text()))
+        except ValueError as exc:
+            errors = [f"analysis.json is not valid JSON: {exc}"]
+    else:
+        errors = ["analysis.json is missing"]
+    if not errors:
+        return
+    print(
+        "analysis.json does not meet the frontend contract, rebuilding it from "
+        f"{csv_dir}:",
+        file=sys.stderr,
+    )
+    for error in errors:
+        print(f"  - {error}", file=sys.stderr)
+    remaining = rebuild_analysis_json(result_dir, csv_dir, prefix)
+    if not remaining:
+        print("rebuilt analysis.json meets the frontend contract", file=sys.stderr)
+        return
+    joined = "\n".join(f"  - {error}" for error in remaining)
+    raise SystemExit(
+        "analysis.json still does not meet the NsysScope frontend contract after "
+        f"rebuilding it from the tables:\n{joined}\n"
+        "The tables themselves are missing what the frontend needs (most often the "
+        "structural position/id/variant of a heterogeneous cycle) -- fix the table "
+        "and package again."
+    )
 
 
 def main() -> None:
@@ -222,7 +298,7 @@ def main() -> None:
 
     tables = collect_tables(tables_dir, csv_dir, args.prefix)
     sweep_sidecars([tables_dir, result_dir], csv_dir, metadata_dir)
-    check_contract(result_dir)
+    check_contract(result_dir, csv_dir, args.prefix)
     if not args.no_xlsx:
         convert_directory(csv_dir, xlsx_dir)
     trace = (place_trace(args.trace.resolve(), result_dir, result_dir / "trace")

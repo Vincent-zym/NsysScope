@@ -424,10 +424,11 @@ unit keeps its structural identity. Those checks are also a script of their own:
 python scripts/validate_frontend_contract.py /path/result/analysis.json
 ```
 
-Nobody has to remember to run it: step 11 refuses to package an analysis that
-fails it. Run it directly only to see the violations while fixing them -- it exits
-non-zero and names every one. The NsysScope service runs the same script as its
-own last gate, so a package that passes here will not be rejected by the tool.
+Nobody has to remember to run it: step 11 runs it, and repairs what it can, before
+writing the manifest. Run it directly only to see the violations while fixing them
+-- it exits non-zero and names every one. The NsysScope service runs the same
+script as its own last gate, so a package that passes here will not be rejected by
+the tool.
 
 ### 10. Write the analysis report
 
@@ -470,10 +471,14 @@ list and the directory names. `--trace` is optional; omit it when the analysis
 was not driven from a local export.
 
 Before it writes the manifest it runs the frontend contract check (step 9) on
-`analysis.json` and refuses to package anything that fails, naming every
-violation. So a package that has a manifest has been checked -- there is no
-combination of steps that produces one without checking, and no separate command
-to remember.
+`analysis.json`. A violation there is usually a stale or half-written conversion
+over tables that are fine, and that is repairable without judgement, so the
+packager rebuilds `analysis.json` from `csv/` and re-checks instead of failing --
+the rejected document is kept as `metadata/analysis.rejected.json`. Only a
+violation that survives the rebuild fails the packaging, because it means the
+tables themselves are missing what the frontend needs, most often the structural
+position/id/variant of a heterogeneous cycle. So a package that has a manifest has
+been checked, and no finished analysis is ever thrown away over a derived file.
 
 Run it even if the analysis was authored directly in the target layout: it is
 idempotent, and it is what produces the manifest. Do not skip it and hand-place
