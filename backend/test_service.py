@@ -1270,6 +1270,11 @@ def test_packaging_survives_a_missing_seventh_table(tmp_path: Path) -> None:
     package.mkdir(parents=True)
     for suffix in AGENT_CSV_SUFFIXES:
         (package / f"analysis{suffix}").write_text("a,b\n1,2\n", encoding="utf-8")
+    (result_dir / "analysis.json").write_text(json.dumps({
+        "schemaVersion": "1.0",
+        "summary": {"operatorCount": 1, "devices": [0], "stableSamples": 1},
+        "operators": [{"category": "core"}],
+    }) + "\n", encoding="utf-8")
     trace = result_dir / "capture.sqlite"
     trace.write_bytes(b"")
 
@@ -1289,7 +1294,13 @@ def flat_analysis_dir(root: Path, prefix: str = "analysis") -> Path:
         (root / f"{prefix}{suffix}").write_text("a,b\n1,2\n", encoding="utf-8")
     (root / f"{prefix}_analysis_manifest.json").write_text("{}\n", encoding="utf-8")
     (root / "validation_report.json").write_text("{}\n", encoding="utf-8")
-    (root / "analysis.json").write_text('{"schemaVersion": "1.0"}\n', encoding="utf-8")
+    # Contract-valid on purpose: finalize_package refuses to write a manifest for an
+    # analysis.json the frontend could not render.
+    (root / "analysis.json").write_text(json.dumps({
+        "schemaVersion": "1.0",
+        "summary": {"operatorCount": 1, "devices": [0], "stableSamples": 1},
+        "operators": [{"category": "core"}],
+    }) + "\n", encoding="utf-8")
     (root / "final_report.md").write_text("# report\n", encoding="utf-8")
     (root / "scratch_probe.csv").write_text("x\n1\n", encoding="utf-8")
     (root / "capture.sqlite").write_bytes(b"")
@@ -1337,6 +1348,44 @@ def test_the_skill_and_the_service_lay_a_package_out_the_same_way(
     assert {"analysis.json", "final_report.md", "nsysscope-package.json"} <= tree(
         by_hand
     )
+
+
+def test_packaging_refuses_an_analysis_the_frontend_cannot_render(
+    tmp_path: Path,
+) -> None:
+    # The contract check is not a command someone has to remember: it runs at the one
+    # step every package passes through, so a package with a manifest is a checked
+    # package. Here a heterogeneous cycle collapsed to a single averaged layer --
+    # arithmetically invisible, visibly wrong on the dashboard.
+    result_dir = flat_analysis_dir(tmp_path / "collapsed")
+    (result_dir / "analysis.json").write_text(json.dumps({
+        "schemaVersion": "1.0",
+        "summary": {
+            "operatorCount": 1,
+            "devices": [0],
+            "stableSamples": 1,
+            "heterogeneous": True,
+            "distinctUnitVariants": ["KDA", "MLA"],
+            "durationLabel": "平均单层耗时",
+        },
+        "operators": [{
+            "category": "core", "unitPosition": 1, "unitId": "layer.4",
+            "unitVariant": "KDA",
+        }],
+    }) + "\n", encoding="utf-8")
+
+    completed = subprocess.run(
+        [
+            sys.executable, str(SKILL / "scripts" / "finalize_package.py"),
+            str(result_dir), "--prefix", "analysis",
+        ],
+        capture_output=True, text=True,
+    )
+
+    assert completed.returncode != 0
+    assert "frontend contract" in completed.stderr
+    assert "loses heterogeneous unit variants" in completed.stderr
+    assert not (result_dir / "nsysscope-package.json").exists()
 
 
 def test_a_renamed_prefix_is_followed_instead_of_reported_as_no_tables(

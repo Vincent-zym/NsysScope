@@ -418,16 +418,16 @@ Fail when:
 Passing `--analysis-json` also checks that the document is *shaped* the way the
 dashboard needs -- schema version, operator categories, `operatorCount`, device
 and sample scope, and, for a heterogeneous cycle, that every operator, stage and
-unit keeps its structural identity. Those checks are also a script of their own,
-which is worth running whenever `analysis.json` is regenerated:
+unit keeps its structural identity. Those checks are also a script of their own:
 
 ```bash
 python scripts/validate_frontend_contract.py /path/result/analysis.json
 ```
 
-It exits non-zero and names every violation. The NsysScope service runs this exact
-script as its last gate before reporting success, so a package that passes here
-will not be rejected by the tool.
+Nobody has to remember to run it: step 11 refuses to package an analysis that
+fails it. Run it directly only to see the violations while fixing them -- it exits
+non-zero and names every one. The NsysScope service runs the same script as its
+own last gate, so a package that passes here will not be rejected by the tool.
 
 ### 10. Write the analysis report
 
@@ -468,6 +468,12 @@ scratch CSV into `metadata/`, the trace into `trace/`, writes one workbook per
 table into `xlsx/`, and emits `nsysscope-package.json` with the prefix, the table
 list and the directory names. `--trace` is optional; omit it when the analysis
 was not driven from a local export.
+
+Before it writes the manifest it runs the frontend contract check (step 9) on
+`analysis.json` and refuses to package anything that fails, naming every
+violation. So a package that has a manifest has been checked -- there is no
+combination of steps that produces one without checking, and no separate command
+to remember.
 
 Run it even if the analysis was authored directly in the target layout: it is
 idempotent, and it is what produces the manifest. Do not skip it and hand-place

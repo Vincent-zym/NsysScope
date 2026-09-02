@@ -34,6 +34,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from csv_to_xlsx import convert_directory  # noqa: E402
+from validate_frontend_contract import contract_errors  # noqa: E402
 
 
 AGENT_TABLE_SUFFIXES = (
@@ -163,6 +164,32 @@ def write_manifest(
     return path
 
 
+def check_contract(result_dir: Path) -> None:
+    """Refuse to package an analysis the frontend cannot render.
+
+    The gate lives here, at the one step every package must pass through, rather
+    than in a command someone has to remember: a malformed `analysis.json` that
+    reaches a reader looks like a broken tool, and by then the trace and the
+    reasoning are gone. `analysis.json` is a required artifact, so its absence is
+    an error too, not a reason to skip the check.
+    """
+    path = result_dir / "analysis.json"
+    if not path.is_file():
+        raise SystemExit(
+            f"{path} is missing; run build_analysis_json.py before packaging"
+        )
+    try:
+        payload = json.loads(path.read_text())
+    except ValueError as exc:
+        raise SystemExit(f"{path} is not valid JSON: {exc}") from exc
+    errors = contract_errors(payload)
+    if errors:
+        joined = "\n".join(f"  - {error}" for error in errors)
+        raise SystemExit(
+            f"{path} does not meet the NsysScope frontend contract:\n{joined}"
+        )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("result_dir", type=Path)
@@ -195,6 +222,7 @@ def main() -> None:
 
     tables = collect_tables(tables_dir, csv_dir, args.prefix)
     sweep_sidecars([tables_dir, result_dir], csv_dir, metadata_dir)
+    check_contract(result_dir)
     if not args.no_xlsx:
         convert_directory(csv_dir, xlsx_dir)
     trace = (place_trace(args.trace.resolve(), result_dir, result_dir / "trace")
