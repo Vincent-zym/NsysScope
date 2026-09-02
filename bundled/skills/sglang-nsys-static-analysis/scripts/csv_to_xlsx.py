@@ -123,16 +123,26 @@ def write_workbook(csv_path: Path, output: Path) -> None:
             archive.writestr(name, content)
 
 
+def convert_directory(csv_dir: Path, xlsx_dir: Path) -> list[Path]:
+    """One workbook per CSV in `csv_dir`. Also the entry point finalize_package uses."""
+    csv_files = sorted(csv_dir.glob("*.csv"))
+    if not csv_files:
+        raise SystemExit(f"no CSV files found in {csv_dir}")
+    xlsx_dir.mkdir(parents=True, exist_ok=True)
+    written = []
+    for csv_path in csv_files:
+        target = xlsx_dir / f"{csv_path.stem}.xlsx"
+        write_workbook(csv_path, target)
+        written.append(target)
+    return written
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("csv_dir", type=Path)
     parser.add_argument("xlsx_dir", type=Path)
     args = parser.parse_args()
-    csv_files = sorted(args.csv_dir.glob("*.csv"))
-    if not csv_files:
-        raise SystemExit(f"no CSV files found in {args.csv_dir}")
-    for csv_path in csv_files:
-        write_workbook(csv_path, args.xlsx_dir / f"{csv_path.stem}.xlsx")
+    convert_directory(args.csv_dir, args.xlsx_dir)
 
 
 if __name__ == "__main__":

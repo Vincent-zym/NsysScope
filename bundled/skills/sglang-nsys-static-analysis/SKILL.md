@@ -23,7 +23,28 @@ Generate:
 11. `validation_report.json`
 12. `final_report.md` (the human-readable report; see step 10)
 13. `analysis.json` (the stable frontend contract; see step 7)
-14. `xlsx/` (one workbook per CSV; see step 7)
+14. `xlsx/` (one workbook per table; written by step 11)
+
+The result directory is a package with a fixed shape, not a pile of files. Author
+the analysis flat if that is easier, then run step 11, which is what puts every
+artifact in its place and writes the manifest:
+
+```text
+result/
+├── analysis.json                 # frontend contract
+├── final_report.md               # the report a human reads
+├── nsysscope-package.json        # manifest: prefix, table list, directories
+├── csv/                          # the six or seven tables, nothing else
+├── xlsx/                         # one workbook per table
+├── metadata/                     # taxonomy, manifest, semantic map,
+│                                 # statistics sidecar, validation report,
+│                                 # and any scratch CSV the analysis produced
+├── trace/                        # the exported .sqlite
+└── logs/                         # only when a job produced a log
+```
+
+Never hand-place files to imitate this: run the packager, so a Skill run by hand
+and a run driven by the NsysScope service end in the same directory.
 
 The first six tables are required. The seventh relates the measured repeating unit
 to a whole forward step, so a package with it can additionally answer what fraction
@@ -339,20 +360,16 @@ kernel inside an attention stage remains auxiliary. Core compute is restricted
 to GEMM/BMM/matmul, verified grouped expert GEMMs and actual
 attention/state-update score/normalization/value-aggregation kernels.
 
-Then produce the two derived artifacts every package ships, so a package built
-here is complete on its own rather than only after a tool re-processes it:
+Then build the frontend contract, which step 9 validates the tables against:
 
 ```bash
 python scripts/build_analysis_json.py /path/result /path/result/analysis.json \
   --prefix model --model GLM5.2 --stage decode --hardware "Nvidia B300"
-python scripts/csv_to_xlsx.py /path/result /path/result/xlsx
 ```
 
-`analysis.json` is the stable frontend contract -- step 9 validates the tables
-against it (`--analysis-json`), so generate it before validating. `xlsx/` holds
-one dependency-free workbook per CSV, for readers who open spreadsheets rather
-than CSVs. Both are derived views: never hand-edit them, fix the table they came
-from and regenerate.
+`analysis.json` is the stable frontend contract, so generate it before validating.
+It is a derived view: never hand-edit it, fix the table it came from and
+regenerate. The workbooks come later, in step 11, from the tables' final location.
 
 ### 8. Compute shapes and MFU
 
@@ -421,6 +438,27 @@ conclusions by impact, and only claim a cause the package's data supports. See
 references/final-report-format.md for the section layout and the paste-fidelity
 rules the HTML tables depend on, and references/final_report.example.md for a
 complete filled-in report (glm5_next prefill) to match.
+
+### 11. Finalize the package layout
+
+Last step, once the tables, `analysis.json`, `validation_report.json` and
+`final_report.md` are all written:
+
+```bash
+python scripts/finalize_package.py /path/result --prefix model \
+  --trace /path/exported.sqlite
+```
+
+It moves the six or seven canonical tables into `csv/`, every sidecar and every
+scratch CSV into `metadata/`, the trace into `trace/`, writes one workbook per
+table into `xlsx/`, and emits `nsysscope-package.json` with the prefix, the table
+list and the directory names. `--trace` is optional; omit it when the analysis
+was not driven from a local export.
+
+Run it even if the analysis was authored directly in the target layout: it is
+idempotent, and it is what produces the manifest. Do not skip it and hand-place
+files instead -- the layout is the package's contract, and the NsysScope service
+runs this exact script, so skipping it is the only way the two can disagree.
 
 ## Numerical and presentation rules
 

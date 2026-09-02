@@ -8,14 +8,15 @@ NsysScope separates report analysis from visualization.
    materials are available.
 2. It writes the exported SQLite, bounded logs and analysis evidence directly
    into the user-selected result directory.
-3. The six normalized tables are stored in `csv/`; a dependency-free converter
-   creates the matching six workbooks in `xlsx/`.
+3. The Skill's `scripts/finalize_package.py` lays the result directory out: the
+   six or seven tables in `csv/`, one workbook per table in `xlsx/`, every
+   sidecar in `metadata/`, the trace in `trace/`, and `nsysscope-package.json` at
+   the root. The service calls that same script, so a Skill run done by hand and
+   a job produce the same directory.
 4. `bundled/skills/sglang-nsys-static-analysis/scripts/build_analysis_json.py`
-   converts that package into the versioned frontend contract and
-   `nsysscope-package.json` makes the directory portable. Both converters live in
-   the Skill, so a standalone Skill run produces the same `analysis.json` and
-   `xlsx/`; the service only adds the directory layout, the trace copy and the
-   package manifest.
+   converts that package into the versioned frontend contract. It lives in the
+   Skill too, so the only things the service adds to a package are its own job
+   traces: `logs/job.log` and the prompt/request/skill records in `metadata/`.
 5. The dashboard loads `analysis.json` and remains model-independent.
 
 ## Contract

@@ -119,14 +119,19 @@ export NSYSSCOPE_DOWNLOAD_PROXY=http://your-proxy:port
 ```text
 result-package/
 ├── analysis.json
+├── final_report.md      # 人读的分析报告
 ├── nsysscope-package.json
-├── csv/                 # 六张规范化 CSV 表
+├── csv/                 # 六或七张规范化 CSV 表
 ├── xlsx/                # 对应的 XLSX 工作簿
 ├── trace/               # 导出或复制的 SQLite trace
 ├── logs/job.log         # 有大小上限的任务日志
 ├── dispatch_sites/      # 仅在提供 torch profiler trace 时生成的调用栈查表
 └── metadata/            # 请求、prompt、manifest 与校验证据
 ```
+
+这套布局由 Skill 的 `scripts/finalize_package.py` 生成，后端调用的是同一个脚本，
+所以单独运行 Skill 得到的目录与走工具得到的一致；工具只多出 `logs/job.log` 和
+`metadata/` 里 prompt/request/skill 这些任务自身的痕迹。
 
 ## 导入已有结果
 

@@ -1279,6 +1279,63 @@ def test_packaging_survives_a_missing_seventh_table(tmp_path: Path) -> None:
         assert (result_dir / "csv" / name).is_file()
 
 
+def flat_analysis_dir(root: Path, prefix: str = "analysis") -> Path:
+    """A finished analysis as it is easiest to author it: one flat directory."""
+    root.mkdir(parents=True)
+    for suffix in AGENT_CSV_SUFFIXES:
+        (root / f"{prefix}{suffix}").write_text("a,b\n1,2\n", encoding="utf-8")
+    (root / f"{prefix}_analysis_manifest.json").write_text("{}\n", encoding="utf-8")
+    (root / "validation_report.json").write_text("{}\n", encoding="utf-8")
+    (root / "analysis.json").write_text('{"schemaVersion": "1.0"}\n', encoding="utf-8")
+    (root / "final_report.md").write_text("# report\n", encoding="utf-8")
+    (root / "scratch_probe.csv").write_text("x\n1\n", encoding="utf-8")
+    (root / "capture.sqlite").write_bytes(b"")
+    return root
+
+
+def test_the_skill_and_the_service_lay_a_package_out_the_same_way(
+    tmp_path: Path,
+) -> None:
+    # The whole point of the Skill owning the packager: a run done by hand and a job
+    # run through the service must end in the same directory, so nobody has to know
+    # which one produced a package they were handed.
+    configured = settings(tmp_path)
+    configured.prepare()
+    runner = JobRunner(configured, JobStore(configured.data_dir / "jobs.sqlite"))
+
+    by_hand = flat_analysis_dir(tmp_path / "by-hand")
+    subprocess.run(
+        [
+            sys.executable, str(SKILL / "scripts" / "finalize_package.py"),
+            str(by_hand), "--prefix", "analysis",
+            "--trace", str(by_hand / "capture.sqlite"),
+        ],
+        check=True, capture_output=True, text=True,
+    )
+
+    by_tool = flat_analysis_dir(tmp_path / "by-tool")
+    runner.organize_result_package(
+        by_tool, by_tool, "analysis", by_tool / "capture.sqlite",
+    )
+
+    def tree(root: Path) -> set[str]:
+        return {
+            path.relative_to(root).as_posix()
+            for path in root.rglob("*") if path.is_file()
+        }
+
+    assert tree(by_hand) == tree(by_tool)
+    assert "csv/analysis_stage_table.csv" in tree(by_hand)
+    assert "xlsx/analysis_stage_table.xlsx" in tree(by_hand)
+    assert "metadata/scratch_probe.csv" in tree(by_hand)
+    assert "metadata/validation_report.json" in tree(by_hand)
+    assert "trace/capture.sqlite" in tree(by_hand)
+    # The frontend contract, the report and the manifest stay at the root.
+    assert {"analysis.json", "final_report.md", "nsysscope-package.json"} <= tree(
+        by_hand
+    )
+
+
 def test_a_renamed_prefix_is_followed_instead_of_reported_as_no_tables(
     tmp_path: Path,
 ) -> None:

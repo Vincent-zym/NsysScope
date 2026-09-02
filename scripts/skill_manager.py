@@ -64,6 +64,7 @@ def validate_skill(path: Path) -> list[str]:
         # external Skill without them cannot serve a job end to end.
         "scripts/build_analysis_json.py",
         "scripts/csv_to_xlsx.py",
+        "scripts/finalize_package.py",
         "references/output-spec.md",
         "references/hardware-peaks.json",
     ):

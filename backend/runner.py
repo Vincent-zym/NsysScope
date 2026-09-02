@@ -359,8 +359,11 @@ class JobRunner:
                                 csv_package, prefix, analysis_path=analysis_path,
                                 job_id=job_id, log_to=job_dir,
                             )
-                            self.ensure_xlsx(csv_package, package / "xlsx", job_id=job_id)
                             self.ensure_final_report(job_id, job_dir, package, prefix)
+                            self.organize_result_package(
+                                package, csv_package, prefix,
+                                self.package_trace(package), job_id=job_id,
+                            )
                     else:
                         prefix = self.detect_prefix(csv_package, request.prefix)
                         self.ensure_forward_pipeline(
@@ -379,8 +382,11 @@ class JobRunner:
                             csv_package, prefix, analysis_path=package / "analysis.json",
                             job_id=job_id, log_to=job_dir,
                         )
-                        self.ensure_xlsx(csv_package, package / "xlsx", job_id=job_id)
                         self.ensure_final_report(job_id, job_dir, package, prefix)
+                        self.organize_result_package(
+                            package, csv_package, prefix,
+                            self.package_trace(package), job_id=job_id,
+                        )
             else:
                 if self.is_cancelled(job_id):
                     return
@@ -2302,78 +2308,41 @@ Requirements:
         raise RuntimeError("ZIP package does not contain one complete table directory")
 
     def organize_result_package(
-        self, result_dir: Path, package_dir: Path, prefix: str, sqlite_path: Path,
-        job_id: str | None = None,
-    ) -> Path:
-        csv_dir = result_dir / "csv"
-        xlsx_dir = result_dir / "xlsx"
-        trace_dir = result_dir / "trace"
-        metadata_dir = result_dir / "metadata"
-        for directory in (csv_dir, xlsx_dir, trace_dir, metadata_dir):
-            directory.mkdir(exist_ok=True)
+        self, result_dir: Path, package_dir: Path, prefix: str,
+        sqlite_path: Path | None, job_id: str | None = None,
+    ) -> Path | None:
+        """Lay the finished analysis out as a portable package.
 
-        # When the agent already wrote its tables into result_dir/"csv" (a common,
-        # valid layout -- see find_package), package_dir *is* csv_dir. shutil.move
-        # of a path onto itself is a silent no-op, so the loop below would leave
-        # every canonical table sitting in csv_dir, and the "extra csv" sweep that
-        # follows would then treat all seven as leftovers and move them into
-        # metadata_dir, emptying csv_dir entirely. Skip the move in that case --
-        # the files are already exactly where they belong.
-        already_in_place = package_dir.resolve() == csv_dir.resolve()
-        csv_files = []
-        for suffix in CSV_SUFFIXES:
-            source = package_dir / f"{prefix}{suffix}"
-            target = csv_dir / source.name
-            # The forward-pipeline table is optional: validate_package logs its
-            # absence and continues, so packaging must too instead of raising a
-            # FileNotFoundError that looks unrelated. Every other suffix is
-            # mandatory and has already been checked by then.
-            if not source.exists() and not target.exists():
-                if suffix == FORWARD_PIPELINE_SUFFIX:
-                    continue
-                raise FileNotFoundError(f"package is missing {source.name}")
-            if not already_in_place:
-                shutil.move(str(source), target)
-            csv_files.append(target.name)
-        for source_dir in dict.fromkeys((package_dir, result_dir)):
-            if source_dir.resolve() == csv_dir.resolve():
-                continue
-            for extra_csv in source_dir.glob("*.csv"):
-                shutil.move(str(extra_csv), metadata_dir / extra_csv.name)
-
-        self.ensure_xlsx(csv_dir, xlsx_dir, job_id=job_id)
-        trace_path = trace_dir / sqlite_path.name
-        if sqlite_path.resolve() != trace_path.resolve():
-            if sqlite_path.is_relative_to(result_dir):
-                shutil.move(str(sqlite_path), trace_path)
-            else:
-                shutil.copy2(sqlite_path, trace_path)
-
-        for source_dir in dict.fromkeys((package_dir, result_dir)):
-            for sidecar in source_dir.glob("*.json"):
-                if sidecar.name in {"analysis.json", "nsysscope-package.json"}:
-                    continue
-                shutil.move(str(sidecar), metadata_dir / sidecar.name)
+        Delegated to the Skill's `finalize_package.py`, which is the only
+        implementation of the canonical layout: a Skill run done by hand ends in the
+        same directory a job does, instead of a flat one a reader has to interpret.
+        Returns the trace's new path, which the caller records in context.json.
+        """
+        script = self.settings.skill_dir / "scripts" / "finalize_package.py"
+        if not script.is_file():
+            raise RuntimeError(f"analysis Skill is missing the packager: {script}")
+        command = [
+            shutil.which("python3") or "python3", str(script), str(result_dir),
+            "--prefix", prefix,
+            "--tables", str(package_dir),
+        ]
+        # An imported package may not ship a trace, and then there is nothing to
+        # place; every other artifact is still laid out.
+        if sqlite_path is not None:
+            command.extend(["--trace", str(sqlite_path)])
+        completed = self._run_tracked(job_id, command)
+        if completed.returncode:
+            raise RuntimeError(
+                completed.stdout.strip() or "analysis package layout failed"
+            )
+        # Staging is the tool's own doing, so cleaning it up stays here rather than
+        # in a script a Skill user runs.
         staged_skill = result_dir / ".comate"
         if staged_skill.exists():
             shutil.rmtree(staged_skill)
-
-        manifest = {
-            "schemaVersion": "1.0",
-            "kind": "nsysscope-analysis-package",
-            "analysis": "analysis.json",
-            "csvDirectory": "csv",
-            "xlsxDirectory": "xlsx",
-            "trace": f"trace/{trace_path.name}",
-            "log": "logs/job.log",
-            "metadataDirectory": "metadata",
-            "prefix": prefix,
-            "tables": csv_files,
-        }
-        (result_dir / "nsysscope-package.json").write_text(
-            json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
-        )
-        return trace_path
+        manifest = json.loads((result_dir / "nsysscope-package.json").read_text())
+        trace = manifest.get("trace")
+        return result_dir / trace if trace else None
 
     @staticmethod
     def csv_package_dir(package: Path) -> Path:

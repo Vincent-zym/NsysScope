@@ -165,6 +165,7 @@ class Settings:
             # so a Skill that cannot produce them is incomplete for this tool.
             "scripts/build_analysis_json.py",
             "scripts/csv_to_xlsx.py",
+            "scripts/finalize_package.py",
             "references/hardware-peaks.json",
         )
         missing = [
