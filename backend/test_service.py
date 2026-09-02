@@ -938,6 +938,26 @@ def test_run_process_emits_heartbeat(tmp_path: Path) -> None:
     assert "[heartbeat] 测试进程仍在运行" in runner.job_log_path(job_dir).read_text()
 
 
+def test_run_process_returns_the_child_output_not_the_job_log(tmp_path: Path) -> None:
+    # Crash signatures must be matched against the child's own output. The job log
+    # also carries the command line -- whose path contains "zulu" -- and every other
+    # step's output, which made the node-crash check fire on healthy runs.
+    configured = settings(tmp_path)
+    configured.prepare()
+    runner = JobRunner(configured, JobStore(configured.data_dir / "jobs.sqlite"))
+    job_dir = tmp_path / "capture"
+    job_dir.mkdir()
+
+    output = runner.run_process(
+        "capture-job", job_dir,
+        ["/bin/sh", "-c", "echo ok", "/opt/zulu-cli/bin/zulu"],
+    )
+
+    assert output.strip() == "ok"
+    assert "zulu" not in output
+    assert "zulu" in runner.job_log_path(job_dir).read_text()
+
+
 def test_cancel_terminates_agent_process_group(tmp_path: Path) -> None:
     configured = settings(tmp_path)
     configured.prepare()
@@ -1226,6 +1246,44 @@ def test_forward_pipeline_table_is_optional(tmp_path: Path) -> None:
     runner.ensure_forward_pipeline("job", job_dir, package, "analysis", None)
 
 
+def test_packaging_survives_a_missing_seventh_table(tmp_path: Path) -> None:
+    # validate_package logs the seventh table's absence and continues, so packaging
+    # must too: it used to raise FileNotFoundError one step later, which read like a
+    # broken pipeline rather than a missing optional view.
+    configured = settings(tmp_path)
+    configured.prepare()
+    runner = JobRunner(configured, JobStore(configured.data_dir / "jobs.sqlite"))
+    result_dir = tmp_path / "result"
+    package = result_dir / "tables"
+    package.mkdir(parents=True)
+    for suffix in AGENT_CSV_SUFFIXES:
+        (package / f"analysis{suffix}").write_text("a,b\n1,2\n", encoding="utf-8")
+    trace = result_dir / "capture.sqlite"
+    trace.write_bytes(b"")
+
+    runner.organize_result_package(result_dir, package, "analysis", trace)
+
+    manifest = json.loads((result_dir / "nsysscope-package.json").read_text())
+    assert len(manifest["tables"]) == len(AGENT_CSV_SUFFIXES)
+    assert not any("forward_pipeline" in name for name in manifest["tables"])
+    for name in manifest["tables"]:
+        assert (result_dir / "csv" / name).is_file()
+
+
+def test_a_renamed_prefix_is_followed_instead_of_reported_as_no_tables(
+    tmp_path: Path,
+) -> None:
+    # An agent that names its tables after the model it found in the trace has done
+    # the work; failing with "did not produce the six agent tables" hid that.
+    package = tmp_path / "csv"
+    package.mkdir()
+    for suffix in AGENT_CSV_SUFFIXES:
+        (package / f"glm5_decode{suffix}").write_text("a,b\n1,2\n", encoding="utf-8")
+
+    assert JobRunner.find_package(tmp_path, "requested") == package
+    assert JobRunner.detect_prefix(package, "requested") == "glm5_decode"
+
+
 def test_bad_optional_torch_trace_does_not_fail_the_job(tmp_path: Path) -> None:
     # The torch trace only makes the analysis faster, so a path that no longer
     # resolves degrades to "not supplied" instead of costing the caller a run.
@@ -1484,6 +1542,9 @@ def test_nsys_fetch_reports_a_bar_with_rate_and_eta(tmp_path: Path) -> None:
     configured = settings(tmp_path)
     configured.prepare()
     runner = JobRunner(configured, JobStore(configured.data_dir / "jobs.sqlite"))
+    # The reporter checks the job's status so a cancel that lands mid-download is not
+    # overwritten; this test only cares about the rendered progress line.
+    runner.is_cancelled = lambda job_id: False  # type: ignore[method-assign]
     reported: list[tuple[int, str]] = []
     runner.state = (  # type: ignore[method-assign]
         lambda job_id, job_dir, status, progress, message: reported.append(

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import platform
 import re
 import secrets
 import shlex
@@ -70,6 +71,17 @@ MIN_NODE_MAJOR = 18
 # easily and kept resetting the stall timer on an agent that had already finished.
 CPU_PROGRESS_FRACTION = 0.1
 
+# How long the agent's conversation file must sit untouched before complete outputs
+# are taken as "the run is over, only the CLI is still parked". Measured runs took
+# up to 14 minutes to write the mandatory sidecars *after* the six tables appeared,
+# and a busy agent's longest observed silence was about 3 minutes, so 30 minutes
+# keeps a wide margin on both sides. Cutting in too early would kill the agent
+# mid-validation and surface as a confusing package error.
+EARLY_FINISH_IDLE_SECONDS = 1800
+
+# Lines of a child process's raw stdout kept for crash-signature matching.
+RAW_OUTPUT_TAIL_LINES = 400
+
 
 def elapsed_seconds() -> float:
     """A clock for measuring durations that keeps counting while the host sleeps.
@@ -95,6 +107,14 @@ def elapsed_seconds() -> float:
 # "which nsys can read this file" a lookup, not a guess.
 REPORT_VERSION_RE = re.compile(rb"Report (\d+)@(\d+)@(\d+)@(\d+)-(\S+?)\.")
 NSYS_VERSION_RE = re.compile(r"version (\d+)\.(\d+)\.(\d+)\.(\d+)")
+# The devtools repo is laid out per distro and per architecture. Only x86_64 has ever
+# been exercised here, but hardcoding amd64 made an aarch64 host download a package it
+# cannot execute, so map the machine name and let an unknown one fail on the index
+# fetch (which falls back to the local nsys) rather than on a wrong binary.
+NSYS_REPO_ARCH = {
+    "x86_64": "amd64", "amd64": "amd64",
+    "aarch64": "arm64", "arm64": "arm64",
+}.get(platform.machine().lower(), platform.machine().lower())
 NSYS_REPO_URLS = tuple(
     url for url in (
         # Overridable so an air-gapped site can point at an internal mirror of the same
@@ -104,8 +124,8 @@ NSYS_REPO_URLS = tuple(
         # faster from here (0.47 vs 0.33 MB/s on a 64 MB sample). The domestic
         # university/Aliyun mirrors are not an option -- they only ever carried the
         # CUDA repo, and those paths now 404.
-        "https://developer.download.nvidia.cn/devtools/repos/ubuntu2004/amd64",
-        "https://developer.download.nvidia.com/devtools/repos/ubuntu2004/amd64",
+        f"https://developer.download.nvidia.cn/devtools/repos/ubuntu2004/{NSYS_REPO_ARCH}",
+        f"https://developer.download.nvidia.com/devtools/repos/ubuntu2004/{NSYS_REPO_ARCH}",
     ) if url
 )
 # Same candidates, same order as the launcher's proxy_candidates(): caller's own
@@ -284,6 +304,18 @@ class JobRunner:
             with log_path.open("ab") as handle:
                 handle.write(payload)
 
+    def log_quietly(self, job_dir: Path, message: str) -> None:
+        """Append to the job log, swallowing filesystem errors.
+
+        For use on failure paths, where the log write is the least important thing
+        left to do: a full or read-only disk must not replace the real error with an
+        OSError, nor abort the caller before it has recorded the job's status.
+        """
+        try:
+            self.log(job_dir, message)
+        except OSError:
+            pass
+
     def state(self, job_id: str, job_dir: Path, status: str, progress: int, message: str) -> None:
         self.store.update(job_id, status=status, progress=progress, message=message)
         self.log(job_dir, f"[{progress:03d}%] {message}")
@@ -325,7 +357,7 @@ class JobRunner:
                             )
                             self.validate_package(
                                 csv_package, prefix, analysis_path=analysis_path,
-                                job_id=job_id,
+                                job_id=job_id, log_to=job_dir,
                             )
                             self.ensure_xlsx(csv_package, package / "xlsx", job_id=job_id)
                             self.ensure_final_report(job_id, job_dir, package, prefix)
@@ -336,14 +368,16 @@ class JobRunner:
                             self.package_trace(package),
                             metadata_root=package / "metadata",
                         )
-                        self.validate_package(csv_package, prefix, job_id=job_id)
+                        self.validate_package(
+                            csv_package, prefix, job_id=job_id, log_to=job_dir,
+                        )
                         self.convert(
                             csv_package, package / "analysis.json", prefix, request,
                             job_id=job_id,
                         )
                         self.validate_package(
                             csv_package, prefix, analysis_path=package / "analysis.json",
-                            job_id=job_id,
+                            job_id=job_id, log_to=job_dir,
                         )
                         self.ensure_xlsx(csv_package, package / "xlsx", job_id=job_id)
                         self.ensure_final_report(job_id, job_dir, package, prefix)
@@ -385,26 +419,36 @@ class JobRunner:
                     return
                 self.state(job_id, job_dir, "converting", 88, "正在构建前端 analysis.json")
                 package = self.find_package(job_dir, request.prefix)
+                # The agent sometimes names its tables after the model it found in the
+                # trace rather than the requested prefix. That is not a failure, so
+                # follow the tables that exist instead of failing on their names.
+                prefix = self.detect_prefix(package, request.prefix)
+                if prefix != request.prefix:
+                    self.log(
+                        job_dir,
+                        f"[prefix] Agent 实际使用的表名前缀为 {prefix}"
+                        f"（请求为 {request.prefix}），后续按实际前缀继续",
+                    )
                 self.ensure_forward_pipeline(
-                    job_id, job_dir, package, request.prefix, sqlite_path,
+                    job_id, job_dir, package, prefix, sqlite_path,
                 )
-                self.validate_package(package, request.prefix, job_id=job_id)
+                self.validate_package(package, prefix, job_id=job_id, log_to=job_dir)
                 self.convert(
-                    package, job_dir / "analysis.json", request.prefix, request,
+                    package, job_dir / "analysis.json", prefix, request,
                     job_id=job_id,
                 )
                 self.validate_package(
-                    package, request.prefix, analysis_path=job_dir / "analysis.json",
-                    job_id=job_id,
+                    package, prefix, analysis_path=job_dir / "analysis.json",
+                    job_id=job_id, log_to=job_dir,
                 )
                 trace_path = self.organize_result_package(
-                    job_dir, package, request.prefix, sqlite_path, job_id=job_id,
+                    job_dir, package, prefix, sqlite_path, job_id=job_id,
                 )
                 context["sqlite_path"] = str(trace_path)
                 (metadata_dir / "context.json").write_text(
                     json.dumps(context, ensure_ascii=False, indent=2) + "\n",
                 )
-                self.ensure_final_report(job_id, job_dir, job_dir, request.prefix)
+                self.ensure_final_report(job_id, job_dir, job_dir, prefix)
 
             if self.is_cancelled(job_id):
                 return
@@ -418,11 +462,14 @@ class JobRunner:
             if self.is_cancelled(job_id):
                 self.log(job_dir, "[cancelled] Agent 进程已终止")
             else:
-                self.log(job_dir, traceback.format_exc())
+                # Record the terminal status first: logging touches the disk, and a
+                # full disk is exactly the kind of failure that lands here, so a
+                # raise from log() must not leave the job stuck in "analyzing".
                 self.store.update(
                     job_id, status="failed", progress=100,
                     message="分析失败", error=str(exc),
                 )
+                self.log_quietly(job_dir, traceback.format_exc())
         finally:
             staged_skill = job_dir / ".comate"
             if staged_skill.exists():
@@ -439,6 +486,13 @@ class JobRunner:
             package = self.find_package(job_dir, request.prefix)
             prefix = self.detect_prefix(package, request.prefix)
             self.convert(package, job_dir / "analysis.json", prefix, request, job_id=job_id)
+            # The main path validates the converted package here; the retry used to
+            # skip it, so a retry could publish an analysis.json the first run would
+            # have rejected.
+            self.validate_package(
+                package, prefix, analysis_path=job_dir / "analysis.json",
+                job_id=job_id, log_to=job_dir,
+            )
             if request.mode == "existing_package" or package == job_dir / "csv":
                 self.ensure_xlsx(package, job_dir / "xlsx", job_id=job_id)
             else:
@@ -472,11 +526,11 @@ class JobRunner:
             if self.is_cancelled(job_id):
                 self.log(job_dir, "[cancelled] 转换重试已终止")
             else:
-                self.log(job_dir, traceback.format_exc())
                 self.store.update(
                     job_id, status="failed", progress=100,
                     message="转换重试失败", error=str(exc),
                 )
+                self.log_quietly(job_dir, traceback.format_exc())
 
     # Inputs whose only job is to make the analysis faster, not to feed it
     # evidence. A typo in one of these must not cost the caller a whole run, so
@@ -562,6 +616,18 @@ class JobRunner:
         except Exception as exc:
             self.log(job_dir, f"[nsys] 获取 Nsight Systems CLI 失败，仍用本机 nsys：{exc}")
             return self.settings.nsys_bin
+        # Unpacking says nothing about whether the binary runs here: a wrong
+        # architecture, or a missing shared library, only shows up on execution. Ask
+        # it for its version, and fall back to the local nsys if it cannot answer --
+        # otherwise the export fails with an exec error instead of the honest
+        # "your nsys is too old".
+        if self.nsys_version(str(fetched)) is None:
+            self.log(
+                job_dir,
+                f"[nsys] 获取到的 {fetched} 无法在本机执行"
+                f"（架构 {platform.machine()}），仍用本机 nsys",
+            )
+            return self.settings.nsys_bin
         self.log(job_dir, f"[nsys] 使用 {fetched}")
         return str(fetched)
 
@@ -628,11 +694,12 @@ class JobRunner:
                 url, archive, log_to=job_dir,
                 on_progress=self.nsys_progress_reporter(job_id, job_dir, label),
             )
-            self.state(
-                job_id, job_dir, "exporting", 16,
-                f"正在解包 Nsight Systems {label} CLI"
-                f"（{archive.stat().st_size // 1048576}MB）",
-            )
+            if not self.is_cancelled(job_id):
+                self.state(
+                    job_id, job_dir, "exporting", 16,
+                    f"正在解包 Nsight Systems {label} CLI"
+                    f"（{archive.stat().st_size // 1048576}MB）",
+                )
             # dpkg-deb keeps this to one call; ar + tar is the fallback for hosts
             # without dpkg (the package is a plain ar archive either way).
             if shutil.which("dpkg-deb"):
@@ -657,6 +724,11 @@ class JobRunner:
         the job log keeps one line per chunk as the durable record.
         """
         def report(written: int, total: int | None, rate: float) -> None:
+            # A fetch runs for minutes; a cancel that lands mid-download must not be
+            # overwritten by the next progress tick, which would put the job back into
+            # "exporting" and make the UI look stuck instead of cancelled.
+            if self.is_cancelled(job_id):
+                return
             done = written / 1048576
             speed = rate / 1048576
             if total:
@@ -1102,7 +1174,7 @@ class JobRunner:
         selected_model = request.agent_model or self.settings.comate_model
         if selected_model:
             command.extend(["--model", selected_model])
-        self.run_process(
+        output = self.run_process(
             job_id, job_dir, command, redacted_values={prompt},
             environment=self.comate_environment(),
             output_formatter=self.format_comate_output,
@@ -1113,10 +1185,14 @@ class JobRunner:
         )
         # zulu can crash at parse time and still exit 0 (see node_runtime_problem),
         # so a zero return code is not evidence that the agent ran. Fail here with
-        # the real cause instead of later, on the missing tables.
-        problem = self.node_runtime_problem(self.log_tail(job_dir))
-        if problem:
-            raise RuntimeError(problem)
+        # the real cause instead of later, on the missing tables. Matched against the
+        # CLI's own output rather than the job log, and only when nothing was
+        # produced: an agent that wrote its tables plainly did not fail to start, and
+        # its transcript can quote any string it likes.
+        if not self.agent_outputs_complete(job_dir):
+            problem = self.node_runtime_problem(output)
+            if problem:
+                raise RuntimeError(problem)
 
     def stage_comate_skill(self, job_dir: Path) -> Path:
         source = self.settings.skill_dir
@@ -1281,20 +1357,28 @@ Requirements:
 
     @staticmethod
     def agent_outputs_complete(job_dir: Path) -> bool:
-        """Whether the agent's six tables already exist somewhere under the job dir.
+        """Whether the agent's six mandatory tables already exist somewhere below.
 
-        Same contract as `find_package`, which runs after the process exits; asking
-        the question during the wait is what lets a finished-but-parked CLI be cut
-        short instead of held to its own timeout. Any prefix counts: the package
-        directory and its prefix are only resolved later.
+        Asking the question during the wait is what lets a finished-but-parked CLI be
+        cut short instead of held to its own timeout. Any prefix counts, and the
+        directory may be any depth: unlike `find_package`, which pins the requested
+        prefix once the process has exited, this only needs to know that the work is
+        done. Filesystem errors mean "cannot tell", i.e. keep waiting.
         """
-        for marker in job_dir.rglob("*_stage_table.csv"):
+        try:
+            markers = list(job_dir.rglob("*_stage_table.csv"))
+        except OSError:
+            return False
+        for marker in markers:
             prefix = marker.name.removesuffix("_stage_table.csv")
-            if all(
-                (marker.parent / f"{prefix}{suffix}").exists()
-                for suffix in AGENT_CSV_SUFFIXES
-            ):
-                return True
+            try:
+                if all(
+                    (marker.parent / f"{prefix}{suffix}").exists()
+                    for suffix in AGENT_CSV_SUFFIXES
+                ):
+                    return True
+            except OSError:
+                continue
         return False
 
     @staticmethod
@@ -1422,7 +1506,14 @@ Requirements:
         heartbeat_message: str = "Agent 仍在运行",
         stall_timeout_seconds: int = 0,
         session_store: Path | None = None,
-    ) -> None:
+    ) -> str:
+        """Run a child process, streaming its output into the job log.
+
+        Returns the tail of the child's own raw stdout+stderr. Callers that need to
+        diagnose *how* a process failed must use that instead of the job log: the
+        log also holds the command line and every other step's output, so matching
+        crash signatures against it produces false positives.
+        """
         hidden = redacted_values or set()
         displayed = ["<prompt>" if item in hidden else item for item in command]
         self.log(job_dir, f"$ {shlex.join(displayed)}")
@@ -1444,10 +1535,13 @@ Requirements:
         # complete. The process is killed to get there, so its exit code must not be
         # reported as a failure.
         finished_early = threading.Event()
+        # Raw child output, kept for callers that must recognise a crash signature.
+        # Bounded because an agent turn can emit megabytes in a single line.
+        captured: list[str] = []
         last_output = [elapsed_seconds()]
         heartbeat_thread: threading.Thread | None = None
         if heartbeat_seconds > 0:
-            def emit_heartbeat() -> None:
+            def heartbeat_loop() -> None:
                 seen, artifact = self.newest_artifact(job_dir)
                 cpu = self.process_group_cpu_seconds(process.pid)
                 cpu_threshold = max(
@@ -1524,7 +1618,9 @@ Requirements:
                     if (
                         stall_timeout_seconds
                         and session_idle is not None
-                        and session_idle > min(300, stall_timeout_seconds)
+                        and session_idle > min(
+                            EARLY_FINISH_IDLE_SECONDS, stall_timeout_seconds,
+                        )
                         and self.agent_outputs_complete(job_dir)
                     ):
                         self.log(
@@ -1547,6 +1643,21 @@ Requirements:
                         self._kill_process_group(process)
                         return
 
+            def emit_heartbeat() -> None:
+                # The loop reads /proc, the job dir and the agent's session store,
+                # all of which can raise at any moment. An unhandled raise here would
+                # kill the daemon thread silently and disable stall detection for the
+                # rest of the run -- the exact failure this thread exists to catch --
+                # so report it and let the process fall back to its own timeout.
+                try:
+                    heartbeat_loop()
+                except Exception:
+                    self.log_quietly(
+                        job_dir,
+                        "[heartbeat] 心跳线程异常退出，本次运行不再做停滞判定：\n"
+                        + traceback.format_exc(),
+                    )
+
             heartbeat_thread = threading.Thread(
                 target=emit_heartbeat,
                 name=f"nsysscope-heartbeat-{job_id}",
@@ -1560,6 +1671,9 @@ Requirements:
                 process.stdin.close()
             for line in process.stdout:
                 last_output[0] = elapsed_seconds()
+                captured.append(line)
+                if len(captured) > RAW_OUTPUT_TAIL_LINES:
+                    del captured[:-RAW_OUTPUT_TAIL_LINES]
                 if line.strip():
                     rendered = output_formatter(line) if output_formatter else line
                     if rendered:
@@ -1569,8 +1683,12 @@ Requirements:
                 raise RuntimeError(
                     f"agent 停滞超过 {stall_timeout_seconds // 60} 分钟，已终止：{command[0]}"
                 )
-            if code and not finished_early.is_set():
+            # A process we killed ourselves reports its signal as a negative code;
+            # that one is expected. Any other nonzero code is a real failure even
+            # when the outputs looked complete, so it must still be raised.
+            if code and not (finished_early.is_set() and code < 0):
                 raise RuntimeError(f"process exited with code {code}: {command[0]}")
+            return "".join(captured)
         finally:
             heartbeat_stop.set()
             if heartbeat_thread is not None:
@@ -1806,6 +1924,10 @@ Requirements:
         0. Every downstream step therefore looks like "the agent ran and produced
         nothing", which surfaced as the misleading "did not produce the six agent
         tables". Name the real cause instead.
+
+        `output` must be the CLI's own stdout+stderr, not the job log: the log holds
+        the command line (whose path contains "zulu") and the agent's transcript, so
+        both signatures below would match text the agent merely echoed.
         """
         crashed = "Error: Not supported" in output or (
             "UnhandledPromiseRejectionWarning" in output and "zulu" in output
@@ -1823,7 +1945,8 @@ Requirements:
             version = "未找到 node"
         return (
             f"Comate Zulu CLI 启动即崩溃（Error: Not supported），当前 node 版本：{version}。"
-            "Zulu 需要 Node 18 及以上，请升级 node 或把新版 node 放到 PATH 前面后重试"
+            f"Zulu 需要 Node {MIN_NODE_MAJOR} 及以上，"
+            "请升级 node 或把新版 node 放到 PATH 前面后重试"
         )
 
     def build_forward_pipeline(
@@ -2201,6 +2324,14 @@ Requirements:
         for suffix in CSV_SUFFIXES:
             source = package_dir / f"{prefix}{suffix}"
             target = csv_dir / source.name
+            # The forward-pipeline table is optional: validate_package logs its
+            # absence and continues, so packaging must too instead of raising a
+            # FileNotFoundError that looks unrelated. Every other suffix is
+            # mandatory and has already been checked by then.
+            if not source.exists() and not target.exists():
+                if suffix == FORWARD_PIPELINE_SUFFIX:
+                    continue
+                raise FileNotFoundError(f"package is missing {source.name}")
             if not already_in_place:
                 shutil.move(str(source), target)
             csv_files.append(target.name)
@@ -2309,7 +2440,7 @@ Requirements:
 
     def validate_package(
         self, package: Path, prefix: str, *, analysis_path: Path | None = None,
-        job_id: str | None = None,
+        job_id: str | None = None, log_to: Path | None = None,
     ) -> None:
         validator = self.settings.skill_dir / "scripts" / "validate_analysis_package.py"
         if not validator.is_file():
@@ -2325,6 +2456,12 @@ Requirements:
         completed = self._run_tracked(job_id, command)
         if completed.returncode:
             raise RuntimeError(f"analysis package validation failed: {completed.stdout.strip()}")
+        # The validator reports non-fatal findings (naming stability, stage
+        # composition) on stdout and still exits 0. Dropping that output made those
+        # checks effectively dead, so keep them in the job log.
+        output = completed.stdout.strip()
+        if log_to is not None and output:
+            self.log(log_to, f"[validate] {output}")
 
     def publish_to_popo(
         self, job_id: str, job_dir: Path, username: str, token: str | None = None,
@@ -2442,12 +2579,32 @@ Requirements:
 
     @staticmethod
     def find_package(job_dir: Path, prefix: str) -> Path:
-        candidates = [job_dir, *[path.parent for path in job_dir.rglob(f"{prefix}_stage_table.csv")]]
-        for path in candidates:
+        """Directory holding the agent's six tables.
+
+        The requested prefix wins when it is there, but an agent occasionally names
+        its tables after the model it actually found in the trace. Accepting any
+        complete set means such a run reports a prefix mismatch the caller can
+        recover from (see detect_prefix) instead of "did not produce the six agent
+        tables", which reads like the agent failed and hides a finished analysis.
+        """
+        candidates = [job_dir, *[path.parent for path in job_dir.rglob("*_stage_table.csv")]]
+        fallback: Path | None = None
+        for path in dict.fromkeys(candidates):
             # The forward-pipeline table is generated from the trace afterwards, so only
             # the agent's own tables can identify the package directory.
             if all((path / f"{prefix}{suffix}").exists() for suffix in AGENT_CSV_SUFFIXES):
                 return path
+            if fallback is not None:
+                continue
+            for marker in sorted(path.glob("*_stage_table.csv")):
+                other = marker.name.removesuffix("_stage_table.csv")
+                if all(
+                    (path / f"{other}{suffix}").exists() for suffix in AGENT_CSV_SUFFIXES
+                ):
+                    fallback = path
+                    break
+        if fallback is not None:
+            return fallback
         raise RuntimeError("Agent run did not produce the six agent tables of the package")
 
     @staticmethod
