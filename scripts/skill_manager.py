@@ -65,6 +65,7 @@ def validate_skill(path: Path) -> list[str]:
         "scripts/build_analysis_json.py",
         "scripts/csv_to_xlsx.py",
         "scripts/finalize_package.py",
+        "scripts/validate_frontend_contract.py",
         "references/output-spec.md",
         "references/hardware-peaks.json",
     ):

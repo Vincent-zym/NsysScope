@@ -2349,63 +2349,27 @@ Requirements:
         csv_dir = package / "csv"
         return csv_dir if csv_dir.is_dir() else package
 
-    @staticmethod
-    def validate_analysis(path: Path) -> None:
-        payload = json.loads(path.read_text())
-        operators = payload.get("operators")
-        if payload.get("schemaVersion") != "1.0" or not isinstance(operators, list) or not operators:
-            raise RuntimeError("analysis.json schema or operators are invalid")
-        categories = {"core", "communication", "auxiliary"}
-        if any(operator.get("category") not in categories for operator in operators):
-            raise RuntimeError("analysis.json contains an invalid operator category")
-        summary = payload.get("summary") or {}
-        if summary.get("operatorCount") != len(operators):
-            raise RuntimeError("analysis.json operatorCount disagrees with operators")
-        if not summary.get("devices") or int(summary.get("stableSamples", 0)) < 1:
-            raise RuntimeError("analysis.json stable sample/device scope is missing")
-        if summary.get("heterogeneous"):
-            variants = set(summary.get("distinctUnitVariants") or [])
-            operator_variants = {
-                operator.get("unitVariant")
-                for operator in operators
-                if operator.get("unitVariant")
-            }
-            if len(variants) < 2 or operator_variants != variants:
-                raise RuntimeError("analysis.json loses heterogeneous unit variants")
-            if any(
-                operator.get("unitPosition") is None or not operator.get("unitId")
-                for operator in operators
-            ):
-                raise RuntimeError("heterogeneous analysis has unscoped operators")
-            if summary.get("durationLabel") in {"单层耗时", "平均单层耗时"}:
-                raise RuntimeError("heterogeneous cycle is mislabeled as single-layer duration")
-            stages = payload.get("stages") or []
-            stage_variants = {
-                stage.get("unitVariant")
-                for stage in stages
-                if stage.get("unitVariant")
-            }
-            pattern_rollup = bool(stages) and all(
-                stage.get("unitId") == "__pattern_total__"
-                and stage.get("unitPosition") is None
-                and not stage.get("unitVariant")
-                for stage in stages
+    def validate_analysis(self, path: Path) -> None:
+        """Last gate before a job is called succeeded: can the frontend render this?
+
+        Delegated to the Skill's `validate_frontend_contract.py`, which is also what
+        `validate_analysis_package.py --analysis-json` runs, so a Skill user can
+        check the same contract without the service.
+        """
+        script = (
+            self.settings.skill_dir / "scripts" / "validate_frontend_contract.py"
+        )
+        if not script.is_file():
+            raise RuntimeError(
+                f"analysis Skill is missing the contract checker: {script}"
             )
-            if (not pattern_rollup and (
-                stage_variants != variants or any(
-                    stage.get("unitPosition") is None or not stage.get("unitId")
-                    for stage in stages
-                )
-            )):
-                raise RuntimeError("heterogeneous stage view loses structural-unit identity")
-            units = payload.get("units") or []
-            if len(units) < 2 or {
-                unit.get("variant") for unit in units if unit.get("variant")
-            } != variants:
-                raise RuntimeError("heterogeneous analysis needs an explicit structural-unit index")
-            unit_positions = [unit.get("position") for unit in units]
-            if unit_positions != list(range(1, len(units) + 1)):
-                raise RuntimeError("structural-unit positions must be contiguous and ordered")
+        completed = subprocess.run(
+            [shutil.which("python3") or "python3", str(script), str(path)],
+            text=True, capture_output=True,
+        )
+        if completed.returncode:
+            detail = (completed.stderr or completed.stdout or "").strip()
+            raise RuntimeError(detail or f"analysis.json failed the frontend contract: {path}")
 
     def validate_package(
         self, package: Path, prefix: str, *, analysis_path: Path | None = None,

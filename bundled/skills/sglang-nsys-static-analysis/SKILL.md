@@ -415,6 +415,20 @@ Fail when:
 - a fused kernel is split without trace evidence;
 - runtime, shape, MFU or frontend parity is inconsistent.
 
+Passing `--analysis-json` also checks that the document is *shaped* the way the
+dashboard needs -- schema version, operator categories, `operatorCount`, device
+and sample scope, and, for a heterogeneous cycle, that every operator, stage and
+unit keeps its structural identity. Those checks are also a script of their own,
+which is worth running whenever `analysis.json` is regenerated:
+
+```bash
+python scripts/validate_frontend_contract.py /path/result/analysis.json
+```
+
+It exits non-zero and names every violation. The NsysScope service runs this exact
+script as its last gate before reporting success, so a package that passes here
+will not be rejected by the tool.
+
 ### 10. Write the analysis report
 
 Every task ends with `final_report.md` in the result directory -- the one

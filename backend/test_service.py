@@ -574,6 +574,9 @@ def test_frontend_payload_preserves_structural_unit_identity() -> None:
 
 
 def test_validate_analysis_rejects_collapsed_heterogeneous_cycle(tmp_path: Path) -> None:
+    configured = settings(tmp_path)
+    configured.prepare()
+    runner = JobRunner(configured, JobStore(configured.data_dir / "jobs.sqlite"))
     path = tmp_path / "analysis.json"
     path.write_text(json.dumps({
         "schemaVersion": "1.0",
@@ -594,7 +597,7 @@ def test_validate_analysis_rejects_collapsed_heterogeneous_cycle(tmp_path: Path)
     }))
 
     try:
-        JobRunner.validate_analysis(path)
+        runner.validate_analysis(path)
     except RuntimeError as exc:
         assert "loses heterogeneous unit variants" in str(exc)
     else:

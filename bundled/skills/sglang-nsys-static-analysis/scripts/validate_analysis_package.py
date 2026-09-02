@@ -8,9 +8,14 @@ import csv
 import json
 import math
 import re
+import sys
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from validate_frontend_contract import contract_errors  # noqa: E402
 
 
 SUFFIXES = (
@@ -992,6 +997,9 @@ def main() -> None:
     analysis = None
     if args.analysis_json and args.analysis_json.exists():
         analysis = json.loads(args.analysis_json.read_text())
+        # Shape first: the numeric cross-checks below assume a document the frontend
+        # can actually render.
+        errors.extend(contract_errors(analysis))
         front = {row["name"]: row for row in analysis.get("classifications", [])}
         for row in classes:
             current = front.get(row["算子类型"])
@@ -1027,6 +1035,9 @@ def main() -> None:
             }:
                 errors.append("heterogeneous cycle must not be presented as single-layer duration")
 
+    # The frontend-contract check and the taxonomy cross-check can reach the same
+    # conclusion from different evidence; report it once.
+    errors = list(dict.fromkeys(errors))
     report = {
         "schema_version": "1.1",
         "status": "failed" if errors else "passed",

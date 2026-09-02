@@ -166,6 +166,7 @@ class Settings:
             "scripts/build_analysis_json.py",
             "scripts/csv_to_xlsx.py",
             "scripts/finalize_package.py",
+            "scripts/validate_frontend_contract.py",
             "references/hardware-peaks.json",
         )
         missing = [
