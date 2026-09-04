@@ -7,11 +7,6 @@
 
 # 1. 结论
 
-1. **MoE Experts 计算是绝对热点**，占一个结构单元（4 层）的 47.2%（34.46 ms / 72.93 ms）。其中 4 个路由专家 GEMM 各 2.70 ms、MFU 仅 36.8%，是整个模型耗时上限的决定项。
-2. **小算子占比过高**：辅助算子 227 个、31.03 ms，占单元 42.6%，与核心计算（47.1%）几乎相当。单是 `elementwise_kernel` 一族就有 26 次启动、合计 10.89 ms，占单元 14.9% —— 算子融合空间很大。
-3. **DSA 层比 KDA 层贵 61%**：24.33 ms/层 vs 15.08 ms/层。差距全部来自 DSA 独有的两块：核心稀疏注意力 7.06 ms 与 Indexer 稀疏索引 3.97 ms。好在 DSA 只占 11/45 层。
-4. **步间间隙 12.64 ms（1.56%）几乎全在步的头部**——锚点到第一层之间的调度/输入准备区间（该区间忙碌 2.80 ms，其余为空洞），层间与尾部几乎无空隙。
-
 #### 潜在优化点
 
 1. **辅助小算子融合（收益最大）**：优先 `elementwise_kernel`（26 次 / 10.89 ms）、`mhc_post_tilelang_kernel`（8 次 / 2.86 ms）、`per_token_group_quant_flat_kernel`（19 次 / 1.60 ms）。mHC 超连接整块 6.36 ms 里前置 GEMM 的 MFU 只有 11.4%，属于典型的访存/启动开销主导，适合与相邻 norm、量化算子合并。
@@ -20,7 +15,7 @@
 4. **步头部气泡**：>50 µs 空洞均值 10.5 ms/步（最高 14.3 ms），集中在 batch 分配、KV 记账、position / attention metadata 之间的 host 等待，可考虑对该段做 CUDA graph 捕获或把 host 侧准备提前来压缩。
 
 <h1 style="margin:0">2. 链路与算子耗时分析</h1>
-<p style="margin:0"><b>结论</b>：耗时集中在 MoE Experts 计算（单元占比 47.2%），且辅助小算子占到 42.6%（227 个算子、31.03 ms），与核心计算量级相当——算子融合的空间明显大于单个 kernel 调优的空间。DSA 层的稀疏注意力 + Indexer（合计 11.03 ms）是层间差异的唯一来源。</p>
+<p style="margin:0"><b>结论</b>：</p>
 <p style="margin:0">&nbsp;</p>
 <p style="margin:0">以下是具体分析过程：</p>
 <p style="margin:0"><b>分析思路</b>：glm5_next 的注意力层按 DSA : KDA = 1 : 3 交替（<code>layer_types</code> 中每 4 层出现一次 <code>deepseek_sparse_attention</code>），因此以 <b>4 层为一个分析单元</b>（1 × DSA-MoE + 3 × KDA-MoE），单元耗时 72.93 ms。forward 链路层面则按 45 层整体统计。</p>

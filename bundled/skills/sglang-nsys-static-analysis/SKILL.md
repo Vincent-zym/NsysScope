@@ -449,10 +449,16 @@ Replace every marker and keep the generated numbers -- if a number looks wrong,
 fix the table it came from, not the report.
 
 Write for a reader who will not open the CSVs: state facts with numbers, order
-conclusions by impact, and only claim a cause the package's data supports. See
-references/final-report-format.md for the section layout and the paste-fidelity
-rules the HTML tables depend on, and references/final_report.example.md for a
-complete filled-in report (glm5_next prefill) to match.
+conclusions by impact, and only claim a cause the package's data supports. Say
+each thing once -- a number in a conclusion does not need restating in a table
+note under a different heading, and a section with nothing number-backed to add
+is left blank rather than padded with a placeholder sentence. See
+references/final-report-format.md for the section layout, the paste-fidelity
+rules the HTML tables depend on, and the restraint this implies, and
+references/final_report.example.md for a complete filled-in report (glm5_next
+prefill) to match -- note that its section 1 and section-2 结论 line are
+deliberately blank, which is part of the shape to match, not an unfinished
+example.
 
 ### 11. Finalize the package layout
 

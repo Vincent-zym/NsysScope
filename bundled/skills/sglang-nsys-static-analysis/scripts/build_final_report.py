@@ -243,7 +243,6 @@ def build(package: Path, prefix: str) -> str:
         "",
         "# 1. 结论",
         "",
-        "<!-- TODO 3~5 条结论，每条一句话给出事实 + 数字 + 影响，按重要性排序 -->",
         "",
         "#### 潜在优化点",
         "",
@@ -253,7 +252,7 @@ def build(package: Path, prefix: str) -> str:
     ]
 
     body = ['<h1 style="margin:0">2. 链路与算子耗时分析</h1>']
-    body.append('<p style="margin:0"><b>结论</b>：<!-- TODO 本节一句话结论 --></p>')
+    body.append('<p style="margin:0"><b>结论</b>：</p>')
     body.append(SPACER)
     body.append('<p style="margin:0">以下是具体分析过程：</p>')
     body.append('<p style="margin:0"><b>分析思路</b>：<!-- TODO 重复单元的选取依据与单元耗时 --></p>')

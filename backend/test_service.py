@@ -177,6 +177,99 @@ def test_existing_package_job(tmp_path: Path) -> None:
     assert payload["summary"]["stableSamples"] >= 1
 
 
+def test_importing_a_canonical_skill_only_package_succeeds(tmp_path: Path) -> None:
+    # The Skill is meant to be usable standalone, with the result imported afterwards
+    # -- so a directory that finalize_package.py already laid out (csv/, xlsx/,
+    # metadata/, trace/, analysis.json, final_report.md, nsysscope-package.json, and
+    # crucially NO logs/ or metadata/context.json, since those are job-only) must be
+    # accepted by "existing_package" mode exactly as a job-produced one is.
+    require_package()
+    package = package_copy(tmp_path)  # already has csv/, xlsx/, metadata/, analysis.json
+    # package_copy does not carry final_report.md (most callers don't need it);
+    # this test is specifically about not overwriting one that exists.
+    shutil.copy2(PACKAGE / "final_report.md", package / "final_report.md")
+    completed = subprocess.run(
+        [
+            sys.executable, str(SKILL / "scripts" / "finalize_package.py"),
+            str(package), "--prefix", package_prefix(),
+        ],
+        capture_output=True, text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert not (package / "logs").exists()
+    # The fixture package is job-produced and keeps its context.json; a genuinely
+    # skill-only run would not have one. What matters here is that
+    # finalize_package.py does not invent a "log" manifest entry for a log that
+    # does not exist in this copy.
+    manifest = json.loads((package / "nsysscope-package.json").read_text())
+    assert "log" not in manifest
+
+    client = TestClient(create_app(settings(tmp_path)))
+    headers = {"X-NsysScope-Token": "test-token"}
+    response = client.post("/api/jobs", headers=headers, json={
+        "mode": "existing_package",
+        "model_name": "GLM5.2",
+        "stage": "prefill",
+        "hardware": "Nvidia B200",
+        "existing_package_path": str(package),
+        "prefix": package_prefix(),
+    })
+    assert response.status_code == 200, response.text
+    job = response.json()
+    for _ in range(100):
+        job = client.get(f"/api/jobs/{job['id']}", headers=headers).json()
+        if job["status"] in {"succeeded", "failed"}:
+            break
+        time.sleep(0.05)
+    assert job["status"] == "succeeded", job
+    analysis = client.get(job["analysis_url"], headers=headers)
+    assert analysis.status_code == 200
+    assert analysis.json()["schemaVersion"] == "1.0"
+    # ensure_final_report never overwrites an existing report -- confirm the import
+    # kept the fixture's own file rather than regenerating a fresh skeleton over it.
+    assert (package / "final_report.md").read_text() == (
+        PACKAGE / "final_report.md"
+    ).read_text()
+
+
+def test_an_unresolvable_prefix_fails_the_job_instead_of_silently_succeeding(
+    tmp_path: Path,
+) -> None:
+    # An existing_package import whose csv/ holds no table set matching any prefix
+    # used to be swallowed: detect_prefix's RuntimeError was caught, the whole
+    # repackaging/validation block was skipped, and the job reported "succeeded"
+    # having done nothing to the pre-existing analysis.json.
+    package = tmp_path / "unresolvable"
+    csv_dir = package / "csv"
+    csv_dir.mkdir(parents=True)
+    for suffix in AGENT_CSV_SUFFIXES:
+        (csv_dir / f"model_a{suffix}").write_text("a,b\n1,2\n", encoding="utf-8")
+        (csv_dir / f"model_b{suffix}").write_text("a,b\n1,2\n", encoding="utf-8")
+    (package / "analysis.json").write_text(
+        json.dumps({"schemaVersion": "1.0", "operators": []}) + "\n", encoding="utf-8",
+    )
+
+    client = TestClient(create_app(settings(tmp_path)))
+    headers = {"X-NsysScope-Token": "test-token"}
+    response = client.post("/api/jobs", headers=headers, json={
+        "mode": "existing_package",
+        "model_name": "GLM5.2",
+        "stage": "prefill",
+        "hardware": "Nvidia B200",
+        "existing_package_path": str(package),
+        "prefix": "requested",
+    })
+    assert response.status_code == 200, response.text
+    job = response.json()
+    for _ in range(100):
+        job = client.get(f"/api/jobs/{job['id']}", headers=headers).json()
+        if job["status"] in {"succeeded", "failed"}:
+            break
+        time.sleep(0.05)
+    assert job["status"] == "failed", job
+    assert "cannot resolve table prefix" in (job.get("error") or "")
+
+
 def test_auth_and_path_boundary(tmp_path: Path) -> None:
     client = TestClient(create_app(settings(tmp_path)))
     dashboard = client.get("/")
@@ -323,6 +416,68 @@ def test_zip_six_table_import_writes_only_to_selected_result(tmp_path: Path) -> 
     assert (result_path / "analysis.json").exists()
     assert (result_path / "nsysscope-package.json").exists()
     assert not list(tmp_path.glob("import-*"))
+
+
+def test_zip_import_of_a_canonical_skill_package_keeps_its_report(
+    tmp_path: Path,
+) -> None:
+    # Zip up exactly what finalize_package.py produces (csv/, xlsx/, metadata/,
+    # trace/, analysis.json, final_report.md, nsysscope-package.json, no logs/) and
+    # confirm import_zip_package carries the report through instead of silently
+    # dropping it -- the ZIP path never globs for *.md, so this only works if the
+    # report is explicitly picked up.
+    require_package()
+    source_dir = flat_analysis_dir(tmp_path / "source", prefix=package_prefix())
+    for table in package_tables():
+        shutil.copy2(table, source_dir / table.name)
+    (source_dir / "final_report.md").write_text(
+        "# a real report, not a skeleton\n", encoding="utf-8",
+    )
+    subprocess.run(
+        [
+            sys.executable, str(SKILL / "scripts" / "finalize_package.py"),
+            str(source_dir), "--prefix", package_prefix(), "--no-xlsx",
+        ],
+        check=True, capture_output=True, text=True,
+    )
+    assert not (source_dir / "logs").exists()
+
+    archive_path = tmp_path / "skill-package.zip"
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        for path in source_dir.rglob("*"):
+            if path.is_file():
+                archive.write(path, f"result/{path.relative_to(source_dir).as_posix()}")
+
+    result_path = tmp_path / "imported-result"
+    client = TestClient(create_app(settings(tmp_path)))
+    headers = {"X-NsysScope-Token": "test-token"}
+    response = client.post("/api/jobs", headers=headers, json={
+        "mode": "existing_package",
+        "model_name": "GLM5.2",
+        "stage": "prefill",
+        "hardware": "Nvidia B200",
+        "existing_package_path": str(archive_path),
+        "result_path": str(result_path),
+        "prefix": package_prefix(),
+    })
+    assert response.status_code == 200, response.text
+    job = response.json()
+    for _ in range(100):
+        job = client.get(f"/api/jobs/{job['id']}", headers=headers).json()
+        if job["status"] in {"succeeded", "failed"}:
+            break
+        time.sleep(0.05)
+    assert job["status"] == "succeeded", job
+    assert (result_path / "final_report.md").read_text() == (
+        "# a real report, not a skeleton\n"
+    )
+    manifest = json.loads((result_path / "nsysscope-package.json").read_text())
+    # The job itself writes to logs/job.log before extraction (the "converting"
+    # state transition), so the manifest legitimately gets a "log" key here --
+    # unlike finalize_package.py run by hand, which never has one to point at.
+    # What matters is that the key, when present, points at a real file.
+    if "log" in manifest:
+        assert (result_path / manifest["log"]).is_file()
 
 
 def test_converter_accepts_current_stats_schema() -> None:

@@ -345,9 +345,22 @@ class JobRunner:
                     csv_package = self.csv_package_dir(package)
                     analysis_path = package / "analysis.json"
                     if analysis_path.exists():
+                        # A Skill-only package's csv/ prefix is trusted, not the
+                        # request's: an agent may have named tables after the model
+                        # it actually found. But a directory that ships only
+                        # analysis.json and no tables at all is a legitimate,
+                        # narrower case -- an already-complete analysis handed over
+                        # for display, nothing left to repackage -- and must still
+                        # succeed on the existing document. Only a package that has
+                        # *some* tables but none of them resolve to a complete set
+                        # is the real failure: that used to be swallowed here, and
+                        # the job would report success having skipped every
+                        # remaining step, including the 95% frontend-contract check.
                         try:
                             prefix = self.detect_prefix(csv_package, request.prefix)
                         except RuntimeError:
+                            if any(csv_package.glob("*_stage_table.csv")):
+                                raise
                             prefix = None
                         if prefix:
                             self.ensure_forward_pipeline(
@@ -2273,6 +2286,14 @@ Requirements:
                     job_id=job_id,
                 )
             self.ensure_xlsx(csv_dir, xlsx_dir, job_id=job_id)
+            # A Skill-only package ships its own final_report.md next to
+            # analysis.json rather than under metadata/ -- the same place
+            # ensure_final_report looks for one, so a skeleton is never generated
+            # over a report that already exists.
+            source_report = source / "final_report.md"
+            if source_report.is_file():
+                shutil.copy2(source_report, result_dir / "final_report.md")
+            log_path = result_dir / "logs" / "job.log"
             package_manifest = {
                 "schemaVersion": "1.0",
                 "kind": "nsysscope-analysis-package",
@@ -2280,12 +2301,16 @@ Requirements:
                 "csvDirectory": "csv",
                 "xlsxDirectory": "xlsx",
                 "trace": f"trace/{traces[0].name}" if traces else None,
-                "log": "logs/job.log",
                 "metadataDirectory": "metadata",
                 "prefix": prefix,
                 "tables": [f"{prefix}{suffix}" for suffix in CSV_SUFFIXES],
                 "importedFrom": str(archive_path),
             }
+            # A ZIP built from a Skill-only run has no job log to point at; naming
+            # one that does not exist is worse than omitting the key, the same
+            # convention finalize_package.py's manifest follows.
+            if log_path.is_file():
+                package_manifest["log"] = "logs/job.log"
             (result_dir / "nsysscope-package.json").write_text(
                 json.dumps(package_manifest, ensure_ascii=False, indent=2) + "\n",
             )

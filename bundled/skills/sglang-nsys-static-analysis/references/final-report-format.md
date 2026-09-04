@@ -10,14 +10,17 @@ prose without breaking the paste.
 glm5_next prefill analysis, reviewed and accepted by the requester). Read it as
 the reference for depth and tone: how long a conclusion is, what a 潜在优化点 item
 looks like, and how much explanation belongs next to a table. When in doubt, match
-it rather than inventing a new shape.
+it rather than inventing a new shape -- match its restraint too, not just its
+structure: sections 1 and the section-2 结论 line are left blank in the example on
+purpose (see "Say each thing once" below), and that is the template, not a gap to
+fill by default.
 
 ## Section layout
 
 ```text
 # <model> <stage> 性能分析报告        结果包 / 硬件+rank / 阶段+trace / 模型结构
 # 1. 结论                            3~5 conclusions, then #### 潜在优化点
-2. 链路与算子耗时分析                 本节结论 -> 空行 -> 以下是具体分析过程 -> 分析思路
+2. 链路与算子耗时分析                 结论: -> 空行 -> 以下是具体分析过程 -> 分析思路
   2.1 forward 链路耗时               Token 链路耗时 + Target 内部构成
   2.2 算子耗时分析                   按功能模块划分（按执行顺序）+ 按算子类型划分
 # 3. 算子分析工具数据                 popo 发布链接
@@ -37,6 +40,16 @@ headings, for the margin reason below. Sections 1, 3 and 4 stay markdown.
   invariants. That belongs in references/output-spec.md, not in a report a
   performance engineer reads to decide what to optimise.
 - Do not attribute a gap or a low MFU to a cause the tables do not evidence.
+- Say each thing once. A number stated in a conclusion does not need restating in
+  the section-2 结论 line, a table caption or a note underneath the table --
+  pick the one place a reader looking for that number would check first. An
+  agent writing without this constraint defaults to repeating itself under a
+  different heading, which reads as padding, not thoroughness.
+- If a conclusion, a 潜在优化点 item or a note has no number-backed content to add,
+  leave it blank rather than restating the section title or writing a
+  placeholder sentence. `final_report.example.md` ships with section 1 and the
+  section-2 结论 line intentionally empty for exactly this reason -- an empty
+  line is honest about "not analysed yet"; a padded one is not.
 
 ## Paste-fidelity rules (learned the hard way)
 
