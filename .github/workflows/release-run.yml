@@ -39,6 +39,9 @@ jobs:
       - name: Build the portable .run
         run: python3 scripts/build_portable.py
 
+      - name: Package the Skill on its own
+        run: python3 scripts/build_skill_zip.py
+
       - name: Read the version tag
         id: version
         run: |
@@ -60,7 +63,12 @@ jobs:
           name: "nsysscope ${{ steps.version.outputs.version }} (latest)"
           body: |
             Automatically built from `${{ github.sha }}` on every push to `main`.
-            Stable download link (always the newest build):
-            `https://github.com/${{ github.repository }}/releases/latest/download/nsysscope-linux-x86_64.run`
-          files: release/nsysscope-linux-x86_64.run
+
+            Stable download links (always the newest build that passed CI):
+
+            - Full tool: `https://github.com/${{ github.repository }}/releases/latest/download/nsysscope-linux-x86_64.run`
+            - Analysis Skill only: `https://github.com/${{ github.repository }}/releases/latest/download/sglang-nsys-static-analysis.zip`
+          files: |
+            release/nsysscope-linux-x86_64.run
+            release/sglang-nsys-static-analysis.zip
           make_latest: true

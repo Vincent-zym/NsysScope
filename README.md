@@ -44,14 +44,28 @@ python3 scripts/build_portable.py
 **固定下载链接（自动更新到最新构建）**：
 
 ```text
+# 完整工具
 https://github.com/Vincent-zym/NsysScope/releases/latest/download/nsysscope-linux-x86_64.run
+
+# 只要分析 skill（单独使用，不需要本工具）
+https://github.com/Vincent-zym/NsysScope/releases/latest/download/sglang-nsys-static-analysis.zip
 ```
 
 `.github/workflows/release-run.yml` 在每次 push 到 `main` 时跑 backend 测试、
-skill evals、`skill_manager validate`，全部通过后才构建 `.run`、把 `latest`
-tag 强制指向本次提交并更新 GitHub Release 里的这份文件——所以这个链接本身
+skill evals、`skill_manager validate`，全部通过后才构建这两个产物、把 `latest`
+tag 强制指向本次提交并替换 GitHub Release 里的对应文件——所以这两个链接本身
 永远不用改，之后每次拿到的都是当时 `main` 上最新的、通过全部校验的构建。
-CI 任一步失败都不会更新这个链接，上一份能用的构建会继续留在原地。
+CI 任一步失败都不会更新链接，上一份能用的构建会继续留在原地。
+
+skill 的 zip 解开后是 `sglang-nsys-static-analysis/`，直接放进 Agent CLI 的
+skills 目录即可使用；本地重新打包：
+
+```bash
+python3 scripts/build_skill_zip.py
+```
+
+这个 zip 是可复现构建——条目排序固定、时间戳归零，同一个 commit 无论在本地还是
+CI 打包，产出的字节完全一致，方便核对拿到的是不是预期的那一版。
 
 **从源码启动**：
 

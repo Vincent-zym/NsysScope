@@ -2,6 +2,7 @@ node_modules/
 .next/
 dist/
 release/*.run
+release/*.zip
 .open-next/
 *.log
 .DS_Store
