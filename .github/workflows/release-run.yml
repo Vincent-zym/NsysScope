@@ -1,0 +1,63 @@
+name: Build and publish nsysscope .run
+
+# Keeps a single "latest" GitHub Release whose asset URL never changes:
+#   https://github.com/<owner>/<repo>/releases/latest/download/nsysscope-linux-x86_64.run
+# That is the link to hand out -- it always resolves to the newest push's build,
+# so nobody has to update a link when a new version ships.
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run backend tests
+        run: |
+          python3 -m pip install -r backend/requirements.txt
+          python3 -m pip install pytest
+          python3 -m pytest backend/test_service.py -q
+
+      - name: Run skill evals
+        run: python3 -m pytest bundled/skills/sglang-nsys-static-analysis/evals -q
+
+      - name: Validate the skill
+        run: python3 scripts/skill_manager.py validate bundled/skills/sglang-nsys-static-analysis
+
+      - name: Build the portable .run
+        run: python3 scripts/build_portable.py
+
+      - name: Read the version tag
+        id: version
+        run: |
+          version="$(python3 -c "import re; print(re.search(r'VERSION = \"([^\"]+)\"', open('scripts/build_portable.py').read()).group(1))")"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      # A moving "latest" tag: re-tagging main's current commit each push, so the
+      # release (and its stable asset URL) always points at the newest build
+      # instead of accumulating one release per push.
+      - name: Move the latest tag
+        run: |
+          git tag -f latest
+          git push -f origin latest
+
+      - name: Publish (or update) the latest release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: "nsysscope ${{ steps.version.outputs.version }} (latest)"
+          body: |
+            Automatically built from `${{ github.sha }}` on every push to `main`.
+            Stable download link (always the newest build):
+            `https://github.com/${{ github.repository }}/releases/latest/download/nsysscope-linux-x86_64.run`
+          files: release/nsysscope-linux-x86_64.run
+          make_latest: true

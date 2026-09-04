@@ -26,6 +26,18 @@ python3 scripts/build_portable.py
 生成的文件位于 `release/nsysscope-linux-x86_64.run`，只包含运行时后端、已构建
 的前端页面和兜底 skill，不含 Node.js、npm 依赖或任务数据。
 
+**固定下载链接（自动更新到最新构建）**：
+
+```text
+https://github.com/Vincent-zym/NsysScope/releases/latest/download/nsysscope-linux-x86_64.run
+```
+
+`.github/workflows/release-run.yml` 在每次 push 到 `main` 时跑测试、跑
+evals、构建 `.run`，然后把 `latest` tag 强制指向本次提交并更新 GitHub
+Release 里的这份文件——所以这个链接本身永远不用改，指给同事一次即可，之后
+每次拿到的都是当时 `main` 上最新的构建。CI 任一步失败（测试、evals、skill
+校验）都不会更新这个链接，上一份能用的构建会继续留在原地。
+
 **从源码启动**：
 
 ```bash
