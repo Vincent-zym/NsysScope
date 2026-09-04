@@ -24,7 +24,10 @@ jobs:
       - name: Run backend tests
         run: |
           python3 -m pip install -r backend/requirements.txt
-          python3 -m pip install pytest
+          # starlette.testclient (used by backend/test_service.py) needs httpx at
+          # runtime but does not declare it as a hard dependency, so a clean CI
+          # image needs it spelled out explicitly.
+          python3 -m pip install pytest httpx
           python3 -m pytest backend/test_service.py -q
 
       - name: Run skill evals
