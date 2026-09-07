@@ -2,18 +2,28 @@
 """Write the human-readable `final_report.md` for a finished analysis package.
 
 Every number in the report already exists in the package's tables, so the
-mechanical half is generated here instead of being retyped by hand: the four
-tables, their totals and percentages. The judgement half -- 结论, 潜在优化点,
-分析思路, the model-structure line -- is left as `<!-- TODO ... -->` markers for
-the agent to fill in.
+mechanical half is generated here instead of being retyped by hand: the input
+configuration facts already on disk, and the timing/operator tables with their
+totals and percentages. The judgement half -- 分析思路, engine config the manifest
+doesn't carry structurally, the model-structure line -- is left as
+`<!-- TODO ... -->` markers for the agent to fill in.
 
-The tables are emitted as inline-styled HTML rather than markdown pipe tables
-because the report is pasted into 如流知识库, whose editor keeps cell-level
-styling (borders, background, alignment) but drops table/column widths and
-`<caption>` entirely, and adds a blank line wherever the preceding block has a
-bottom margin. Hence: captions as a `<p style="margin:0">` right above the
-table, `margin:0` on every block, no blank line before a table, and no width
-declarations at all -- column widths come from the header wording.
+This is a pure timeline/operator-timing report: no 结论 section, no 潜在优化点, no
+prose interpretation anywhere. Every line is a fact with a number behind it or a
+`<!-- TODO -->` for a fact the manifest doesn't carry structurally.
+
+The whole document is inline-styled HTML, including every heading, because the
+report is pasted into 如流知识库, whose editor keeps cell-level styling (borders,
+background, alignment) but drops table/column widths and `<caption>` entirely,
+and adds a blank line wherever the preceding block (including a markdown `#`
+heading, which carries its own default margin the editor does not let this
+file override) has a bottom margin. Hence: every heading and paragraph is
+`<h1|h2|h3 style="margin:0">`/`<p style="margin:0">`, never markdown `#`; no
+blank line anywhere in the source between one block and the next; captions as
+a `<p style="margin:0">` right above their table; and no width declarations at
+all -- column widths come from the header wording, and every table (including
+the vertical fact tables in sections 1 and 4) is centred (`text-align:center`)
+so a column is never narrower than its own content.
 """
 from __future__ import annotations
 
@@ -33,6 +43,29 @@ LABEL_BG = "#d9e2f3"  # first column
 SPACER = '<p style="margin:0">&nbsp;</p>'
 
 
+def config_table(rows: list[tuple[str, str]]) -> str:
+    """A vertical fact table: one row per field, label column then value column.
+
+    Unlike `table()`, which lays entities out as columns for comparison, this is
+    for facts that only ever have one value each -- forcing them into `table()`'s
+    shape would need a table with one column and be unreadable. Centred and with
+    no width declaration, same as every other table in this report, so a column
+    is never narrower than its own content.
+    """
+    lines = [
+        '<table border="1" cellspacing="0" cellpadding="6" '
+        'style="border-collapse:collapse;border:1px solid #999;'
+        'text-align:center;margin:0">'
+    ]
+    for label, value in rows:
+        lines.append("<tr>")
+        lines.append(th(label, LABEL_BG))
+        lines.append(td(value))
+        lines.append("</tr>")
+    lines.append("</table>")
+    return "\n".join(lines)
+
+
 def th(text: str, background: str) -> str:
     return f'<th style="{CELL};background:{background}">{text}</th>'
 
@@ -41,18 +74,22 @@ def td(text: str) -> str:
     return f'<td style="{CELL}">{text}</td>'
 
 
-def table(title: str, header: list[str], rows: list[tuple[str, list[str]]], *,
+def table(title: str | None, header: list[str], rows: list[tuple[str, list[str]]], *,
           bold_title: bool = True, note: str | None = None) -> str:
-    """One report table: optional note line, bold title line, then the table.
+    """One report table: optional note line, optional bold title line, then the table.
 
     `header` is the full first row including its leading label cell; each entry in
-    `rows` is `(row label, cells)`.
+    `rows` is `(row label, cells)`. `title=None` omits the caption line entirely --
+    the report's brevity rule treats a table's own header row as sufficient context,
+    so 2.1/2.2.1/2.2.3's captions ("Token 链路耗时" / "Target 内部构成" /
+    "按算子类型划分") were dropped as redundant prose.
     """
     lines: list[str] = []
     if note:
         lines.append(f'<p style="margin:0">{note}</p>')
-    heading = f"<b>{title}</b>" if bold_title else title
-    lines.append(f'<p style="margin:0">{heading}</p>')
+    if title:
+        heading = f"<b>{title}</b>" if bold_title else title
+        lines.append(f'<p style="margin:0">{heading}</p>')
     lines.append(TABLE_OPEN)
     lines.append("<tr>")
     lines.extend(th(cell, HEAD_BG) for cell in header)
@@ -103,33 +140,48 @@ def pct(value: str | float, digits: int = 2) -> str:
         return "—"
 
 
-def forward_tables(rows: list[dict[str, str]]) -> list[str]:
-    """Tables 1 and 2: the forward step's split, then target's own children.
+def forward_tables(rows: list[dict[str, str]]) -> list[str | None]:
+    """Tables for 2.1/2.2.1/2.3.1: the forward step's split, target's own
+    children, then draft's own children when the capture has a draft phase.
 
     The pipeline table lists target's children between the target phase row and
-    the draft phase row (or the gap row), the same positional split the frontend
-    uses -- the rows carry no parent column.
+    the draft phase row, and draft's children (if any) between the draft phase
+    row and the gap row -- the same positional split the frontend uses, since
+    the rows carry no parent column.
+
+    Draft's children come from one of two upstream code paths and are not
+    always broken down the same way: a CUDA-graph capture can only place the
+    draft window's boundary, not segment inside it, so draft_rows there is a
+    single "draft N 层 forward" stage row plus an 其他 residual; an eager
+    capture with a detected MTP/NextN layer segments draft by variant exactly
+    like target. Either shape renders through the same table -- this function
+    does not need to know which one it got.
     """
     if not rows:
-        return []
+        return [None, None, None]
     kinds = [row.get("环节类型", "") for row in rows]
     total = next((row for row, kind in zip(rows, kinds) if kind == "total"), None)
     phases = [row for row, kind in zip(rows, kinds) if kind == "phase"]
     gap = next((row for row, kind in zip(rows, kinds) if kind == "gap"), None)
     if total is None or not phases:
-        return []
+        return [None, None, None]
     target, draft = phases[0], (phases[1] if len(phases) > 1 else None)
     draft_index = rows.index(draft) if draft is not None else len(rows)
-    children = [
+    gap_index = rows.index(gap) if gap is not None else len(rows)
+    target_children = [
         row for row in rows[rows.index(target) + 1:draft_index]
         if row.get("环节类型") in {"stage", "variant", "other"}
+    ]
+    draft_children = [
+        row for row in rows[draft_index + 1:gap_index]
+        if draft is not None and row.get("环节类型") in {"stage", "variant", "other"}
     ]
 
     step_us = float(total.get("总耗时(us)") or 0) or 1.0
     draft_time = ms(draft.get("总耗时(us)")) if draft else "—（未启用投机）"
     draft_pct = pct(draft.get("占forward步(%)")) if draft else "—"
     first = table(
-        "Token 链路耗时",
+        None,
         ["阶段", "Forward step", "Target 主模型", "Draft 模型", "Token间间隙"],
         [
             ("耗时(ms)", [
@@ -144,20 +196,24 @@ def forward_tables(rows: list[dict[str, str]]) -> list[str]:
         note=None,
     )
 
-    names, times, shares, per_layer = [], [], [], []
-    for row in children:
-        layers = (row.get("层数") or "").strip()
-        name = row.get("环节", "")
-        names.append(f"{name} × {layers}" if layers else name)
-        times.append(ms(row.get("总耗时(us)")))
-        shares.append(pct(row.get("占forward步(%)")))
-        per_layer.append(ms(row.get("单次耗时(us)")) if layers else "—")
-    second = table(
-        "Target 内部构成",
-        ["环节", *names],
-        [("耗时(ms)", times), ("占 forward step", shares), ("单层耗时(ms)", per_layer)],
-    )
-    return [first, second]
+    def children_table(children: list[dict[str, str]]) -> str:
+        names, times, shares, per_layer = [], [], [], []
+        for row in children:
+            layers = (row.get("层数") or "").strip()
+            name = row.get("环节", "")
+            names.append(f"{name} × {layers}" if layers else name)
+            times.append(ms(row.get("总耗时(us)")))
+            shares.append(pct(row.get("占forward步(%)")))
+            per_layer.append(ms(row.get("单次耗时(us)")) if layers else "—")
+        return table(
+            None,
+            ["环节", *names],
+            [("耗时(ms)", times), ("占 forward step", shares), ("单层耗时(ms)", per_layer)],
+        )
+
+    second = children_table(target_children)
+    third = children_table(draft_children) if draft_children else None
+    return [first, second, third]
 
 
 def module_table(stage_rows: list[dict[str, str]], operator_rows: list[dict[str, str]],
@@ -197,21 +253,205 @@ def module_table(stage_rows: list[dict[str, str]], operator_rows: list[dict[str,
 
 
 def category_table(rows: list[dict[str, str]]) -> str | None:
-    """Table 4: core / communication / auxiliary counts and time."""
+    """Table: core / communication / auxiliary counts and time."""
     data = [row for row in rows if (row.get("序号") or "").strip().isdigit()]
     if not data:
         return None
     names = [row.get("算子类型", "") for row in data]
     names = [("小算子（辅助算子）" if name == "辅助算子" else name) for name in names]
     return table(
-        "按算子类型划分",
+        None,
         ["算子类型", *names],
         [
             ("算子数量", [row.get("算子数量", "") for row in data]),
             ("耗时(ms)", [ms(row.get("总耗时(us)")) for row in data]),
             ("耗时百分比", [pct(row.get("耗时占比(%)")) for row in data]),
         ],
+        bold_title=False,
     )
+
+
+def abbreviate_kernel_name(name: str) -> str:
+    """Shorten a demangled kernel symbol so the 算子名称 column stays readable.
+
+    Some symbols carry a long chain of template arguments or a redundant
+    dispatcher prefix (e.g. `kernel_cutlass_kernel_TgvGemmCuteExtKernel_...`,
+    `fmhaSm100fKernel_QkvE4m3OBfloat16H512PagedKvDenseDynamicTokenSparse...`).
+    This keeps the kernel's own identifying name plus its most distinguishing
+    parameter(s) and collapses the rest into `…`, rather than truncating
+    blindly, so two different specializations don't collide on the same
+    abbreviation.
+
+    Every return path escapes `<`/`>` to `&lt;`/`&gt;`, including the
+    untouched short-name path: kernel symbols routinely carry their own
+    literal template angle brackets (e.g. `gatherTopK<float,uint,2,false>`),
+    and this string is placed inside `<code>...</code>` in the report, so an
+    unescaped `<...>` gets parsed as an HTML tag and silently disappears.
+    """
+    def escape(text: str) -> str:
+        return text.replace("<", "&lt;").replace(">", "&gt;")
+
+    if len(name) <= 60:
+        return escape(name)
+    # `kernel_cutlass_kernel_<RealName>_<template args...>`: drop the
+    # dispatcher prefix and keep <RealName> plus the first template arg.
+    if name.startswith("kernel_cutlass_kernel_"):
+        rest = name[len("kernel_cutlass_kernel_"):]
+        parts = rest.split("_")
+        real_name = parts[0]
+        first_arg = next((part for part in parts[1:] if part), "")
+        return f"{real_name}&lt;{first_arg},…&gt;" if first_arg else f"{real_name}&lt;…&gt;"
+    # `fmhaSm100fKernel_<CamelCaseFlags>`: flags are concatenated in CamelCase
+    # without a separator. Keep every digit-bearing token (H512, Q8, Kv128,
+    # ...) plus the last plain-word token before the common `AbForGen` tail
+    # (Static/Persistent/MultiCtas, ...) -- together these are what actually
+    # distinguish one specialization from another; dropping the latter would
+    # collide specializations that only differ by scheduling mode into one
+    # abbreviated name.
+    if name.startswith("fmhaSm100fKernel_"):
+        rest = name[len("fmhaSm100fKernel_"):]
+        import re
+        tokens = re.findall(r"[A-Z][a-z]*[0-9]*", rest)
+        distinguishing = [tok for tok in tokens if any(ch.isdigit() for ch in tok)]
+        scheduling = next(
+            (tok for tok in ("Static", "Persistent", "MultiCtas", "Dynamic")
+             if tok in tokens),
+            None,
+        )
+        keep_parts = distinguishing[:3] + ([scheduling] if scheduling else [])
+        keep = "、".join(keep_parts) if keep_parts else rest[:20]
+        return f"fmhaSm100fKernel&lt;{keep},…&gt;"
+    # Long name, no recognized pattern: escape as-is rather than dropping the
+    # brackets silently -- still readable, just not shortened.
+    return escape(name)
+
+
+def kernel_table(operator_rows: list[dict[str, str]], pattern_us: float, top_n: int = 15) -> str | None:
+    """Table 2.2.4: every distinct kernel, summed across all modules it appears
+    in, ranked by total duration -- highest first.
+
+    A kernel is one row here regardless of how many functional modules or unit
+    positions it appears under: 所属模块 lists every module it contributed to,
+    ordered by that module's own share of the kernel's time (largest first), so
+    the single most relevant attribution reads first without losing the rest.
+    Splitting the same kernel into one row per module would make 启动次数 and
+    耗时(ms) disagree with the totals reported elsewhere in the package.
+    """
+    if not operator_rows:
+        return None
+    totals: dict[str, float] = {}
+    counts: dict[str, int] = {}
+    per_module: dict[str, dict[str, float]] = {}
+    for row in operator_rows:
+        if not (row.get("序号") or "").strip().isdigit():
+            continue
+        name = row.get("算子名称") or ""
+        module = row.get("功能模块") or ""
+        duration = float(row.get("算子耗时(us)") or 0)
+        totals[name] = totals.get(name, 0.0) + duration
+        counts[name] = counts.get(name, 0) + 1
+        per_module.setdefault(name, {})
+        per_module[name][module] = per_module[name].get(module, 0.0) + duration
+    if not totals:
+        return None
+    ranked = sorted(totals.items(), key=lambda item: -item[1])[:top_n]
+    rows = []
+    for name, duration in ranked:
+        modules = sorted(per_module[name].items(), key=lambda item: -item[1])
+        module_names = "、".join(module for module, _ in modules if module)
+        rows.append([abbreviate_kernel_name(name), module_names, ms(duration),
+                     pct(duration / pattern_us * 100), str(counts[name])])
+    lines = [
+        '<p style="margin:0">按算子合计耗时从高到低排列，Top '
+        f'{top_n}；同一 kernel 跨多个模块出现时，耗时/次数为跨模块合计，'
+        "所属模块列出全部（按各自贡献从高到低排序）。</p>",
+        TABLE_OPEN,
+        "<tr>",
+        *(th(cell, HEAD_BG) for cell in ("算子名称", "所属模块", "耗时(ms)", "占单元耗时", "启动次数")),
+        "</tr>",
+    ]
+    for name, module_names, duration_ms, share, count in rows:
+        lines.append("<tr>")
+        lines.append(td(f"<code>{name}</code>"))
+        lines.append(td(module_names))
+        lines.append(td(duration_ms))
+        lines.append(td(share))
+        lines.append(td(count))
+        lines.append("</tr>")
+    lines.append("</table>")
+    return "\n".join(lines)
+
+
+def h1(text: str) -> str:
+    return f'<h1 style="margin:0">{text}</h1>'
+
+
+def h2(text: str) -> str:
+    return f'<h2 style="margin:0">{text}</h2>'
+
+
+def h3(text: str) -> str:
+    return f'<h3 style="margin:0">{text}</h3>'
+
+
+def p(text: str) -> str:
+    return f'<p style="margin:0">{text}</p>'
+
+
+def extract_prompt_inputs(prompt_path: Path) -> str:
+    """工具启动指令: the task's own input list from prompt.md, not the whole
+    prompt. prompt.md is mostly skill-internal instructions (which validator to
+    run, how to bucket taxonomy stages, MFU formula, ...) -- none of that is a
+    "launch command" a reader would want to reproduce. The one part that is is
+    the `- key: value` input block right after "Analyze this task without
+    asking follow-up questions:", which lists exactly what was fed into the
+    tool (nsys path, model, stage, hardware, config, launch script, source
+    root, ...). Falls back to a TODO note when prompt.md is absent or the
+    input block cannot be found, rather than guessing at a shape.
+
+    Not every line in that block is a necessary input: `design notes: not
+    supplied` and a dispatch-site cache path are tooling/optional-input
+    bookkeeping, not something a reader reproducing this run needs to see, so
+    both are dropped -- an unsupplied optional input is a non-fact, and the
+    dispatch cache is an internal speed-up artefact already implied by
+    `model source root` being present. `nsys/sqlite` and `original report`
+    are the same path in every observed task (the template always repeats it
+    under both keys), so only the first is kept -- printing the identical
+    path twice under two different labels would look like two different
+    inputs.
+    """
+    SKIP_PREFIXES = ("design notes", "pre-resolved kernel dispatch sites")
+    if not prompt_path.is_file():
+        return "<!-- TODO 输入提示词（原始任务指令）暂时未提供 -->"
+    text = prompt_path.read_text()
+    marker = "Analyze this task without asking follow-up questions:"
+    start = text.find(marker)
+    if start == -1:
+        return "<!-- TODO 输入提示词（原始任务指令）暂时未提供 -->"
+    block = text[start + len(marker):]
+    lines = []
+    seen_values = set()
+    for line in block.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            if lines:
+                break
+            continue
+        if stripped.startswith("-"):
+            item = stripped[1:].strip()
+            if item.lower().startswith(SKIP_PREFIXES):
+                continue
+            value = item.split(":", 1)[1].strip() if ":" in item else item
+            if value in seen_values:
+                continue  # same path already printed under an earlier key
+            seen_values.add(value)
+            lines.append(item)
+        else:
+            break
+    if not lines:
+        return "<!-- TODO 输入提示词（原始任务指令）暂时未提供 -->"
+    import html
+    return "<br>".join(html.escape(line) for line in lines)
 
 
 def build(package: Path, prefix: str) -> str:
@@ -230,48 +470,49 @@ def build(package: Path, prefix: str) -> str:
 
     trace = Path(context.get("sqlite_path") or "")
     stage = manifest.get("stage") or context.get("stage") or "—"
-    devices = pipeline.get("device")
     model = context.get("model_name") or prefix
+    # 硬件字段只写硬件型号本身：采样 rank / device 是工具的取样细节，不是输入条件，
+    # 已经在第4节"工具启动指令"里报告，这里不重复。
+    hardware = manifest.get("hardware") or "—"
+    parallelism = ((manifest.get("job") or {}).get("parallelism")
+                   or "<!-- TODO TP/EP/PP/DCP 等 -->")
+    shape_parts = [
+        f"chunked-prefill-size={manifest['chunk_size']}"
+        if manifest.get("chunk_size") else None,
+        f"batch_size={manifest['batch_size']}" if manifest.get("batch_size") else None,
+    ]
+    shape = "、".join(part for part in shape_parts if part) or ""
+    shape = (shape + ("、" if shape else "")
+              + "<!-- TODO ctx len/mtp 等运行时 shape -->")
+    nsys_name = trace.name.replace(".sqlite", ".nsys-rep") if trace.name else "—"
     head = [
-        f"# {model} {stage} 性能分析报告",
-        "",
-        f"- 结果包：`{package}`",
-        f"- 硬件：{manifest.get('hardware') or '—'}"
-        + (f"；采样 rank：device {devices}" if devices is not None else ""),
-        f"- 阶段：{stage}；trace：`{trace.name or '—'}`",
-        "- 模型结构：<!-- TODO 层数与变体构成，例如 45 层 = 11 × DSA-MoE + 34 × KDA-MoE；是否启用 MTP -->",
-        "",
-        "# 1. 结论",
-        "",
-        "",
-        "#### 潜在优化点",
-        "",
-        "<!-- TODO 按收益排序的优化项，只写有数据支撑的 -->",
-        "",
-        "",
+        h1(f"{model} {stage} 典型shape Nsys TimeLine分析结果"),
+        h1("1. 输入配置"),
+        config_table([
+            ("模型", model),
+            ("硬件", hardware),
+            ("阶段", stage),
+            ("代码版本", "<!-- TODO 暂时不填 -->"),
+            ("引擎配置", parallelism),
+            ("运行时 shape", shape),
+            ("nsys 文件", f"<code>{nsys_name}</code>"),
+        ]),
     ]
 
-    body = ['<h1 style="margin:0">2. 链路与算子耗时分析</h1>']
-    body.append('<p style="margin:0"><b>结论</b>：</p>')
-    body.append(SPACER)
-    body.append('<p style="margin:0">以下是具体分析过程：</p>')
-    body.append('<p style="margin:0"><b>分析思路</b>：<!-- TODO 重复单元的选取依据与单元耗时 --></p>')
+    body = [h1("2. 分析结果")]
+    body.append(p(f"<b>分析思路</b>：<!-- TODO 重复单元的选取依据与单元耗时 -->"))
 
     forward = forward_tables(read_csv(csv_dir / f"{prefix}_forward_pipeline_table.csv"))
     if forward:
-        body.append('<h2 style="margin:0">2.1 forward 链路耗时</h2>')
-        config = [
-            f"chunked-prefill-size = {manifest['chunk_size']}"
-            if manifest.get("chunk_size") else None,
-            f"batch size = {manifest['batch_size']}" if manifest.get("batch_size") else None,
-        ]
-        note = "当前配置：" + "、".join(item for item in config if item) if any(config) else None
-        body.append(
-            (f'<p style="margin:0">{note}<!-- TODO TP/EP/PP、CUDA graph 等 --></p>\n'
-             if note else "") + forward[0])
+        body.append(h2("2.1 整体耗时统计"))
+        body.append(forward[0])
+
+    body.append(h2("2.2 Target耗时统计"))
+    if forward:
+        body.append(h3("2.2.1 整体耗时统计"))
         body.append(forward[1])
 
-    body.append('<h2 style="margin:0">2.2 算子耗时分析</h2>')
+    body.append(h3("2.2.2 按功能模块划分统计"))
     covered = sum(
         float(row.get("模块耗时(us)") or 0) for row in stage_rows
         if (row.get("序号") or "").strip().isdigit()
@@ -280,51 +521,67 @@ def build(package: Path, prefix: str) -> str:
     # streams, and calling that excess "unclassified leftovers" -- as this line
     # used to unconditionally -- is both self-contradictory and wrong.
     if covered > pattern_us:
-        body.append(
-            '<p style="margin:0">以下口径为<b>一个重复单元</b>内、稳定样本逐算子平均耗时之和。'
+        body.append(p(
+            "以下口径为<b>一个重复单元</b>内、稳定样本逐算子平均耗时之和。"
             f"单元墙钟 {ms(pattern_us)} ms，各模块累计 {ms(covered)} ms，"
             f"因部分模块在独立 CUDA 流上与主流并行而超出墙钟 "
-            f"{covered / pattern_us * 100 - 100:.1f}%，按实测原样呈现、不归一化到 100%。</p>"
-        )
+            f"{covered / pattern_us * 100 - 100:.1f}%，按实测原样呈现、不归一化到 100%。"
+        ))
     else:
-        body.append(
-            '<p style="margin:0">以下口径为<b>一个重复单元</b>内、稳定样本逐算子平均耗时之和，'
+        body.append(p(
+            "以下口径为<b>一个重复单元</b>内、稳定样本逐算子平均耗时之和，"
             f"单元合计 {ms(pattern_us)} ms，下表覆盖其中 {ms(covered)} ms"
-            f"（{covered / pattern_us * 100:.1f}%，余量为未归类的零散算子）。</p>"
-        )
+            f"（{covered / pattern_us * 100:.1f}%，余量为未归类的零散算子）。"
+        ))
     modules = module_table(stage_rows, operator_rows, pattern_us)
     if modules:
         body.append(modules)
-    body.append("<!-- TODO 模块层面的补充说明，例如各变体的出现层数、单层最贵的 kernel -->")
-    body.append(SPACER)
+
+    body.append(h3("2.2.3 按算子大类划分统计"))
     categories = category_table(read_csv(csv_dir / f"{prefix}_op_classification_table.csv"))
     if categories:
         body.append(categories)
-    body.append(SPACER)
-    # A list, not a comma-run: five kernel names with two numbers each is what a
-    # reviewer scans to pick a fusion target.
-    body.append('<p style="margin:0"><b>小算子 Top 5</b>（单元内合计 / 启动次数）</p>')
-    body.append('<ul style="margin:0;padding-left:22px">')
-    body.append("<!-- TODO 每行一个：<li><code>kernel</code> X.XX ms / N 次</li> -->")
-    body.append("</ul>")
-    body.append("<!-- TODO 效率上界参考：本包内 MFU / MBU 最高值，以及占比最大算子的实测值 -->")
 
-    tail = [
-        "",
-        "# 3. 算子分析工具数据",
-        "",
-        "popo 发布页面链接：待补（人工发布后填入）",
-        "",
-        "# 4. 物料",
-        "",
-        f"nsys 文件：`{trace or '—'}`"
-        + (f"（包内副本 `trace/{trace.name}`）" if trace.name else ""),
-        "",
-    ]
+    body.append(h3("2.2.4 按算子小类划分统计"))
+    kernels = kernel_table(operator_rows, pattern_us)
+    if kernels:
+        body.append(kernels)
+
+    # Only when the capture has a draft phase at all (speculative decoding
+    # enabled) -- an ordinary run has no third child table to show, and the
+    # section is skipped rather than emitted empty.
+    if forward and forward[2]:
+        body.append(h2("2.3 Draft部分耗时统计"))
+        body.append(h3("2.3.1 整体耗时统计"))
+        body.append(forward[2])
+
+    tail = [h1("3. 算子分析工具数据")]
+    tail.append(p("popo 发布页面链接：待补（人工发布后填入）"))
     conflicts = pipeline.get("declaration_conflicts") or []
     if conflicts:
-        tail[1:1] = ["", "> ⚠ 与 config/启动命令声明不一致：" + "；".join(conflicts)]
-    return "\n".join(head) + "\n".join(body) + "\n".join(tail)
+        tail.append(p("⚠ 与 config/启动命令声明不一致：" + "；".join(conflicts)))
+
+    skill_dir = Path(__file__).resolve().parent.parent
+    provenance = read_json(metadata_dir / "skill.json")
+    skill_sha256 = provenance.get("sha256") or "<!-- TODO -->"
+    launch_command = extract_prompt_inputs(metadata_dir / "prompt.md")
+    tail.append(h1("4. 输出物料"))
+    tail.append(config_table([
+        ("工具版本", f"<code>sglang-nsys-static-analysis</code>，sha256 <code>{skill_sha256}</code>"),
+        ("工具启动指令", launch_command),
+        (
+            "工具产物",
+            "<code>analysis.json</code>（前端契约）、<code>final_report.md</code>（本报告）、"
+            "<code>nsysscope-package.json</code>（包清单）、<code>csv/</code>（规范化表）、"
+            "<code>xlsx/</code>（对应工作簿）"
+            + (
+                f"、<code>trace/{trace.name}</code>（导出的 SQLite trace，"
+                f"原始 nsys 文件：<code>{trace}</code>）"
+                if trace.name else ""
+            ),
+        ),
+    ]))
+    return "\n".join(head + body + tail)
 
 
 def main() -> None:

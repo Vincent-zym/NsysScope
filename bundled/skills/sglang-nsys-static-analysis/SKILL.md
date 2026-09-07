@@ -433,32 +433,31 @@ the tool.
 ### 10. Write the analysis report
 
 Every task ends with `final_report.md` in the result directory -- the one
-deliverable a human reads instead of the tables. Generate its skeleton after the
-seventh table exists (tables 1 and 2 of the report come from it), then fill in the
-judgement:
+deliverable a human reads instead of the tables. Generate it after the seventh
+table exists (the forward-link tables come from it):
 
 ```bash
 python scripts/build_final_report.py /path/result --prefix model
 ```
 
-The script fills all four tables from the package (forward step split, target's
-children, functional modules over the repeating unit, operator categories) and
-leaves `<!-- TODO ... -->` markers for the model-structure line, 结论, 潜在优化点,
-本节结论, 分析思路, the runtime-config note and the two operator-level notes.
-Replace every marker and keep the generated numbers -- if a number looks wrong,
-fix the table it came from, not the report.
+The script fills every fact and every table from the package's own data
+(model/hardware/stage, engine parallelism, chunk/batch size, the forward step
+split, target's children, functional modules over the repeating unit, operator
+categories, and a kernel-level ranking table), and leaves `<!-- TODO ... -->`
+markers only for what it could not read structurally: 代码版本 (leave as `—`
+unless told otherwise), ctx len/MTP or TP/EP/PP when the manifest lacks them,
+the model-structure line, and 分析思路's one-sentence selection rationale.
+Replace every marker and keep the generated numbers -- if a number looks
+wrong, fix the table it came from, not the report.
 
-Write for a reader who will not open the CSVs: state facts with numbers, order
-conclusions by impact, and only claim a cause the package's data supports. Say
-each thing once -- a number in a conclusion does not need restating in a table
-note under a different heading, and a section with nothing number-backed to add
-is left blank rather than padded with a placeholder sentence. See
-references/final-report-format.md for the section layout, the paste-fidelity
-rules the HTML tables depend on, and the restraint this implies, and
-references/final_report.example.md for a complete filled-in report (glm5_next
-prefill) to match -- note that its section 1 and section-2 结论 line are
-deliberately blank, which is part of the shape to match, not an unfinished
-example.
+This is a pure timeline/operator-timing report: no 结论 section, no 潜在优化点,
+no prose interpretation. Every line is a fact with a number behind it. 分析思路
+is the one sentence that is not a table -- state why this repeating unit was
+selected and its wall time, nothing more. See references/final-report-format.md
+for the section
+layout, the paste-fidelity rules the HTML tables depend on, and the restraint
+this implies, and references/final_report.example.md for a complete filled-in
+report (glm5_next prefill) to match.
 
 ### 11. Finalize the package layout
 
