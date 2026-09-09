@@ -127,13 +127,15 @@ survives, and what does not, is not obvious -- these were established by trial:
   ranking rule, not a bare title).
 - **Dropped**: every width declaration -- `style="width"`, `min-width`,
   `padding`, `<table width>`, `<colgroup><col width>`, `<th width>`. Column
-  widths are recomputed from the content, so do not try to set them, and never
-  set `text-align:left` on a table's own cells for this reason either -- a
-  left-aligned column with short content renders narrower than the header text
-  next to it and gets clipped in 如流. Every table in this report, including
-  the vertical fact tables in sections 1 and 3, is `text-align:center`. Widen a
-  column by making its header wording longer (`Target 主模型` instead of
-  `Target`); leading/trailing full-width spaces get trimmed and do not work.
+  widths are recomputed from the content, which is also why short cells are
+  centred rather than left-aligned: a left-aligned column narrower than the
+  header text next to it gets clipped in 如流. Widen a column by making its
+  header wording longer (`Target 主模型` instead of `Target`);
+  leading/trailing full-width spaces get trimmed and do not work.
+  Section 3 (输出物料) is the one left-aligned table: a multi-line launch prompt
+  and a file list read as a wall of text when centred, and those values are long
+  enough that the clipping problem never arises. Everything else, including
+  section 1's fact table, stays `text-align:center`.
 - A markdown `#` heading carries its own default bottom margin that this
   file's inline styles cannot override, and a blank line in the markdown
   source (or any rendered `margin-bottom` on the block above a table) both come
@@ -162,6 +164,18 @@ live document, and it is more than pasting keeps:
   readers still see the old page until `publish-doc` runs, so publishing is part
   of writing rather than an optional follow-up, and the script always reads the
   page back to compare table/cell/tint counts against the source.
+- Attachments need the editor JSON (mdsl has no `attachment` node), so they are a
+  second pass: read the page back, swap the `nsys 文件`/`工具产物` value cells for
+  attachment nodes, `cover` the whole document, publish. Uploads are capped at
+  64 MiB. The `.nsys-rep` goes up as-is -- when it is missing or over the cap the
+  cell keeps the file name the report already shows, never a compressed
+  substitute -- while the result-directory zip falls back to repacking without
+  `trace/`. A cover issued right after the mdsl publish is accepted and then
+  silently discarded, so that pass retries until the attachments read back.
+- `textAlign` is only stored when it differs from the editor default, so a cell
+  with no `textAlign` is left-aligned, not centred. An attachment inherits the
+  alignment of the cell it replaces, which is what keeps section 1's attachment
+  centred and section 3's left-aligned without configuring each separately.
 
 ## List conventions
 

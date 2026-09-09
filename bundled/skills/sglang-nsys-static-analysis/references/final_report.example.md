@@ -496,17 +496,17 @@
 </tr>
 </table>
 <h1 style="margin:0">3. 输出物料</h1>
-<table border="1" cellspacing="0" cellpadding="6" style="border-collapse:collapse;border:1px solid #999;text-align:center;margin:0">
+<table border="1" cellspacing="0" cellpadding="6" style="border-collapse:collapse;border:1px solid #999;text-align:left;margin:0">
 <tr>
-<th style="border:1px solid #999;text-align:center;vertical-align:middle;background-color:#d9e2f3">工具版本</th>
-<td style="border:1px solid #999;text-align:center;vertical-align:middle"><code>sglang-nsys-static-analysis</code>，sha256 <code>69c4e23d5a9f8daa82ebf0cef44437a7506a9f15da50d56815aea06cbe985999</code></td>
+<th style="border:1px solid #999;text-align:left;vertical-align:middle;background-color:#d9e2f3">工具版本</th>
+<td style="border:1px solid #999;text-align:left;vertical-align:middle"><code>sglang-nsys-static-analysis</code>，sha256 <code>69c4e23d5a9f8daa82ebf0cef44437a7506a9f15da50d56815aea06cbe985999</code></td>
 </tr>
 <tr>
-<th style="border:1px solid #999;text-align:center;vertical-align:middle;background-color:#d9e2f3">工具启动指令</th>
-<td style="border:1px solid #999;text-align:center;vertical-align:middle">nsys/sqlite: /home/users/zhongyuanming/dev_dir/v15.4.7.4/sglang_glm52_chunk64_p_kernel_opt_0824.sqlite<br>model: GLM5.2<br>stage: prefill<br>hardware: Nvidia B200<br>config: /home/users/zhongyuanming/NsysScope/backend/model_configs/GLM5.2.json<br>deployment YAML/script: /home/users/zhongyuanming/dev_dir/v15.4.7.4/p_start.sh<br>model source root: /home/users/zhongyuanming/test_data/aiak_sglang/baidu/hac-aiacc/aiak_sglang/python</td>
+<th style="border:1px solid #999;text-align:left;vertical-align:middle;background-color:#d9e2f3">工具启动指令</th>
+<td style="border:1px solid #999;text-align:left;vertical-align:middle">nsys/sqlite: /home/users/zhongyuanming/dev_dir/v15.4.7.4/sglang_glm52_chunk64_p_kernel_opt_0824.sqlite<br>model: GLM5.2<br>stage: prefill<br>hardware: Nvidia B200<br>config: /home/users/zhongyuanming/NsysScope/backend/model_configs/GLM5.2.json<br>deployment YAML/script: /home/users/zhongyuanming/dev_dir/v15.4.7.4/p_start.sh<br>model source root: /home/users/zhongyuanming/test_data/aiak_sglang/baidu/hac-aiacc/aiak_sglang/python</td>
 </tr>
 <tr>
-<th style="border:1px solid #999;text-align:center;vertical-align:middle;background-color:#d9e2f3">工具产物</th>
-<td style="border:1px solid #999;text-align:center;vertical-align:middle"><code>analysis.json</code>（前端契约）、<code>final_report.md</code>（本报告）、<code>nsysscope-package.json</code>（包清单）、<code>csv/</code>（规范化表）、<code>xlsx/</code>（对应工作簿）、<code>trace/sglang_glm52_chunk64_p_kernel_opt_0824.sqlite</code>（导出的 SQLite trace，原始 nsys 文件：<code>/home/users/zhongyuanming/record_NsysScope_analysis/glm52_prefill_analysis_0829_1/trace/sglang_glm52_chunk64_p_kernel_opt_0824.sqlite</code>）</td>
+<th style="border:1px solid #999;text-align:left;vertical-align:middle;background-color:#d9e2f3">工具产物</th>
+<td style="border:1px solid #999;text-align:left;vertical-align:middle"><code>analysis.json</code>（前端契约）、<code>final_report.md</code>（本报告）、<code>nsysscope-package.json</code>（包清单）、<code>csv/</code>（规范化表）、<code>xlsx/</code>（对应工作簿）、<code>trace/sglang_glm52_chunk64_p_kernel_opt_0824.sqlite</code>（导出的 SQLite trace，原始 nsys 文件：<code>/home/users/zhongyuanming/record_NsysScope_analysis/glm52_prefill_analysis_0829_1/trace/sglang_glm52_chunk64_p_kernel_opt_0824.sqlite</code>）</td>
 </tr>
 </table>

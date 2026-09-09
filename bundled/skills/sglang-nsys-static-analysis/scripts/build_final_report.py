@@ -49,39 +49,46 @@ LABEL_BG = "#d9e2f3"  # first column
 SPACER = '<p style="margin:0">&nbsp;</p>'
 
 
-def config_table(rows: list[tuple[str, str]]) -> str:
+def config_table(rows: list[tuple[str, str]], align: str = "center") -> str:
     """A vertical fact table: one row per field, label column then value column.
 
     Unlike `table()`, which lays entities out as columns for comparison, this is
     for facts that only ever have one value each -- forcing them into `table()`'s
-    shape would need a table with one column and be unreadable. Centred and with
-    no width declaration, same as every other table in this report, so a column
-    is never narrower than its own content.
+    shape would need a table with one column and be unreadable. No width
+    declaration, same as every other table in this report.
+
+    `align` is centre by default because a short left-aligned cell renders
+    narrower than its own header in 如流 and gets clipped. Section 3's values are
+    the exception: a multi-line launch prompt and a file list read as a wall of
+    text when centred, and they are long enough that the clipping problem does
+    not arise.
     """
     lines = [
         '<table border="1" cellspacing="0" cellpadding="6" '
         'style="border-collapse:collapse;border:1px solid #999;'
-        'text-align:center;margin:0">'
+        f'text-align:{align};margin:0">'
     ]
     for label, value in rows:
         lines.append("<tr>")
-        lines.append(th(label, LABEL_BG))
-        lines.append(td(value))
+        lines.append(th(label, LABEL_BG, align=align))
+        lines.append(td(value, align=align))
         lines.append("</tr>")
     lines.append("</table>")
     return "\n".join(lines)
 
 
-def th(text: str, background: str) -> str:
+def th(text: str, background: str, align: str = "center") -> str:
     # `background-color`, not the `background` shorthand: 如流's open API parses the
     # longhand into the cell's backgroundColor and silently drops the shorthand, so
     # a report written through publish_report_to_ku.py would lose every header tint.
     # Manual pasting accepts either, so the longhand is the one that works for both.
-    return f'<th style="{CELL};background-color:{background}">{text}</th>'
+    cell = CELL if align == "center" else CELL.replace("text-align:center", f"text-align:{align}")
+    return f'<th style="{cell};background-color:{background}">{text}</th>'
 
 
-def td(text: str) -> str:
-    return f'<td style="{CELL}">{text}</td>'
+def td(text: str, align: str = "center") -> str:
+    cell = CELL if align == "center" else CELL.replace("text-align:center", f"text-align:{align}")
+    return f'<td style="{cell}">{text}</td>'
 
 
 def table(title: str | None, header: list[str], rows: list[tuple[str, list[str]]], *,
@@ -739,6 +746,9 @@ def build(package: Path, prefix: str) -> str:
     skill_sha256 = provenance.get("sha256") or "<!-- TODO -->"
     launch_command = extract_prompt_inputs(metadata_dir / "prompt.md")
     tail.append(h1("3. 输出物料"))
+    # Left-aligned: a multi-line launch prompt and a file list are unreadable
+    # centred, and these values are long enough that the clipping that rules out
+    # left-alignment elsewhere does not apply.
     tail.append(config_table([
         ("工具版本", f"<code>sglang-nsys-static-analysis</code>，sha256 <code>{skill_sha256}</code>"),
         ("工具启动指令", launch_command),
@@ -753,7 +763,7 @@ def build(package: Path, prefix: str) -> str:
                 if trace.name else ""
             ),
         ),
-    ]))
+    ], align="left"))
     return "\n".join(head + body + tail)
 
 
