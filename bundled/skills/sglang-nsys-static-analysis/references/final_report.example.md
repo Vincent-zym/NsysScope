@@ -56,12 +56,12 @@
 </tr>
 </table>
 <h2 style="margin:0">2.2 Target部分耗时统计</h2>
-<p style="margin:0"><b>分析思路</b>：GLM5.2 稀疏 MoE 区按 non-shared(full) Indexer : shared Indexer = 1 : 3 交替，以 <b>4 层为一个分析单元</b>（1 × Full-Indexer + 3 × Shared-Indexer），单元耗时 41.51 ms。</p>
+<p style="margin:0"><b>分析思路</b>：GLM5.2 稀疏 MoE 区按 non-shared(full) Indexer : shared Indexer = 1 : 3 交替，以 <b>4 层为一个分析pattern</b>（1 × Full-Indexer + 3 × Shared-Indexer），pattern耗时 41.51 ms。</p>
 <h3 style="margin:0">2.2.1 整体耗时统计</h3>
 <table border="1" cellspacing="0" cellpadding="6" style="border-collapse:collapse;border:1px solid #999;text-align:center;margin:0">
 <tr>
 <th style="border:1px solid #999;text-align:center;vertical-align:middle;background-color:#b4c7e7">环节</th>
-<th style="border:1px solid #999;text-align:center;vertical-align:middle;background-color:#b4c7e7">Target 主模型总耗时</th>
+<th style="border:1px solid #999;text-align:center;vertical-align:middle;background-color:#b4c7e7">Target 主模型耗时</th>
 <th style="border:1px solid #999;text-align:center;vertical-align:middle;background-color:#b4c7e7">调度与输入准备</th>
 <th style="border:1px solid #999;text-align:center;vertical-align:middle;background-color:#b4c7e7">MLA-NSA-FullIndexer-MoE 层 × 21</th>
 <th style="border:1px solid #999;text-align:center;vertical-align:middle;background-color:#b4c7e7">MLA-NSA-SharedIndexer-MoE 层 × 57</th>
@@ -93,7 +93,7 @@
 </tr>
 </table>
 <h3 style="margin:0">2.2.2 按功能模块划分统计</h3>
-<p style="margin:0">以下口径为<b>一个重复单元</b>内、稳定样本逐算子平均耗时之和，单元合计 41.51 ms，下表覆盖其中 41.10 ms（99.0%，余量为未归类的零散算子）。</p>
+<p style="margin:0">以下口径为<b>一个重复 pattern</b>内、稳定样本逐算子平均耗时之和，pattern 合计 41.51 ms，下表覆盖其中 41.10 ms（99.0%，余量为未归类的零散算子）。</p>
 <table border="1" cellspacing="0" cellpadding="6" style="border-collapse:collapse;border:1px solid #999;text-align:center;margin:0">
 <tr>
 <th style="border:1px solid #999;text-align:center;vertical-align:middle;background-color:#b4c7e7">功能模块</th>
@@ -170,7 +170,7 @@
 <th style="border:1px solid #999;text-align:center;vertical-align:middle;background-color:#b4c7e7">算子名称</th>
 <th style="border:1px solid #999;text-align:center;vertical-align:middle;background-color:#b4c7e7">所属模块</th>
 <th style="border:1px solid #999;text-align:center;vertical-align:middle;background-color:#b4c7e7">耗时(ms)</th>
-<th style="border:1px solid #999;text-align:center;vertical-align:middle;background-color:#b4c7e7">占单元耗时</th>
+<th style="border:1px solid #999;text-align:center;vertical-align:middle;background-color:#b4c7e7">占pattern耗时</th>
 <th style="border:1px solid #999;text-align:center;vertical-align:middle;background-color:#b4c7e7">启动次数</th>
 </tr>
 <tr>
@@ -301,7 +301,7 @@
 <th style="border:1px solid #999;text-align:center;vertical-align:middle;background-color:#b4c7e7">所属模块</th>
 <th style="border:1px solid #999;text-align:center;vertical-align:middle;background-color:#b4c7e7">shape</th>
 <th style="border:1px solid #999;text-align:center;vertical-align:middle;background-color:#b4c7e7">耗时(ms)</th>
-<th style="border:1px solid #999;text-align:center;vertical-align:middle;background-color:#b4c7e7">占单元耗时</th>
+<th style="border:1px solid #999;text-align:center;vertical-align:middle;background-color:#b4c7e7">占pattern耗时</th>
 <th style="border:1px solid #999;text-align:center;vertical-align:middle;background-color:#b4c7e7">MFU</th>
 <th style="border:1px solid #999;text-align:center;vertical-align:middle;background-color:#b4c7e7">MBU</th>
 <th style="border:1px solid #999;text-align:center;vertical-align:middle;background-color:#b4c7e7">启动次数</th>
@@ -472,7 +472,7 @@
 <table border="1" cellspacing="0" cellpadding="6" style="border-collapse:collapse;border:1px solid #999;text-align:center;margin:0">
 <tr>
 <th style="border:1px solid #999;text-align:center;vertical-align:middle;background-color:#b4c7e7">环节</th>
-<th style="border:1px solid #999;text-align:center;vertical-align:middle;background-color:#b4c7e7">Draft 模型总耗时</th>
+<th style="border:1px solid #999;text-align:center;vertical-align:middle;background-color:#b4c7e7">Draft 模型耗时</th>
 <th style="border:1px solid #999;text-align:center;vertical-align:middle;background-color:#b4c7e7">MLA-NSA-FullIndexer-MoE 层（draft） × 1</th>
 <th style="border:1px solid #999;text-align:center;vertical-align:middle;background-color:#b4c7e7">其他</th>
 </tr>

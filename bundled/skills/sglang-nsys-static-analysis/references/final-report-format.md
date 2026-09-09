@@ -32,7 +32,7 @@ inventing a new shape.
     <h3>2.2.3 按算子大类划分统计</h3>  首列 pattern总耗时，其余为核心计算/通信/
                                        小算子（辅助算子）
     <h3>2.2.4 按算子小类划分统计</h3>  按算子（kernel）合计耗时排序 Top 15，
-                                       含所属模块、占单元耗时、启动次数，
+                                       含所属模块、占pattern耗时、启动次数，
                                        表尾 Top N 累积耗时 + pattern总耗时 两行
     <h3>2.2.5 按核心计算统计</h3>  核心计算算子按执行顺序，含 shape/MFU/MBU，
                                      表尾 核心计算合计 + pattern总耗时 两行
@@ -64,8 +64,8 @@ after the table.
   the declaration-conflict note -- must be plain and short: state the fact and
   stop. Target roughly 100 Chinese characters or less per sentence; the 分析思路
   line in final_report.example.md ("GLM5.2 稀疏 MoE 区按 non-shared(full)
-  Indexer : shared Indexer = 1 : 3 交替，以 4 层为一个分析单元（1 × Full-Indexer
-  + 3 × Shared-Indexer），单元耗时 41.51 ms。") is the calibration point -- match that
+  Indexer : shared Indexer = 1 : 3 交替，以 4 层为一个分析pattern（1 × Full-Indexer
+  + 3 × Shared-Indexer），pattern耗时 41.51 ms。") is the calibration point -- match that
   register, not a formal-report register. Cut qualifiers, cut restated context
   the reader already saw in a table, and prefer a plain clause over a nested
   one. A sentence that needs a semicolon to hold two separate facts is doing

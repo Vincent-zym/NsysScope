@@ -231,8 +231,8 @@ def forward_tables(rows: list[dict[str, str]]) -> list[str | None]:
             [("耗时(ms)", times), ("占 forward step", shares), ("单层耗时(ms)", per_layer)],
         )
 
-    second = children_table(target_children, target, "Target 主模型总耗时")
-    third = (children_table(draft_children, draft, "Draft 模型总耗时")
+    second = children_table(target_children, target, "Target 主模型耗时")
+    third = (children_table(draft_children, draft, "Draft 模型耗时")
              if draft_children and draft is not None else None)
     return [first, second, third]
 
@@ -404,7 +404,7 @@ def kernel_table(operator_rows: list[dict[str, str]], pattern_us: float, top_n: 
         "所属模块列出全部（按各自贡献从高到低排序）。</p>",
         TABLE_OPEN,
         "<tr>",
-        *(th(cell, HEAD_BG) for cell in ("算子名称", "所属模块", "耗时(ms)", "占单元耗时", "启动次数")),
+        *(th(cell, HEAD_BG) for cell in ("算子名称", "所属模块", "耗时(ms)", "占pattern耗时", "启动次数")),
         "</tr>",
     ]
     for name, module_names, duration_ms, share, count in rows:
@@ -506,7 +506,7 @@ def core_compute_table(core_rows: list[dict[str, str]],
         TABLE_OPEN,
         "<tr>",
         *(th(cell, HEAD_BG) for cell in (
-            "算子名称", "所属模块", "shape", "耗时(ms)", "占单元耗时", "MFU", "MBU", "启动次数")),
+            "算子名称", "所属模块", "shape", "耗时(ms)", "占pattern耗时", "MFU", "MBU", "启动次数")),
         "</tr>",
     ]
     total_us = 0.0
@@ -668,10 +668,10 @@ def build(package: Path, prefix: str) -> str:
         body.append(forward[0])
 
     body.append(h2("2.2 Target部分耗时统计"))
-    # 分析思路 belongs here, not under section 2: it states which repeating unit
-    # was selected and its wall time, and that unit is only the denominator for
+    # 分析思路 belongs here, not under section 2: it states which repeating pattern
+    # was selected and its wall time, and that pattern is only the denominator for
     # 2.2's tables -- 2.1 is a forward-step split that does not use it.
-    body.append(p(f"<b>分析思路</b>：<!-- TODO 重复单元的选取依据与单元耗时 -->"))
+    body.append(p(f"<b>分析思路</b>：<!-- TODO 重复 pattern 的选取依据与 pattern 耗时 -->"))
     if forward:
         body.append(h3("2.2.1 整体耗时统计"))
         body.append(forward[1])
@@ -686,15 +686,15 @@ def build(package: Path, prefix: str) -> str:
     # used to unconditionally -- is both self-contradictory and wrong.
     if covered > pattern_us:
         body.append(p(
-            "以下口径为<b>一个重复单元</b>内、稳定样本逐算子平均耗时之和。"
-            f"单元墙钟 {ms(pattern_us)} ms，各模块累计 {ms(covered)} ms，"
+            "以下口径为<b>一个重复 pattern</b>内、稳定样本逐算子平均耗时之和。"
+            f"pattern 墙钟 {ms(pattern_us)} ms，各模块累计 {ms(covered)} ms，"
             f"因部分模块在独立 CUDA 流上与主流并行而超出墙钟 "
             f"{covered / pattern_us * 100 - 100:.1f}%，按实测原样呈现、不归一化到 100%。"
         ))
     else:
         body.append(p(
-            "以下口径为<b>一个重复单元</b>内、稳定样本逐算子平均耗时之和，"
-            f"单元合计 {ms(pattern_us)} ms，下表覆盖其中 {ms(covered)} ms"
+            "以下口径为<b>一个重复 pattern</b>内、稳定样本逐算子平均耗时之和，"
+            f"pattern 合计 {ms(pattern_us)} ms，下表覆盖其中 {ms(covered)} ms"
             f"（{covered / pattern_us * 100:.1f}%，余量为未归类的零散算子）。"
         ))
     modules = module_table(stage_rows, operator_rows, pattern_us)
