@@ -442,8 +442,9 @@ python scripts/build_final_report.py /path/result --prefix model
 
 The script fills every fact and every table from the package's own data
 (model/hardware/stage, engine parallelism, chunk/batch size, the forward step
-split, target's children, functional modules over the repeating unit, operator
-categories, and a kernel-level ranking table), and leaves `<!-- TODO ... -->`
+split, target's and draft's children, functional modules over the repeating
+unit, operator categories, a kernel-level ranking table, and a core-compute
+table in execution order with shape/MFU/MBU), and leaves `<!-- TODO ... -->`
 markers only for what it could not read structurally: 代码版本 (leave as `—`
 unless told otherwise), ctx len/MTP or TP/EP/PP when the manifest lacks them,
 the model-structure line, and 分析思路's one-sentence selection rationale.
@@ -457,7 +458,22 @@ selected and its wall time, nothing more. See references/final-report-format.md
 for the section
 layout, the paste-fidelity rules the HTML tables depend on, and the restraint
 this implies, and references/final_report.example.md for a complete filled-in
-report (glm5_next prefill) to match.
+report (GLM5.2 prefill) to match.
+
+Only when the job supplied a 如流知识库 page, mirror the finished report onto it:
+
+```bash
+python scripts/publish_report_to_ku.py /path/result --url <知识库文档链接>
+```
+
+The report in the result package stays the deliverable -- this reads it
+read-only and never rewrites it, so a failed publish leaves the analysis
+output untouched. Skip the step entirely when no page was supplied; do not
+invent one. It needs the `ku-doc-manage` Skill's CLI (`--ku-bin`, or
+`KU_DOC_MANAGE_DIR`/`COMATE_SKILL_DIR`) and a username
+(`--username`/`BAIDU_CC_USERNAME`), refuses a report that still has
+`<!-- TODO -->` markers, and reads the page back afterwards to check the table,
+cell and tint counts against the source rather than trusting the API's 200.
 
 ### 11. Finalize the package layout
 

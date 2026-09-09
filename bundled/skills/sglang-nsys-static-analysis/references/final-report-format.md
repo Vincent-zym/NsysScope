@@ -13,7 +13,7 @@ when the manifest lacks them, 分析思路's selection rationale, and the
 declaration-conflict note when one exists).
 
 `final_report.example.md` in this directory is a complete filled-in report (a
-glm5_next prefill analysis). Read it as the reference for the exact skeleton
+GLM5.2 prefill analysis). Read it as the reference for the exact skeleton
 shape and for how terse 分析思路 is. When in doubt, match it rather than
 inventing a new shape.
 
@@ -23,27 +23,38 @@ inventing a new shape.
 <h1>{model} {stage} 典型shape Nsys TimeLine分析结果</h1>
 <h1>1. 输入配置</h1>              vertical fact table: 模型/硬件/阶段/代码版本/
                                   引擎配置/运行时 shape/nsys 文件
-<h1>2. 分析结果</h1>              分析思路（一句话选取依据，仅此一句，无结论）
-  <h2>2.1 整体耗时统计</h2>        Token 链路耗时
-  <h2>2.2 Target耗时统计</h2>
-    <h3>2.2.1 整体耗时统计</h3>    Target 内部构成
-    <h3>2.2.2 按功能模块划分统计</h3>  按功能模块划分（按执行顺序）
-    <h3>2.2.3 按算子大类划分统计</h3>  按算子类型划分（核心计算/通信/辅助算子）
+<h1>2. 分析结果</h1>
+  <h2>2.1 整体耗时统计</h2>        forward step 拆分（Forward step / Target /
+                                     Draft / Token间间隙）
+  <h2>2.2 Target部分耗时统计</h2>  分析思路（一句话选取依据，仅此一句，无结论）
+    <h3>2.2.1 整体耗时统计</h3>    Target 内部构成，首列为 Target 主模型总耗时
+    <h3>2.2.2 按功能模块划分统计</h3>  首列 pattern总耗时，其余按执行顺序
+    <h3>2.2.3 按算子大类划分统计</h3>  首列 pattern总耗时，其余为核心计算/通信/
+                                       小算子（辅助算子）
     <h3>2.2.4 按算子小类划分统计</h3>  按算子（kernel）合计耗时排序 Top 15，
-                                       含所属模块、占单元耗时、启动次数
+                                       含所属模块、占单元耗时、启动次数，
+                                       表尾 Top N 累积耗时 + pattern总耗时 两行
+    <h3>2.2.5 按核心计算统计</h3>  核心计算算子按执行顺序，含 shape/MFU/MBU，
+                                     表尾 核心计算合计 + pattern总耗时 两行
   <h2>2.3 Draft部分耗时统计</h2>   only when the capture has a draft phase
                                      (speculative decoding enabled) -- omitted
                                      entirely otherwise, not emitted empty
-    <h3>2.3.1 整体耗时统计</h3>    draft 内部构成, same shape as 2.2.1
-<h1>3. 算子分析工具数据</h1>      popo 发布链接
-<h1>4. 输出物料</h1>              vertical fact table: 工具版本/工具启动指令/工具产物
+    <h3>2.3.1 整体耗时统计</h3>    draft 内部构成, same shape as 2.2.1,
+                                     首列为 Draft 模型总耗时
+<h1>3. 输出物料</h1>              vertical fact table: 工具版本/工具启动指令/工具产物
 ```
+
+分析思路 sits under 2.2, not under section 2: it states which repeating unit was
+selected and its wall time, and that unit is only the denominator for 2.2's
+tables -- 2.1 is a forward-step split that does not use it. There is no
+separate popo/算子分析工具数据 section; a declaration-conflict note, when one
+exists, goes right before 输出物料.
 
 Every heading in this report is HTML (`<h1|h2|h3 style="margin:0">`), and every
 paragraph is `<p style="margin:0">` -- there is no markdown anywhere in the
 document, not even the outer title or sections 3/4, and no blank line anywhere
 in the source between one block and the next (see paste-fidelity rules below
-for why). Section 1 and section 4 are each a single vertical fact table with no
+for why). Section 1 and section 3 are each a single vertical fact table with no
 prose around them -- no `结果包`/`模型结构` list items, no narration before or
 after the table.
 
@@ -52,9 +63,9 @@ after the table.
 - Every sentence of prose in this report -- 分析思路, any filled `<!-- TODO -->`,
   the declaration-conflict note -- must be plain and short: state the fact and
   stop. Target roughly 100 Chinese characters or less per sentence; the 分析思路
-  line in final_report.example.md ("注意力层按 DSA : KDA = 1 : 3 交替，以 4 层为
-  一个分析单元（1 × DSA-MoE + 3 × KDA-MoE），单元耗时 72.93 ms；forward 链路层面
-  按 45 层整体统计。", 104 characters) is the calibration point -- match that
+  line in final_report.example.md ("GLM5.2 稀疏 MoE 区按 non-shared(full)
+  Indexer : shared Indexer = 1 : 3 交替，以 4 层为一个分析单元（1 × Full-Indexer
+  + 3 × Shared-Indexer），单元耗时 41.51 ms。") is the calibration point -- match that
   register, not a formal-report register. Cut qualifiers, cut restated context
   the reader already saw in a table, and prefer a plain clause over a nested
   one. A sentence that needs a semicolon to hold two separate facts is doing
@@ -105,9 +116,11 @@ after the table.
 如流's editor keeps some of the pasted HTML and silently drops the rest. What
 survives, and what does not, is not obvious -- these were established by trial:
 
-- **Kept**: per-cell `style` (border, `background`, `text-align`,
+- **Kept**: per-cell `style` (border, `background-color`, `text-align`,
   `vertical-align`), `<b>`, `<code>`, `<h1>`/`<h2>`/`<h3>`, `border`/`cellpadding`
-  attributes.
+  attributes. Use the `background-color` longhand rather than the `background`
+  shorthand: pasting accepts either, but the open API only reads the longhand
+  (see "Writing through the open API" below).
 - **Dropped**: `<caption>` entirely -- put the table title in a
   `<p style="margin:0">` line immediately above the table instead (2.2.4's
   table has no title line since the caption there is the note explaining the
@@ -118,7 +131,7 @@ survives, and what does not, is not obvious -- these were established by trial:
   set `text-align:left` on a table's own cells for this reason either -- a
   left-aligned column with short content renders narrower than the header text
   next to it and gets clipped in 如流. Every table in this report, including
-  the vertical fact tables in sections 1 and 4, is `text-align:center`. Widen a
+  the vertical fact tables in sections 1 and 3, is `text-align:center`. Widen a
   column by making its header wording longer (`Target 主模型` instead of
   `Target`); leading/trailing full-width spaces get trimmed and do not work.
 - A markdown `#` heading carries its own default bottom margin that this
@@ -129,6 +142,26 @@ survives, and what does not, is not obvious -- these were established by trial:
   gap before the markdown heading that no `margin:0` on the HTML side could
   close. Hence `margin:0` on every block and zero blank lines anywhere in the
   markdown source, not just around tables.
+
+## Writing through the open API
+
+`scripts/publish_report_to_ku.py` puts the same HTML on a 如流 page through the
+open API instead of by pasting. What survives there was established by probing a
+live document, and it is more than pasting keeps:
+
+- **Kept**: `border` → the cell's `borderColor`/`borderIndex`,
+  `vertical-align` → `verticalAlign`, `text-align` → `textAlign` on the cell's
+  inner paragraph, `<b>` → a bold text run, `<code>` → an `inline-code` node,
+  `&lt;`/`&gt;` → literal text, `colspan`/`rowspan`. Column widths are computed
+  and stored, so the API path actually keeps widths that pasting drops.
+- **Dropped**: the `background` shorthand and a `bgcolor` attribute. Only the
+  `background-color` longhand reaches the cell's `backgroundColor`, which is why
+  `build_final_report.py` emits the longhand -- pasting accepts either form, so
+  the longhand is the one that works through both paths.
+- An edit lands in the document's *edit* state. The API answers 200 while
+  readers still see the old page until `publish-doc` runs, so publishing is part
+  of writing rather than an optional follow-up, and the script always reads the
+  page back to compare table/cell/tint counts against the source.
 
 ## List conventions
 
@@ -145,13 +178,17 @@ reintroduce a list where a table already covers the same ground.
 
 - Metrics are rows, entities are columns, so a table stays readable when it has
   eleven functional modules -- except the vertical fact tables in sections 1
-  and 4, and 2.2.4's kernel ranking, where each row is one entity (one config
-  field, one kernel) because there is exactly one metric per row, not several.
+  and 3, and 2.2.4/2.2.5's per-kernel tables, where each row is one entity (one
+  config field, one kernel) because there is exactly one metric per row, not
+  several.
 - Header row background `#b4c7e7`, first column `#d9e2f3`, every cell centred
   (`text-align:center`, see paste-fidelity rules above for why left-align is
   never used even in a fact table).
-- Table title above the table where the table has one (2.2.4's caption is the
-  ranking-rule note instead); bold except the forward-config note.
+- No table carries a title line: the header row already names what the table
+  shows, so a bold caption above it only repeats it. 2.2.2/2.2.4/2.2.5 keep a
+  plain `<p style="margin:0">` note above the table where the table needs a
+  caveat (coverage/overlap, the ranking rule, the ordering rule) -- that is a
+  note, not a title.
 - ms with two decimals, percentages with two decimals and a `%`; half-up
   rounding, so a hand check against the CSV agrees with the report.
 - Percentages are computed from durations, never summed from the tables'
@@ -169,3 +206,20 @@ reintroduce a list where a table already covers the same ground.
   (kernel, module) pair, so 启动次数 and 耗时(ms) always agree with the totals
   reported elsewhere in the package. 所属模块 lists every module the kernel
   contributed to, ordered by that module's own share of the kernel's time.
+- Every breakdown table carries the unit's own total, so a column can be read
+  against the whole instead of only against its siblings: 2.2.1/2.3.1 put the
+  phase total (`Target 主模型总耗时` / `Draft 模型总耗时`) in the first column,
+  2.2.2/2.2.3 put `pattern总耗时` there, and 2.2.4/2.2.5 -- whose rows are
+  entities, not metrics -- put it in footer rows instead (`Top N 累积耗时` +
+  `pattern总耗时`, `核心计算合计` + `pattern总耗时`). The children never sum
+  exactly to that total: they fall short by the unclassified remainder, or
+  exceed it under multi-stream overlap. Showing the total is what makes that
+  gap visible; do not normalise the columns to make them add up.
+- 2.2.5 lists core-compute kernels in **execution order**, taken from the origin
+  table's `start_ns` within one `unit_position` and joined to the other tables on
+  `module`. Do not take the row order of `<prefix>_core_compute_table.csv` or the
+  operator overview for this -- both are grouped by functional module, which puts
+  an attention output projection ahead of the attention core that feeds it. MFU
+  and MBU are the mean over the kernel's occurrences in the unit (they differ by
+  well under a percentage point across unit positions); a kernel with no shape
+  evidence keeps an empty MFU/MBU rather than a fabricated one.

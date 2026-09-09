@@ -22,8 +22,14 @@ file override) has a bottom margin. Hence: every heading and paragraph is
 blank line anywhere in the source between one block and the next; captions as
 a `<p style="margin:0">` right above their table; and no width declarations at
 all -- column widths come from the header wording, and every table (including
-the vertical fact tables in sections 1 and 4) is centred (`text-align:center`)
+the vertical fact tables in sections 1 and 3) is centred (`text-align:center`)
 so a column is never narrower than its own content.
+
+The same HTML also goes into 如流 through its open API (see
+`publish_report_to_ku.py`), which parses these inline styles into the editor's
+own cell attributes. That path is stricter than pasting on exactly one point:
+it reads `background-color` and ignores the `background` shorthand, so this
+file always emits the longhand.
 """
 from __future__ import annotations
 
@@ -67,7 +73,11 @@ def config_table(rows: list[tuple[str, str]]) -> str:
 
 
 def th(text: str, background: str) -> str:
-    return f'<th style="{CELL};background:{background}">{text}</th>'
+    # `background-color`, not the `background` shorthand: 如流's open API parses the
+    # longhand into the cell's backgroundColor and silently drops the shorthand, so
+    # a report written through publish_report_to_ku.py would lose every header tint.
+    # Manual pasting accepts either, so the longhand is the one that works for both.
+    return f'<th style="{CELL};background-color:{background}">{text}</th>'
 
 
 def td(text: str) -> str:
@@ -196,8 +206,18 @@ def forward_tables(rows: list[dict[str, str]]) -> list[str | None]:
         note=None,
     )
 
-    def children_table(children: list[dict[str, str]]) -> str:
-        names, times, shares, per_layer = [], [], [], []
+    def children_table(children: list[dict[str, str]], phase: dict[str, str],
+                       total_label: str) -> str:
+        """One phase's children, with the phase's own total as the first column.
+
+        The leading total column is what lets a reader check the split without
+        scrolling back to 2.1: the children sum to it (plus 其他), so a column
+        that does not add up is visible in place.
+        """
+        names = [total_label]
+        times = [ms(phase.get("总耗时(us)"))]
+        shares = [pct(phase.get("占forward步(%)"))]
+        per_layer = ["—"]
         for row in children:
             layers = (row.get("层数") or "").strip()
             name = row.get("环节", "")
@@ -211,8 +231,9 @@ def forward_tables(rows: list[dict[str, str]]) -> list[str | None]:
             [("耗时(ms)", times), ("占 forward step", shares), ("单层耗时(ms)", per_layer)],
         )
 
-    second = children_table(target_children)
-    third = children_table(draft_children) if draft_children else None
+    second = children_table(target_children, target, "Target 主模型总耗时")
+    third = (children_table(draft_children, draft, "Draft 模型总耗时")
+             if draft_children and draft is not None else None)
     return [first, second, third]
 
 
@@ -239,33 +260,49 @@ def module_table(stage_rows: list[dict[str, str]], operator_rows: list[dict[str,
             order.append(name)
     order += [name for name in totals if name not in order]
 
-    header = ["功能模块", "pattern", *order]
+    header = ["功能模块", "pattern总耗时", *order]
     times = [ms(pattern_us), *(ms(totals[name]) for name in order)]
     # Percentages come from the durations, not from summing the stage table's
     # already-rounded per-row percentages: a module split across four layers would
     # otherwise accumulate its rounding (6.735 -> 6.74 instead of 6.73).
     shares = ["100%", *(pct(totals[name] / pattern_us * 100) for name in order)]
     return table(
-        "按功能模块划分（按执行顺序）",
+        None,
         header,
         [("耗时(ms)", times), ("耗时百分比", shares)],
     )
 
 
-def category_table(rows: list[dict[str, str]]) -> str | None:
-    """Table: core / communication / auxiliary counts and time."""
+def category_table(rows: list[dict[str, str]], pattern_us: float) -> str | None:
+    """Table: core / communication / auxiliary counts and time.
+
+    The leading pattern总耗时 column carries the unit's wall span and the total
+    operator count, so the three category columns can be read as a share of the
+    unit rather than of each other. The categories sum below the wall span (or
+    above it, under multi-stream overlap) -- that gap is the point of showing
+    the total, not an error to hide.
+    """
     data = [row for row in rows if (row.get("序号") or "").strip().isdigit()]
     if not data:
         return None
     names = [row.get("算子类型", "") for row in data]
     names = [("小算子（辅助算子）" if name == "辅助算子" else name) for name in names]
+    total_row = next(
+        (row for row in rows if (row.get("算子类型") or "").strip() == "总计"), None)
+    if total_row is not None:
+        total_count = total_row.get("算子数量", "")
+    else:
+        total_count = str(sum(
+            int(row.get("算子数量") or 0) for row in data
+            if (row.get("算子数量") or "").strip().isdigit()
+        ))
     return table(
         None,
-        ["算子类型", *names],
+        ["算子类型", "pattern总耗时", *names],
         [
-            ("算子数量", [row.get("算子数量", "") for row in data]),
-            ("耗时(ms)", [ms(row.get("总耗时(us)")) for row in data]),
-            ("耗时百分比", [pct(row.get("耗时占比(%)")) for row in data]),
+            ("算子数量", [total_count, *(row.get("算子数量", "") for row in data)]),
+            ("耗时(ms)", [ms(pattern_us), *(ms(row.get("总耗时(us)")) for row in data)]),
+            ("耗时百分比", ["100%", *(pct(row.get("耗时占比(%)")) for row in data)]),
         ],
         bold_title=False,
     )
@@ -378,6 +415,130 @@ def kernel_table(operator_rows: list[dict[str, str]], pattern_us: float, top_n: 
         lines.append(td(share))
         lines.append(td(count))
         lines.append("</tr>")
+    # Two footer rows so the Top N can be read against the whole unit: what the
+    # listed kernels add up to, and the unit's own wall span. Without them a
+    # reader cannot tell whether Top 15 is most of the unit or a sliver of it.
+    top_us = sum(duration for _, duration in ranked)
+    top_count = sum(counts[name] for name, _ in ranked)
+    for label, value_ms, value_pct, value_count in (
+        (f"Top {top_n} 累积耗时", ms(top_us), pct(top_us / pattern_us * 100), str(top_count)),
+        ("pattern总耗时", ms(pattern_us), "100%", "—"),
+    ):
+        lines.append("<tr>")
+        lines.append(th(label, LABEL_BG))
+        lines.append(td("—"))
+        lines.append(td(value_ms))
+        lines.append(td(value_pct))
+        lines.append(td(value_count))
+        lines.append("</tr>")
+    lines.append("</table>")
+    return "\n".join(lines)
+
+
+def execution_order(origin_rows: list[dict[str, str]]) -> dict[str, int]:
+    """Rank each origin `module` by when it first runs inside one unit position.
+
+    The core-compute and operator tables are grouped by functional module, not
+    emitted in execution order -- their row order puts an attention output
+    projection before the attention core it feeds, which reads as nonsense in a
+    table that claims execution order. The origin table is the only one with
+    `start_ns`, so the order comes from there: one unit position (so positions
+    do not interleave), sorted by start time, taking each module's first
+    appearance. `module` is the join key every other table copies from origin.
+    """
+    positions = [row.get("unit_position") or "" for row in origin_rows]
+    first = next((p for p in positions if p), "")
+    within = [row for row in origin_rows if (row.get("unit_position") or "") == first]
+    try:
+        within.sort(key=lambda row: int(row.get("start_ns") or 0))
+    except (TypeError, ValueError):
+        return {}
+    rank: dict[str, int] = {}
+    for row in within:
+        module = row.get("module") or ""
+        if module and module not in rank:
+            rank[module] = len(rank)
+    return rank
+
+
+def core_compute_table(core_rows: list[dict[str, str]],
+                       origin_rows: list[dict[str, str]],
+                       pattern_us: float) -> str | None:
+    """Table 2.2.5: core-compute kernels in execution order, with shape/MFU/MBU.
+
+    One row per distinct kernel, summed over its occurrences in the unit. MFU
+    and MBU are the mean over those occurrences: the same kernel at four unit
+    positions differs by well under a percentage point, so a mean reads cleaner
+    than four values or a range, and a kernel with no shape evidence keeps an
+    empty MFU rather than a fabricated one.
+    """
+    data = [row for row in core_rows if (row.get("序号") or "").strip().isdigit()]
+    if not data:
+        return None
+    rank = execution_order(origin_rows)
+    unranked = len(rank)
+    aggregate: dict[str, dict] = {}
+    for row in data:
+        name = row.get("算子名称") or ""
+        entry = aggregate.setdefault(name, {
+            "us": 0.0, "count": 0, "shape": set(), "mfu": [], "mbu": [],
+            "modules": {}, "rank": unranked,
+        })
+        duration = float(row.get("算子耗时(us)") or 0)
+        entry["us"] += duration
+        entry["count"] += 1
+        entry["rank"] = min(entry["rank"], rank.get(row.get("module") or "", unranked))
+        shape = (row.get("shape") or "").strip()
+        if shape:
+            entry["shape"].add(shape)
+        for key in ("mfu", "mbu"):
+            raw = (row.get(key) or "").strip().rstrip("%")
+            if raw:
+                try:
+                    entry[key].append(float(raw))
+                except ValueError:
+                    pass
+        module = row.get("功能模块") or ""
+        entry["modules"][module] = entry["modules"].get(module, 0.0) + duration
+    lines = [
+        '<p style="margin:0">仅统计核心计算类算子，按执行顺序排列；'
+        "MFU/MBU 为该算子各次出现的均值，缺 shape 证据时留空。</p>",
+        TABLE_OPEN,
+        "<tr>",
+        *(th(cell, HEAD_BG) for cell in (
+            "算子名称", "所属模块", "shape", "耗时(ms)", "占单元耗时", "MFU", "MBU", "启动次数")),
+        "</tr>",
+    ]
+    total_us = 0.0
+    total_count = 0
+    ordered = sorted(aggregate.items(), key=lambda item: (item[1]["rank"], -item[1]["us"]))
+    for name, entry in ordered:
+        total_us += entry["us"]
+        total_count += entry["count"]
+        modules = sorted(entry["modules"].items(), key=lambda item: -item[1])
+        module_names = "、".join(module for module, _ in modules if module)
+        shape = "、".join(sorted(entry["shape"])) if entry["shape"] else "—"
+        shape = shape.replace("<", "&lt;").replace(">", "&gt;")
+        lines.append("<tr>")
+        lines.append(td(f"<code>{abbreviate_kernel_name(name)}</code>"))
+        lines.append(td(module_names))
+        lines.append(td(f"<code>{shape}</code>"))
+        lines.append(td(ms(entry["us"])))
+        lines.append(td(pct(entry["us"] / pattern_us * 100)))
+        for key in ("mfu", "mbu"):
+            values = entry[key]
+            lines.append(td(pct(sum(values) / len(values)) if values else "—"))
+        lines.append(td(str(entry["count"])))
+        lines.append("</tr>")
+    for label, value_ms, value_pct, value_count in (
+        ("核心计算合计", ms(total_us), pct(total_us / pattern_us * 100), str(total_count)),
+        ("pattern总耗时", ms(pattern_us), "100%", "—"),
+    ):
+        lines.append("<tr>")
+        lines.append(th(label, LABEL_BG))
+        lines.extend([td("—"), td("—"), td(value_ms), td(value_pct), td("—"), td("—"),
+                      td(value_count)])
+        lines.append("</tr>")
     lines.append("</table>")
     return "\n".join(lines)
 
@@ -472,7 +633,7 @@ def build(package: Path, prefix: str) -> str:
     stage = manifest.get("stage") or context.get("stage") or "—"
     model = context.get("model_name") or prefix
     # 硬件字段只写硬件型号本身：采样 rank / device 是工具的取样细节，不是输入条件，
-    # 已经在第4节"工具启动指令"里报告，这里不重复。
+    # 已经在第3节"工具启动指令"里报告，这里不重复。
     hardware = manifest.get("hardware") or "—"
     parallelism = ((manifest.get("job") or {}).get("parallelism")
                    or "<!-- TODO TP/EP/PP/DCP 等 -->")
@@ -500,14 +661,17 @@ def build(package: Path, prefix: str) -> str:
     ]
 
     body = [h1("2. 分析结果")]
-    body.append(p(f"<b>分析思路</b>：<!-- TODO 重复单元的选取依据与单元耗时 -->"))
 
     forward = forward_tables(read_csv(csv_dir / f"{prefix}_forward_pipeline_table.csv"))
     if forward:
         body.append(h2("2.1 整体耗时统计"))
         body.append(forward[0])
 
-    body.append(h2("2.2 Target耗时统计"))
+    body.append(h2("2.2 Target部分耗时统计"))
+    # 分析思路 belongs here, not under section 2: it states which repeating unit
+    # was selected and its wall time, and that unit is only the denominator for
+    # 2.2's tables -- 2.1 is a forward-step split that does not use it.
+    body.append(p(f"<b>分析思路</b>：<!-- TODO 重复单元的选取依据与单元耗时 -->"))
     if forward:
         body.append(h3("2.2.1 整体耗时统计"))
         body.append(forward[1])
@@ -538,7 +702,8 @@ def build(package: Path, prefix: str) -> str:
         body.append(modules)
 
     body.append(h3("2.2.3 按算子大类划分统计"))
-    categories = category_table(read_csv(csv_dir / f"{prefix}_op_classification_table.csv"))
+    categories = category_table(
+        read_csv(csv_dir / f"{prefix}_op_classification_table.csv"), pattern_us)
     if categories:
         body.append(categories)
 
@@ -546,6 +711,15 @@ def build(package: Path, prefix: str) -> str:
     kernels = kernel_table(operator_rows, pattern_us)
     if kernels:
         body.append(kernels)
+
+    core = core_compute_table(
+        read_csv(csv_dir / f"{prefix}_core_compute_table.csv"),
+        read_csv(csv_dir / f"{prefix}_operator_origin_table.csv"),
+        pattern_us,
+    )
+    if core:
+        body.append(h3("2.2.5 按核心计算统计"))
+        body.append(core)
 
     # Only when the capture has a draft phase at all (speculative decoding
     # enabled) -- an ordinary run has no third child table to show, and the
@@ -555,8 +729,7 @@ def build(package: Path, prefix: str) -> str:
         body.append(h3("2.3.1 整体耗时统计"))
         body.append(forward[2])
 
-    tail = [h1("3. 算子分析工具数据")]
-    tail.append(p("popo 发布页面链接：待补（人工发布后填入）"))
+    tail: list[str] = []
     conflicts = pipeline.get("declaration_conflicts") or []
     if conflicts:
         tail.append(p("⚠ 与 config/启动命令声明不一致：" + "；".join(conflicts)))
@@ -565,7 +738,7 @@ def build(package: Path, prefix: str) -> str:
     provenance = read_json(metadata_dir / "skill.json")
     skill_sha256 = provenance.get("sha256") or "<!-- TODO -->"
     launch_command = extract_prompt_inputs(metadata_dir / "prompt.md")
-    tail.append(h1("4. 输出物料"))
+    tail.append(h1("3. 输出物料"))
     tail.append(config_table([
         ("工具版本", f"<code>sglang-nsys-static-analysis</code>，sha256 <code>{skill_sha256}</code>"),
         ("工具启动指令", launch_command),
