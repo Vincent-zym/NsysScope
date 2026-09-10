@@ -473,7 +473,7 @@ class JobRunner:
                 return
             self.state(job_id, job_dir, "validating", 95, "正在校验前端数据契约")
             self.validate_analysis(job_dir / "analysis.json")
-            self.publish_to_wiki(job_dir, job_dir, request.wiki_url)
+            self.publish_to_wiki(job_dir, job_dir, request.wiki_url, request.wiki_username)
             # Never let a terminal write clobber a cancellation that raced in
             # after the last cancellation check above.
             if not self.is_cancelled(job_id):
@@ -2091,14 +2091,45 @@ Requirements:
             f"[final-report] Agent 未产出分析文档，已生成待补全骨架 {report}",
         )
 
+    @staticmethod
+    def ku_binary() -> Path | None:
+        """Locate the ku-doc-manage Skill's CLI, which the publish script needs.
+
+        The analyzer runs as a service, so it does not inherit the shell that has
+        `KU_DOC_MANAGE_DIR` exported. Beyond the env vars, the Skill is looked for
+        next to this project -- checkouts sit side by side under the same parent,
+        which is where NSYSSCOPE_ALLOWED_ROOTS already points.
+        """
+        project = Path(__file__).resolve().parents[1]
+        candidates: list[Path] = []
+        for variable in ("KU_BIN", "KU_DOC_MANAGE_DIR", "COMATE_SKILL_DIR"):
+            value = os.getenv(variable)
+            if value:
+                candidates.extend([Path(value), Path(value) / "bin" / "ku"])
+        found = shutil.which("ku")
+        if found:
+            candidates.append(Path(found))
+        candidates.append(project.parent / "ku-doc-manage" / "bin" / "ku")
+        candidates.append(Path.home() / "ku-doc-manage" / "bin" / "ku")
+        for candidate in candidates:
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                return candidate
+        return None
+
     def publish_to_wiki(
         self, job_dir: Path, package_root: Path, wiki_url: str | None,
+        wiki_username: str | None = None,
     ) -> None:
         """Mirror the finished report onto a 如流 page, when the job named one.
 
         Strictly additive: the report in the result directory is the deliverable,
         so a publish that fails is logged and the job still succeeds. Skipped
         when no page was given, which is most jobs.
+
+        The username and the CLI both have to be resolved here rather than left to
+        the script's own env lookup: the analyzer is a long-running service and
+        does not inherit whatever the user exported in their shell, which is
+        exactly how the first real job failed with "缺少用户名".
         """
         if not wiki_url:
             return
@@ -2106,8 +2137,27 @@ Requirements:
         if not script.exists():
             self.log(job_dir, f"[wiki] 跳过：缺少发布脚本 {script}")
             return
-        command = [sys.executable, str(script), str(package_root), "--url", wiki_url]
-        completed = subprocess.run(command, text=True, capture_output=True)
+        username = wiki_username or os.getenv("NSYSSCOPE_KU_USERNAME") \
+            or os.getenv("BAIDU_CC_USERNAME") or os.getenv("SANDBOX_USERNAME")
+        if not username:
+            self.log(job_dir, "[wiki] 跳过：不知道以谁的身份写入。请在表单里填如流用户名，"
+                              "或用 NSYSSCOPE_KU_USERNAME 启动服务")
+            return
+        ku = self.ku_binary()
+        if ku is None:
+            self.log(job_dir, "[wiki] 跳过：找不到 ku-doc-manage 的 bin/ku。"
+                              "请把该 Skill 放在本项目同级目录，或设置 KU_DOC_MANAGE_DIR")
+            return
+        command = [
+            sys.executable, str(script), str(package_root),
+            "--url", wiki_url, "--username", username, "--ku-bin", str(ku),
+        ]
+        # `--username` names the editor, but the ku CLI also reads the identity
+        # from its environment to fetch its own token: without BAIDU_CC_USERNAME
+        # every call answers "开放应用不存在", so it is exported here as well.
+        environment = {**os.environ, "BAIDU_CC_USERNAME": username}
+        completed = subprocess.run(command, text=True, capture_output=True,
+                                   env=environment)
         for line in (completed.stdout or "").strip().splitlines():
             self.log(job_dir, line)
         if completed.returncode != 0:

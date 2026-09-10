@@ -44,8 +44,11 @@ class JobCreate(BaseModel):
     result_path: str | None = None
     # Optional 如流知识库 page to mirror the finished report onto. Purely additive:
     # the report is written to the result directory either way, and a publish
-    # failure is logged without failing the job.
+    # failure is logged without failing the job. The username has to come with it:
+    # the analyzer runs as a service and cannot see the shell env that would
+    # otherwise identify the editor.
     wiki_url: str | None = None
+    wiki_username: str | None = None
     prefix: str = Field(default="analysis", pattern=r"^[a-zA-Z0-9_-]+$")
     notes: str = Field(default="", max_length=4000)
 
