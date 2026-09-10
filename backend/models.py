@@ -42,6 +42,10 @@ class JobCreate(BaseModel):
     torch_trace_path: str | None = None
     existing_package_path: str | None = None
     result_path: str | None = None
+    # Optional 如流知识库 page to mirror the finished report onto. Purely additive:
+    # the report is written to the result directory either way, and a publish
+    # failure is logged without failing the job.
+    wiki_url: str | None = None
     prefix: str = Field(default="analysis", pattern=r"^[a-zA-Z0-9_-]+$")
     notes: str = Field(default="", max_length=4000)
 

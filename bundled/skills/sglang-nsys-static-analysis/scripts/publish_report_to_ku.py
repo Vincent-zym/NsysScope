@@ -125,10 +125,53 @@ def run(ku: Path, *args: str) -> dict:
     return data
 
 
+def set_title(ku: Path, doc_id: str, username: str, title: str,
+              attempts: int = 3) -> None:
+    """Name the page after the report, checking the name that actually stuck.
+
+    A rename can come back with a `(1)` suffix appended -- the platform
+    de-duplicates against the name the page is being renamed away from, so the
+    first attempt on a freshly written page can land as `…结果(1)`. Renaming
+    again with the same string then takes cleanly, so the name is read back and
+    retried rather than assumed.
+    """
+    for attempt in range(1, attempts + 1):
+        run(ku, "rename-doc", "--doc-id", doc_id, "--username", username,
+            "--new-name", title)
+        data = run(ku, "query-content", "--doc-id", doc_id,
+                   "--protocol", "markdown", "--show-doc-info")
+        actual = ((data.get("result") or {}).get("docInfo") or {}).get("name")
+        if actual == title:
+            print(f"[ku] 文档标题已设为「{title}」")
+            return
+        if attempt < attempts:
+            print(f"[ku] 标题落为「{actual}」，重试一次")
+            time.sleep(1)
+    print(f"[ku] 标题最终为「{actual}」，与报告标题「{title}」不一致，请手动确认")
+
+
 def normalise(html: str) -> tuple[str, int]:
     """Rewrite the `background` shorthand the API drops into the longhand."""
     shorthand = re.compile(r"background:(?!-)")
     return shorthand.sub("background-color:", html), len(shorthand.findall(html))
+
+
+def split_title(html: str) -> tuple[str | None, str]:
+    """Take the report's own outer heading off the body, to use as the page title.
+
+    A 如流 page already renders its document name as the heading at the top, so
+    keeping the report's first `<h1>` in the body would show the same line twice.
+    The heading is the report's title by construction (build_final_report.py emits
+    `{model} {stage} 典型shape Nsys TimeLine分析结果` first), so it becomes the
+    document name and is dropped from the content.
+    """
+    match = re.match(r'\s*<h1[^>]*>(.*?)</h1>\s*\n?', html, re.S)
+    if not match:
+        return None, html
+    title = re.sub(r"<[^>]+>", "", match.group(1)).strip()
+    if not title:
+        return None, html
+    return title, html[match.end():]
 
 
 def find_nsys_rep(package: Path) -> Path | None:
@@ -428,10 +471,13 @@ def main() -> None:
         )
     if rewritten:
         print(f"[ku] 已将 {rewritten} 处 background 简写改写为 background-color（仅影响发布内容）")
+    title, html = split_title(html)
 
     ku = resolve_ku_binary(args.ku_bin)
     doc_id = document_id(args.url, args.doc_id)
     print(f"[ku] 目标文档 {doc_id}，使用 {ku}")
+    if title:
+        set_title(ku, doc_id, args.username, title)
 
     cover = json.dumps([{
         "mode": "cover",

@@ -473,6 +473,7 @@ class JobRunner:
                 return
             self.state(job_id, job_dir, "validating", 95, "正在校验前端数据契约")
             self.validate_analysis(job_dir / "analysis.json")
+            self.publish_to_wiki(job_dir, job_dir, request.wiki_url)
             # Never let a terminal write clobber a cancellation that raced in
             # after the last cancellation check above.
             if not self.is_cancelled(job_id):
@@ -2089,6 +2090,31 @@ Requirements:
             job_dir,
             f"[final-report] Agent 未产出分析文档，已生成待补全骨架 {report}",
         )
+
+    def publish_to_wiki(
+        self, job_dir: Path, package_root: Path, wiki_url: str | None,
+    ) -> None:
+        """Mirror the finished report onto a 如流 page, when the job named one.
+
+        Strictly additive: the report in the result directory is the deliverable,
+        so a publish that fails is logged and the job still succeeds. Skipped
+        when no page was given, which is most jobs.
+        """
+        if not wiki_url:
+            return
+        script = self.settings.skill_dir / "scripts" / "publish_report_to_ku.py"
+        if not script.exists():
+            self.log(job_dir, f"[wiki] 跳过：缺少发布脚本 {script}")
+            return
+        command = [sys.executable, str(script), str(package_root), "--url", wiki_url]
+        completed = subprocess.run(command, text=True, capture_output=True)
+        for line in (completed.stdout or "").strip().splitlines():
+            self.log(job_dir, line)
+        if completed.returncode != 0:
+            detail = (completed.stderr or completed.stdout or "").strip()[:1500]
+            self.log(job_dir, f"[wiki] 写入知识库失败，报告仍在结果目录里：{detail}")
+            return
+        self.log(job_dir, f"[wiki] 报告已写入 {wiki_url}")
 
     @staticmethod
     def package_trace(package: Path) -> Path | None:

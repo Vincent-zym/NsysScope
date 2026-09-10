@@ -320,7 +320,7 @@ function JobDialog({ open, onClose, onLoaded }) {
     stage: "prefill", hardware: "Nvidia B200",
     report_path: "", config_path: "", launch_path: "", source_path: "",
     design_path: "", existing_package_path: "", result_path: "",
-    torch_trace_path: "",
+    torch_trace_path: "", wiki_url: "",
     // Table filename prefix. No longer user-facing: every job gets its own empty
     // result directory so the tables can never collide, and imported packages
     // fall back to the prefix detected on disk.
@@ -734,6 +734,7 @@ function JobDialog({ open, onClose, onLoaded }) {
             <label><span className="field-title"><span>Model config.json{!hasBuiltinConfig && <i className="req">*</i>}</span>{hasBuiltinConfig && <em className="builtin-hint">已内置，可留空</em>}</span><input required={!hasBuiltinConfig} value={form.config_path} onChange={set("config_path")} placeholder={hasBuiltinConfig ? "留空则使用内置 config.json" : "/path/to/config.json"} /></label>
             <label className="span-2"><span>模型源码根目录<i className="req">*</i></span><input required value={form.source_path} onChange={set("source_path")} placeholder="/path/to/sglang/source" /></label>
             <label className="span-2"><span>结果保存目录<i className="req">*</i></span><input required value={form.result_path} onChange={set("result_path")} placeholder="/path/to/result-package（必须为空或不存在）" /></label>
+            <label className="span-2">如流知识库页面（可选，填了就把最终报告写进该页面）<input value={form.wiki_url} onChange={set("wiki_url")} placeholder="https://ku.baidu-int.com/knowledge/<空间>/<目录>/<知识库>/<文档>" /><small>报告仍会写在结果目录里，这里只是额外镜像一份：页面标题取报告标题，nsys 文件与工具产物两格会挂上真实附件（.nsys-rep 原文件、结果目录 zip）。页面已有内容会被覆盖，请填一个专用于本次分析的页面。</small></label>
             <label className="span-2">设计说明（可选）<input value={form.design_path} onChange={set("design_path")} placeholder="/path/to/design.md" /></label>
           </>}
           {!importingPackage && <label className="span-2">分析范围与硬性要求<textarea value={form.notes} onChange={set("notes")} placeholder="例如：只分析 GLM5.2 的单个非 shared Indexer 层，不要扩展为 4 层周期。" /><small>Agent 必须按这里限定重复单元和分支；无法满足时任务应失败，不能静默改用其他范围。</small></label>}
