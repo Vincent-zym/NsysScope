@@ -420,6 +420,13 @@ class JobRunner:
                     return
                 sqlite_path = self.export_nsys(job_id, job_dir, paths["report"])
                 context["sqlite_path"] = str(sqlite_path)
+                # The launch command is recovered from the trace rather than asked
+                # for: nsys stores the argv it wrapped, already resolved, so there
+                # is no deployment script to supply and no script/reality gap.
+                launch_path = self.extract_launch_command(job_dir, sqlite_path)
+                paths["launch"] = launch_path
+                context["launch"] = str(launch_path)
+                context["launch_path"] = str(launch_path)
                 (metadata_dir / "context.json").write_text(
                     json.dumps(context, ensure_ascii=False, indent=2) + "\n",
                 )
@@ -565,7 +572,8 @@ class JobRunner:
         values = {
             "report": request.report_path,
             "config": request.config_path,
-            "launch": request.launch_path,
+            # No "launch": the launch command is recovered from the trace by
+            # extract_launch_command() instead of being supplied by the caller.
             "source": request.source_path,
             "design": request.design_path,
             "torch_trace": request.torch_trace_path,
@@ -588,6 +596,40 @@ class JobRunner:
                         "本次分析按未提供该输入继续",
                     )
         return resolved
+
+    def extract_launch_command(self, job_dir: Path, sqlite_path: Path) -> Path:
+        """Recover the captured launch command from the trace, as a file on disk.
+
+        This replaces the deployment script the caller used to have to supply.
+        nsys stores the argv it wrapped in `META_DATA_CAPTURE`, one row per
+        argument, so the recovered command has every shell variable and
+        arithmetic expression already resolved and cannot disagree with what ran.
+        Everything downstream keeps taking a `--launch <file>`, so the file is
+        materialized rather than passed around as a string.
+
+        A trace without it is fatal: the declared parallelism, chunk size and
+        speculative-decoding flags all come from here, and guessing them from the
+        kernels would produce a confident wrong answer instead of a failure.
+        """
+        script = self.settings.skill_dir / "scripts" / "extract_launch_command.py"
+        target = job_dir / "metadata" / "launch_command.txt"
+        if not script.exists():
+            raise RuntimeError(f"缺少启动命令提取脚本 {script}")
+        completed = subprocess.run(
+            [sys.executable, str(script), str(sqlite_path), "--output", str(target)],
+            text=True, capture_output=True,
+        )
+        if completed.returncode != 0 or not target.is_file():
+            detail = (completed.stderr or completed.stdout or "").strip()[:800]
+            raise RuntimeError(
+                f"无法从 trace 还原启动命令：{detail}。"
+                "该 trace 的 META_DATA_CAPTURE 里没有 PROCESS_*:COMMAND，"
+                "请确认它是 nsys 直接拉起进程（LaunchAnother）方式抓取的"
+            )
+        self.log(job_dir, f"[launch] {completed.stdout.strip()}")
+        first = target.read_text(errors="replace").splitlines()[0]
+        self.log(job_dir, f"[launch] 捕获到的启动命令：{first[:400]}")
+        return target
 
     def export_nsys(self, job_id: str, job_dir: Path, report: Path | None) -> Path:
         if report is None:
@@ -1316,7 +1358,7 @@ Analyze this task without asking follow-up questions:
 - stage: {request.stage}
 - hardware: {request.hardware}
 - config: {paths['config']}
-- deployment YAML/script: {paths['launch']}
+- captured launch command (recovered from the trace): {paths['launch']}
 - model source root: {paths['source']}
 - design notes: {paths['design'] or 'not supplied'}
 {self.dispatch_cache_prompt(dispatch_cache)}
@@ -1370,9 +1412,12 @@ Requirements:
    (`SendRecv`) to a layer.
 12. Finish by writing `final_report.md` in {job_dir}: run
    `scripts/build_final_report.py {job_dir} --prefix {request.prefix}` for the
-   tables, then replace every `<!-- TODO -->` marker with your own conclusions,
-   optimisation paths and analysis reasoning. It is the deliverable a human reads
-   instead of the tables, so keep it short, factual and number-backed.
+   tables, then replace every `<!-- TODO -->` marker with exactly the fact it asks
+   for. This report has no 结论 and no 潜在优化点 section: every line is a
+   number-backed fact, and 分析思路 is one short sentence naming the repeating
+   pattern and its duration -- no sampling min/max, nothing a table already shows.
+   Then run the same command with `--check` and fix what it reports; if a generated
+   line is wrong for this package, change the generator, not the report.
 """
 
     @staticmethod
@@ -2066,30 +2111,61 @@ Requirements:
     ) -> None:
         """Make sure the package ships the human-readable `final_report.md`.
 
-        The agent is asked to write it (SKILL.md step 10) because the conclusions and
-        optimisation paths are judgement, not arithmetic. When it did not -- an
+        The agent is asked to write it (SKILL.md step 11) because the selection
+        rationale behind the repeating pattern is judgement, not arithmetic. When it
+        did not -- an
         imported package, or an agent that stopped after the tables -- generate the
         skeleton instead, so the reader always gets the four tables with their real
         numbers and explicit `<!-- TODO -->` markers for the missing prose. Never
-        overwrite an existing report, and never fail the job over it.
+        overwrite an existing report, and never fail the job over it -- but do run
+        the generator's own `--check` afterwards so format drift lands in the log.
         """
         report = package_root / "final_report.md"
-        if report.is_file():
-            return
         script = self.settings.skill_dir / "scripts" / "build_final_report.py"
         if not script.exists():
-            self.log(job_dir, f"[final-report] 跳过：缺少生成脚本 {script}")
+            if not report.is_file():
+                self.log(job_dir, f"[final-report] 跳过：缺少生成脚本 {script}")
             return
-        command = [sys.executable, str(script), str(package_root), "--prefix", prefix]
+        if not report.is_file():
+            command = [sys.executable, str(script), str(package_root), "--prefix", prefix]
+            completed = subprocess.run(command, text=True, capture_output=True)
+            if completed.returncode != 0:
+                detail = (completed.stderr or completed.stdout or "").strip()[:1500]
+                self.log(job_dir, f"[final-report] 生成分析文档失败，跳过（不影响任务其余产出）：{detail}")
+                return
+            self.log(
+                job_dir,
+                f"[final-report] Agent 未产出分析文档，已生成待补全骨架 {report}",
+            )
+        self.check_final_report(job_dir, package_root, prefix, script)
+
+    def check_final_report(
+        self, job_dir: Path, package_root: Path, prefix: str, script: Path,
+    ) -> None:
+        """Report the format drift the generator can detect, without failing the job.
+
+        The agent fills the report's `<!-- TODO -->` slots by hand, and two kinds of
+        drift used to reach the reader unnoticed: a hand-added row or a rewritten
+        generated note, and a filled slot that grew into a paragraph. `--check`
+        finds both mechanically. It stays a warning: the tables, `analysis.json` and
+        the package are already valid at this point, and an over-long 分析思路 is a
+        reason to edit the report, not to throw the analysis away.
+        """
+        command = [
+            sys.executable, str(script), str(package_root), "--prefix", prefix, "--check",
+        ]
         completed = subprocess.run(command, text=True, capture_output=True)
-        if completed.returncode != 0:
-            detail = (completed.stderr or completed.stdout or "").strip()[:1500]
-            self.log(job_dir, f"[final-report] 生成分析文档失败，跳过（不影响任务其余产出）：{detail}")
+        if completed.returncode == 0:
             return
-        self.log(
-            job_dir,
-            f"[final-report] Agent 未产出分析文档，已生成待补全骨架 {report}",
-        )
+        lines = (completed.stdout or completed.stderr or "").strip().splitlines()
+        for line in lines[:25]:
+            self.log(job_dir, f"[final-report] {line.rstrip()}")
+        if len(lines) > 25:
+            self.log(
+                job_dir,
+                f"[final-report] 还有 {len(lines) - 25} 行未列出，"
+                f"完整结果：build_final_report.py {package_root} --check",
+            )
 
     @staticmethod
     def ku_binary() -> Path | None:

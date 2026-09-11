@@ -318,7 +318,7 @@ function JobDialog({ open, onClose, onLoaded }) {
     mode: "codex_skill", agent_provider: "codex", agent_model: "", model_name: "GLM5.2",
     isCustomModel: false,
     stage: "prefill", hardware: "Nvidia B200",
-    report_path: "", config_path: "", launch_path: "", source_path: "",
+    report_path: "", config_path: "", source_path: "",
     design_path: "", existing_package_path: "", result_path: "",
     torch_trace_path: "", wiki_url: "", wiki_username: "",
     // Table filename prefix. No longer user-facing: every job gets its own empty
@@ -333,6 +333,7 @@ function JobDialog({ open, onClose, onLoaded }) {
   const [logHasMore, setLogHasMore] = useState(true);
   const [health, setHealth] = useState({
     state: "checking", message: "正在连接本地 Analyzer…", providers: null, builtinModels: [],
+    builtinConfigs: {},
   });
   const [modelCatalog, setModelCatalog] = useState({
     state: "idle", default_model: "", models: [], message: "",
@@ -430,6 +431,7 @@ function JobDialog({ open, onClose, onLoaded }) {
             : "Analyzer 已连接，但没有可用的 Agent Provider",
           providers,
           builtinModels: payload.builtin_models || [],
+          builtinConfigs: payload.builtin_model_configs || {},
         });
       } catch (cause) {
         if (stopped || cause.name === "AbortError") return;
@@ -534,12 +536,24 @@ function JobDialog({ open, onClose, onLoaded }) {
       ...current,
       model_name: value === "__custom__" ? "" : value,
       isCustomModel: value === "__custom__",
+      // A built-in model resolves its own config.json server-side, so any path
+      // typed for the previous model is dropped rather than left in a disabled box.
+      config_path: value === "__custom__" ? current.config_path : "",
     }));
   };
   const knownModels = health.builtinModels?.length
     ? health.builtinModels
-    : ["GLM5.2", "DeepSeekV4", "Kimi-K3"];
+    : ["GLM5.2", "DeepSeekV4", "DeepSeek-V4.1-Flash", "Kimi-K3"];
   const hasBuiltinConfig = !form.isCustomModel && knownModels.includes(form.model_name);
+  const builtinConfigPath = hasBuiltinConfig
+    ? health.builtinConfigs?.[form.model_name] || ""
+    : "";
+  // Shown from the project directory down: a built-in config always sits at
+  // <project>/backend/model_configs/<model>.json, and the leading home path is
+  // noise in a hint whose only job is to say which file gets used.
+  const shortConfigPath = builtinConfigPath
+    ? `/${builtinConfigPath.split("/").slice(-4).join("/")}`
+    : "";
   const provider = health.providers?.[form.agent_provider];
   const importingPackage = form.mode === "existing_package";
   async function submit(event) {
@@ -710,6 +724,7 @@ function JobDialog({ open, onClose, onLoaded }) {
               <select value={form.isCustomModel ? "__custom__" : form.model_name} onChange={setModelName}>
                 <option value="GLM5.2">GLM5.2</option>
                 <option value="DeepSeekV4">DeepSeekV4</option>
+                <option value="DeepSeek-V4.1-Flash">DeepSeek-V4.1-Flash</option>
                 <option value="Kimi-K3">Kimi-K3</option>
                 <option value="__custom__">自定义…</option>
               </select>
@@ -729,13 +744,12 @@ function JobDialog({ open, onClose, onLoaded }) {
             <p className="package-hint span-2">目录内有 analysis.json 时直接展示；只有六张规范 CSV 也能自动转换，不要求额外 sidecar。支持 csv/ 子目录和旧版平铺目录。</p>
           </> : <>
             <label className="span-2"><span>Nsys / Sqlite 文件<i className="req">*</i></span><input required value={form.report_path} onChange={set("report_path")} placeholder="/path/to/report.nsys-rep 或 /path/to/report.sqlite" /><small>注意：.nsys-rep 导出成 .sqlite 的结果与 Nsight Systems 版本有关，建议直接提供已导出的 .sqlite 文件。</small></label>
-            <label className="span-2">Torch Profiler trace（可选，可加速分析）<input value={form.torch_trace_path} onChange={set("torch_trace_path")} placeholder="/path/to/xxx-TP-0.trace.json 或 .trace.json.gz" /><small>提供后会先从中解析每个 kernel 的 Python 调用栈与源码位置，供分析 Agent 查表使用，省去逐个 kernel 检索源码。要求采集时 activities 含 GPU（否则 trace 里没有 kernel 事件）；解析失败不影响主分析。</small></label>
-            <label><span>部署 YAML / 启动命令脚本<i className="req">*</i></span><input required value={form.launch_path} onChange={set("launch_path")} placeholder="/path/to/start_server.sh" /></label>
-            <label><span className="field-title"><span>Model config.json{!hasBuiltinConfig && <i className="req">*</i>}</span>{hasBuiltinConfig && <em className="builtin-hint">已内置，可留空</em>}</span><input required={!hasBuiltinConfig} value={form.config_path} onChange={set("config_path")} placeholder={hasBuiltinConfig ? "留空则使用内置 config.json" : "/path/to/config.json"} /></label>
+            <label className="span-2"><span className="field-title"><span>Model config.json{!hasBuiltinConfig && <i className="req">*</i>}</span>{hasBuiltinConfig && <em className="builtin-hint">已内置，无需填写</em>}</span><input required={!hasBuiltinConfig} disabled={hasBuiltinConfig} value={hasBuiltinConfig ? "" : form.config_path} onChange={set("config_path")} placeholder={hasBuiltinConfig ? (shortConfigPath ? `使用内置 config.json：${shortConfigPath}` : "使用内置 config.json") : "/path/to/config.json"} /></label>
             <label className="span-2"><span>模型源码根目录<i className="req">*</i></span><input required value={form.source_path} onChange={set("source_path")} placeholder="/path/to/sglang/source" /></label>
             <label className="span-2"><span>结果保存目录<i className="req">*</i></span><input required value={form.result_path} onChange={set("result_path")} placeholder="/path/to/result-package（必须为空或不存在）" /></label>
-            <label className="span-2">如流知识库页面（可选，填了就把最终报告写进该页面）<input value={form.wiki_url} onChange={set("wiki_url")} placeholder="https://ku.baidu-int.com/knowledge/<空间>/<目录>/<知识库>/<文档>" /><small>报告仍会写在结果目录里，这里只是额外镜像一份：页面标题取报告标题，nsys 文件与工具产物两格会挂上真实附件（.nsys-rep 原文件、结果目录 zip）。页面已有内容会被覆盖，请填一个专用于本次分析的页面。</small></label>
+            <label className="span-2">如流知识库页面（可选）<input value={form.wiki_url} onChange={set("wiki_url")} placeholder="https://ku.baidu-int.com/knowledge/<空间>/<目录>/<知识库>/<文档>" /></label>
             {form.wiki_url.trim() && <label className="span-2"><span>如流用户名<i className="req">*</i></span><input required value={form.wiki_username} onChange={set("wiki_username")} placeholder="UUAP 用户名，即邮箱前缀" /><small>以这个身份编辑并发布页面。首次使用需在手机端如流确认身份。</small></label>}
+            <label className="span-2">Torch Profiler trace（可选，可加速分析）<input value={form.torch_trace_path} onChange={set("torch_trace_path")} placeholder="/path/to/xxx-TP-0.trace.json 或 .trace.json.gz" /><small>提供后会先从中解析每个 kernel 的 Python 调用栈与源码位置，供分析 Agent 查表使用，省去逐个 kernel 检索源码。</small></label>
             <label className="span-2">设计说明（可选）<input value={form.design_path} onChange={set("design_path")} placeholder="/path/to/design.md" /></label>
           </>}
           {!importingPackage && <label className="span-2">分析范围与硬性要求<textarea value={form.notes} onChange={set("notes")} placeholder="例如：只分析 GLM5.2 的单个非 shared Indexer 层，不要扩展为 4 层周期。" /><small>Agent 必须按这里限定重复单元和分支；无法满足时任务应失败，不能静默改用其他范围。</small></label>}

@@ -21,12 +21,12 @@ Generate:
 9. `<prefix>_analysis_manifest.json`
 10. a position-aware statistics sidecar
 11. `validation_report.json`
-12. `final_report.md` (the human-readable report; see step 10)
-13. `analysis.json` (the stable frontend contract; see step 7)
-14. `xlsx/` (one workbook per table; written by step 11)
+12. `final_report.md` (the human-readable report; see step 11)
+13. `analysis.json` (the stable frontend contract; see step 8)
+14. `xlsx/` (one workbook per table; written by step 12)
 
 The result directory is a package with a fixed shape, not a pile of files. Author
-the analysis flat if that is easier, then run step 11, which is what puts every
+the analysis flat if that is easier, then run step 12, which is what puts every
 artifact in its place and writes the manifest:
 
 ```text
@@ -109,14 +109,35 @@ Record conflicts. Do not infer runtime branches from source defaults.
 
 ## Workflow
 
-### 1. Audit runtime evidence
+### 1. Recover the launch command
+
+The command that produced the capture is inside the trace -- nsys stores the argv
+it wrapped in `META_DATA_CAPTURE`, one row per argument -- so it is read from
+there instead of being asked for as a deployment script:
+
+```bash
+python scripts/extract_launch_command.py /path/report.sqlite \
+  --output /path/metadata/launch_command.txt
+```
+
+Every later step takes this file as `--launch`. It beats a supplied script on
+both counts: shell variables and `$(( ))` arithmetic are already resolved, and it
+cannot disagree with what actually ran. Verified on 86/86 SQLite traces across
+nsys export versions 2025.1 -> 2026.4. A trace with no `PROCESS_*:COMMAND` is a
+hard failure -- the declared parallelism, chunk size and speculative-decoding
+flags all come from here, and inferring them from the kernels would produce a
+confident wrong answer instead of an error. Note this is *declared* intent: the
+`server_args=ServerArgs(...)` line that step 2 reads out of the trace is what the
+runtime actually resolved each flag to, and it still wins on conflict.
+
+### 2. Audit runtime evidence
 
 Run:
 
 ```bash
 python scripts/audit_runtime_evidence.py \
   --sqlite /path/report.sqlite \
-  --launch /path/launch.sh \
+  --launch /path/metadata/launch_command.txt \
   --source /path/source \
   --output /path/runtime_evidence.json
 ```
@@ -132,7 +153,7 @@ annotated `(source commit unverified)` where a claim depends on the source. A
 package whose evidence columns hold boilerplate is rejected by
 `scripts/validate_analysis_package.py`, not accepted with a disclaimer.
 
-### 2. Establish the architecture taxonomy
+### 3. Establish the architecture taxonomy
 
 Read model design/config before examining kernel names. Extract:
 
@@ -197,7 +218,7 @@ group, associate that group with one declared coarse `functional_module`, list
 its logical owners and use `attribution_policy: indivisible`. Never invent a
 fractional timing split.
 
-### 3. Export and inspect the trace
+### 4. Export and inspect the trace
 
 For `.nsys-rep`, export once:
 
@@ -209,7 +230,7 @@ Do not overwrite an existing export unless refresh was requested. Inspect
 kernel, string, NVTX, runtime, process and graph tables using their actual
 version-dependent columns. Prefer full demangled symbols.
 
-### 4. Select the complete repeating sequence
+### 5. Select the complete repeating sequence
 
 Within one representative device/process:
 
@@ -240,7 +261,7 @@ from a different capture, so it saves search, not verification. See
 references/mapping-and-stats.md ("Layer-segmentation priors from the same
 pre-pass").
 
-### 5. Map every kernel
+### 6. Map every kernel
 
 Assign every selected kernel:
 
@@ -304,7 +325,7 @@ Do not map fine-grained `module` labels one-to-one onto `功能模块`. A useful
 functional module normally contains several related fine modules; keep the
 fine detail in the `module` column and mapping evidence.
 
-### 6. Compute position-aware statistics
+### 7. Compute position-aware statistics
 
 Use the complete selected sequence as an exact template. Match every operator
 position and full symbol on every accepted device and graph instance. Never
@@ -324,7 +345,7 @@ Record:
 Use wall-span for total percentages. Do not use summed kernel durations as the
 cycle or layer total.
 
-### 7. Build the package
+### 8. Build the package
 
 Create an ordered task-local semantic map and run:
 
@@ -360,7 +381,7 @@ kernel inside an attention stage remains auxiliary. Core compute is restricted
 to GEMM/BMM/matmul, verified grouped expert GEMMs and actual
 attention/state-update score/normalization/value-aggregation kernels.
 
-Then build the frontend contract, which step 9 validates the tables against:
+Then build the frontend contract, which step 10 validates the tables against:
 
 ```bash
 python scripts/build_analysis_json.py /path/result /path/result/analysis.json \
@@ -369,9 +390,9 @@ python scripts/build_analysis_json.py /path/result /path/result/analysis.json \
 
 `analysis.json` is the stable frontend contract, so generate it before validating.
 It is a derived view: never hand-edit it, fix the table it came from and
-regenerate. The workbooks come later, in step 11, from the tables' final location.
+regenerate. The workbooks come later, in step 12, from the tables' final location.
 
-### 8. Compute shapes and MFU
+### 9. Compute shapes and MFU
 
 Compute GEMM MFU only when M/N/K, active branch, operand formats, Tensor Core
 compute dtype, duration and dense per-GPU hardware peak are verified:
@@ -389,7 +410,7 @@ must not be inflated by changing shapes or peaks. Attention core kernels that
 are not GEMMs should leave shape/MFU blank. Reject MFU above 100%. Leave
 shape/MFU blank when evidence is insufficient.
 
-### 9. Validate
+### 10. Validate
 
 Run:
 
@@ -424,13 +445,13 @@ unit keeps its structural identity. Those checks are also a script of their own:
 python scripts/validate_frontend_contract.py /path/result/analysis.json
 ```
 
-Nobody has to remember to run it: step 11 runs it, and repairs what it can, before
+Nobody has to remember to run it: step 12 runs it, and repairs what it can, before
 writing the manifest. Run it directly only to see the violations while fixing them
 -- it exits non-zero and names every one. The NsysScope service runs the same
 script as its own last gate, so a package that passes here will not be rejected by
 the tool.
 
-### 10. Write the analysis report
+### 11. Write the analysis report
 
 Every task ends with `final_report.md` in the result directory -- the one
 deliverable a human reads instead of the tables. Generate it after the seventh
@@ -443,18 +464,34 @@ python scripts/build_final_report.py /path/result --prefix model
 The script fills every fact and every table from the package's own data
 (model/hardware/stage, engine parallelism, chunk/batch size, the forward step
 split, target's and draft's children, functional modules over the repeating
-unit, operator categories, a kernel-level ranking table, and a core-compute
-table in execution order with shape/MFU/MBU), and leaves `<!-- TODO ... -->`
+unit, operator categories, a kernel-level ranking table, and every core-compute
+operator of the pattern in execution order with shape/MFU/MBU), and leaves
+`<!-- TODO ... -->`
 markers only for what it could not read structurally: 代码版本 (leave as `—`
 unless told otherwise), ctx len/MTP or TP/EP/PP when the manifest lacks them,
 the model-structure line, and 分析思路's one-sentence selection rationale.
 Replace every marker and keep the generated numbers -- if a number looks
 wrong, fix the table it came from, not the report.
 
+After the markers are filled, check the result mechanically:
+
+```bash
+python scripts/build_final_report.py /path/result --prefix model --check
+```
+
+`--check` regenerates the skeleton and requires every generated line to be
+byte-identical, so a hand-added table row or a rewritten generated note fails
+here instead of being spotted by a reader; it also measures every filled slot
+and every prose line (中文字数 + 每段英文/数字算 1 个词) against the report's
+length limits (正文 75, 第1节配置字段 35). Fix the report until it passes. If a
+generated line is wrong for this package, change `build_final_report.py` and
+regenerate -- do not hand-patch the line, or the next package repeats the bug.
+
 This is a pure timeline/operator-timing report: no 结论 section, no 潜在优化点,
 no prose interpretation. Every line is a fact with a number behind it. 分析思路
 is the one sentence that is not a table -- state why this repeating unit was
-selected and its wall time, nothing more. See references/final-report-format.md
+selected and its wall time, nothing more: no sampling min/max, no per-variant
+单层耗时 that 2.2.1 already carries. See references/final-report-format.md
 for the section
 layout, the paste-fidelity rules the HTML tables depend on, and the restraint
 this implies, and references/final_report.example.md for a complete filled-in
@@ -475,7 +512,7 @@ invent one. It needs the `ku-doc-manage` Skill's CLI (`--ku-bin`, or
 `<!-- TODO -->` markers, and reads the page back afterwards to check the table,
 cell and tint counts against the source rather than trusting the API's 200.
 
-### 11. Finalize the package layout
+### 12. Finalize the package layout
 
 Last step, once the tables, `analysis.json`, `validation_report.json` and
 `final_report.md` are all written:
@@ -491,7 +528,7 @@ table into `xlsx/`, and emits `nsysscope-package.json` with the prefix, the tabl
 list and the directory names. `--trace` is optional; omit it when the analysis
 was not driven from a local export.
 
-Before it writes the manifest it runs the frontend contract check (step 9) on
+Before it writes the manifest it runs the frontend contract check (step 10) on
 `analysis.json`. A violation there is usually a stale or half-written conversion
 over tables that are fine, and that is repairable without judgement, so the
 packager rebuilds `analysis.json` from `csv/` and re-checks instead of failing --

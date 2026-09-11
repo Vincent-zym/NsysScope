@@ -1866,3 +1866,275 @@ def test_nsys_fetch_reports_a_bar_with_rate_and_eta(tmp_path: Path) -> None:
     # Progress stays inside the slice reserved for the fetch, below the export.
     assert 10 <= first[0] < last[0] <= 16
     assert "100%" in last[1] and "剩余约 0 秒" in last[1]
+
+
+def load_report_builder():
+    """Load the Skill's report generator by file, like the converter above."""
+    spec = importlib.util.spec_from_file_location(
+        "nsysscope_build_final_report", SKILL / "scripts" / "build_final_report.py",
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+SKELETON = [
+    '<p style="margin:0"><b>分析思路</b>：<!-- TODO pattern 选取依据 --></p>',
+    '<td style="border:1px solid #999">batch_size=1、<!-- TODO 运行时 shape --></td>',
+    '<p style="margin:0">以下口径为一个重复 pattern 内、逐算子平均耗时之和。</p>',
+]
+
+
+def check_variant(module, tmp_path: Path, lines: list[str]) -> list[str]:
+    report = tmp_path / "final_report.md"
+    report.write_text("\n".join(lines), encoding="utf-8")
+    module.build = lambda package, prefix: "\n".join(SKELETON)  # type: ignore[assignment]
+    return module.check_report(tmp_path, "analysis", report)
+
+
+def test_report_check_accepts_a_short_filled_report(tmp_path: Path) -> None:
+    module = load_report_builder()
+    # The calibration sentence from references/final_report.example.md: 146 characters
+    # but only 28 by the report's own measure, because an identifier counts as one word.
+    filled = [
+        '<p style="margin:0"><b>分析思路</b>：GLM5.2 稀疏 MoE 区按 non-shared(full) '
+        'Indexer : shared Indexer = 1 : 3 交替，以 4 层为一个分析pattern（1 × '
+        'Full-Indexer + 3 × Shared-Indexer），pattern耗时 41.51 ms。</p>',
+        '<td style="border:1px solid #999">batch_size=1、chunk=65536、page_size=64</td>',
+        SKELETON[2],
+    ]
+    assert check_variant(module, tmp_path, filled) == []
+
+
+def test_report_check_leaves_an_unfilled_marker_alone(tmp_path: Path) -> None:
+    module = load_report_builder()
+    # An unfilled marker is an honest "not analysed yet"; a padded sentence is not.
+    assert check_variant(module, tmp_path, list(SKELETON)) == []
+
+
+def test_report_check_flags_an_overlong_analysis_sentence(tmp_path: Path) -> None:
+    module = load_report_builder()
+    verbose = [
+        '<p style="margin:0"><b>分析思路</b>：任务未限定层子类型，故取 trace 中实际存在的'
+        '最小完整重复周期——config.indexer_types 自第 3 层起以 4 层为周期，选定「1 个 '
+        'full-Indexer 层 + 3 个 shared-Indexer 层」（代表样本为 layer 6-9），其墙钟耗时 '
+        '41.51 ms（132 个稳态样本均值，min 40.21 / max 43.37 ms），其中 full-Indexer 层 '
+        '13.11 ms、shared-Indexer 层 9.47 ms。</p>',
+        SKELETON[1],
+        SKELETON[2],
+    ]
+    problems = check_variant(module, tmp_path, verbose)
+    assert len(problems) == 1
+    assert "超过上限" in problems[0]
+
+
+def test_report_check_flags_a_rewritten_generated_note(tmp_path: Path) -> None:
+    module = load_report_builder()
+    rewritten = [
+        SKELETON[0], SKELETON[1],
+        '<p style="margin:0">以下口径为一个重复 pattern 内、逐算子平均耗时之和，'
+        '另外补充一句生成器没写的话。</p>',
+    ]
+    problems = check_variant(module, tmp_path, rewritten)
+    assert len(problems) == 1
+    assert "与生成骨架不一致" in problems[0]
+
+
+def test_report_check_flags_a_hand_added_row(tmp_path: Path) -> None:
+    module = load_report_builder()
+    extra = [*SKELETON, '<th style="border:1px solid #999">模型结构</th>']
+    problems = check_variant(module, tmp_path, extra)
+    assert len(problems) == 1
+    assert "多 1 行" in problems[0]
+
+
+def test_kernel_labels_keep_only_what_distinguishes() -> None:
+    module = load_report_builder()
+    # A lone specialization has nothing to distinguish: every argument collapses.
+    single = "per_token_group_quant_8bit_kernel<__nv_bfloat16, __nv_fp8_e4m3, (bool)1, (bool)1, unsigned int>"
+    assert module.kernel_labels([single])[single] == "per_token_group_quant_8bit_kernel<…>"
+    # Two specializations that differ in one position keep that position only.
+    pair = [
+        "rmsnorm_per_token_quant_kernel<(unsigned int)16, (unsigned int)128, (bool)1, (bool)1>",
+        "rmsnorm_per_token_quant_kernel<(unsigned int)32, (unsigned int)128, (bool)1, (bool)1>",
+    ]
+    labels = module.kernel_labels(pair)
+    assert labels[pair[0]] == "rmsnorm_per_token_quant_kernel<(unsigned int)16, …>"
+    assert labels[pair[1]] == "rmsnorm_per_token_quant_kernel<(unsigned int)32, …>"
+    # Nested template arguments are one argument, not three.
+    nested = "fast_hadamard_transform_kernel<sglang::FastHadamardKernelTraits<(int)16, (int)7, __nv_bfloat16>>"
+    assert module.split_template_args(nested)[1] == [
+        "sglang::FastHadamardKernelTraits<(int)16, (int)7, __nv_bfloat16>",
+    ]
+
+
+def test_kernel_labels_never_merge_two_kernels() -> None:
+    module = load_report_builder()
+    # The source table wrote the same base both expanded and collapsed; collapsing
+    # the expanded one too would give both rows the same label.
+    names = [
+        "per_token_group_quant_8bit_kernel<__nv_bfloat16, __nv_fp8_e4m3, (bool)1, (bool)1, unsigned int>",
+        "per_token_group_quant_8bit_kernel<…>",
+    ]
+    labels = module.kernel_labels(names)
+    assert len(set(labels.values())) == 2
+    assert labels[names[1]] == "per_token_group_quant_8bit_kernel<…>"
+
+
+def test_kernel_labels_leave_untemplated_and_short_names_alone() -> None:
+    module = load_report_builder()
+    # No `<...>`, but over-long: the identifier rule shortens it, keeping the stem
+    # and the trailing variant index so the row stays recognizable.
+    fused = "triton_poi_fused__to_copy_arange_ge_index_index_put_lift_fresh_randint_remainder_view_4"
+    # Short enough to read as-is: shortening would only lose information.
+    short = "gatherTopK<float,uint,2,false>"
+    labels = module.kernel_labels([fused, short])
+    assert labels[fused].startswith("triton_poi_fused__to_copy")
+    assert labels[fused].endswith("_4") and len(labels[fused]) <= 60
+    assert labels[short] == short
+
+
+def test_identifier_labels_shorten_any_family_not_a_known_list() -> None:
+    module = load_report_builder()
+    # Neither family was ever special-cased by name; both must shorten anyway.
+    names = [
+        "bmm_Bfloat16_MxE2m1MxE4m3_Fp32_Ab32_Bb32_t128x128x256u2_s4_et128x64_m256x128x32_c2x1x1_rM_TN_transOut_schPd2x1x2x3_biasFp32M_bN_rgTma_clmp_dynB_sm100f",
+        "bmm_MxE4m3_MxE2m1MxE4m3_Fp32_Ab32_Bb32_Cb32_t128x128x256u2_s4x4x4x4x1x4_et128x32_m256x128x32_c2x1x1_rM_TN_transOut_schPd2x1x2x3_biasFp32M_fCp_bN_ldgsts_ldgstsSf_rgTma_clmp_siTuGlu_lbW4_lsfbW4_dynB_sm100f",
+        "fmhaSm103aKernel_QkvBfloat16OBfloat16HQk192HV128SeparateQkvCausalVarSeqQ128Kv128PersistentContext",
+    ]
+    labels = module.kernel_labels(names)
+    assert len(set(labels.values())) == 3
+    for name, label in labels.items():
+        assert len(label) <= 60, label
+        assert label.startswith(name.split("_")[0])
+        assert "…" in label
+    # The variant tag at the end survives: it is what tells siblings apart.
+    assert labels[names[0]].endswith("_sm100f")
+
+
+def test_identifier_labels_prefer_detail_over_brevity() -> None:
+    module = load_report_builder()
+    # Two triton kernels differing only in the trailing index: the label must not
+    # collapse to `triton_…_4`, it should spend the budget on the op list.
+    names = [
+        "triton_poi_fused__to_copy_arange_ge_index_index_put_lift_fresh_randint_remainder_view_4",
+        "triton_poi_fused__to_copy_arange_ge_index_index_put_lift_fresh_randint_remainder_view_5",
+    ]
+    labels = module.kernel_labels(names)
+    assert len(set(labels.values())) == 2
+    for name, label in labels.items():
+        assert label.startswith("triton_poi_fused__to_copy_arange")
+        assert len(label) <= 60
+    assert labels[names[0]].endswith("_4") and labels[names[1]].endswith("_5")
+
+
+def test_identifier_labels_keep_full_names_when_nothing_separates_them() -> None:
+    module = load_report_builder()
+    # Same tokens in a different order is the pathological case: no budget makes
+    # them distinct without the whole string, so the whole string is kept.
+    stem = "_".join(f"flag{index}" for index in range(30))
+    names = [f"weird_{stem}_a_tail", f"weird_{stem}_b_tail"]
+    labels = module.kernel_labels(names)
+    assert len(set(labels.values())) == 2
+
+
+def load_launch_extractor():
+    """Load the Skill's launch-command extractor by file, like the other scripts."""
+    spec = importlib.util.spec_from_file_location(
+        "nsysscope_extract_launch_command",
+        SKILL / "scripts" / "extract_launch_command.py",
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def write_meta_data_capture(path: Path, entries: dict[str, str]) -> None:
+    import sqlite3
+    connection = sqlite3.connect(path)
+    with connection:
+        connection.execute("CREATE TABLE META_DATA_CAPTURE (name TEXT, value TEXT)")
+        connection.executemany(
+            "INSERT INTO META_DATA_CAPTURE VALUES (?, ?)", entries.items(),
+        )
+    connection.close()
+
+
+def test_launch_command_is_recovered_from_the_trace(tmp_path: Path) -> None:
+    module = load_launch_extractor()
+    trace = tmp_path / "report.sqlite"
+    # One row per argv item is what makes a value containing spaces survive, and
+    # what makes the bare-JSON value of --model-loader-extra-config one argument.
+    write_meta_data_capture(trace, {
+        "PROCESS_0:COMMAND": "python3",
+        "PROCESS_0:ARGUMENT_0": "-m",
+        "PROCESS_0:ARGUMENT_1": "sglang.launch_server",
+        "PROCESS_0:ARGUMENT_2": "--chunked-prefill-size",
+        "PROCESS_0:ARGUMENT_3": "65536",
+        "PROCESS_0:ARGUMENT_4": "--model-loader-extra-config",
+        "PROCESS_0:ARGUMENT_5": '{"num_threads": 8}',
+        "PROCESS_0:WORKING_DIR": "/sgl-workspace",
+    })
+    commands = module.launch_commands(trace)
+    assert len(commands) == 1
+    prefix, argv = commands[0]
+    assert prefix == "PROCESS_0"
+    assert argv[:3] == ["python3", "-m", "sglang.launch_server"]
+    assert argv[-1] == '{"num_threads": 8}'
+    line = module.render(commands).strip()
+    # Quoted, so a consumer that splits on whitespace cannot break the JSON value.
+    assert "'{\"num_threads\": 8}'" in line
+    assert "--chunked-prefill-size 65536" in line
+
+
+def test_launch_command_keeps_every_captured_process(tmp_path: Path) -> None:
+    module = load_launch_extractor()
+    trace = tmp_path / "report.sqlite"
+    write_meta_data_capture(trace, {
+        "PROCESS_0:COMMAND": "python3",
+        "PROCESS_0:ARGUMENT_0": "server.py",
+        "PROCESS_1:COMMAND": "python3",
+        "PROCESS_1:ARGUMENT_0": "worker.py",
+    })
+    commands = module.launch_commands(trace)
+    assert [prefix for prefix, _ in commands] == ["PROCESS_0", "PROCESS_1"]
+    rendered = module.render(commands)
+    assert "# PROCESS_0" in rendered and "worker.py" in rendered
+
+
+def test_a_trace_without_the_launch_command_fails_loudly(tmp_path: Path) -> None:
+    module = load_launch_extractor()
+    empty = tmp_path / "empty.sqlite"
+    import sqlite3
+    sqlite3.connect(empty).close()
+    assert module.launch_commands(empty) == []
+
+    runner = JobRunner(settings(tmp_path), JobStore(tmp_path / "jobs.json"))
+    job_dir = tmp_path / "job"
+    (job_dir / "metadata").mkdir(parents=True)
+    with pytest.raises(RuntimeError) as failure:
+        runner.extract_launch_command(job_dir, empty)
+    # The message has to say what to check: guessing the flags from kernels would
+    # produce a confident wrong answer instead of a failure.
+    assert "META_DATA_CAPTURE" in str(failure.value)
+
+
+def test_a_job_no_longer_needs_a_launch_script(tmp_path: Path) -> None:
+    material = tmp_path / "material"
+    material.mkdir()
+    report = material / "report.sqlite"
+    report.write_text("")
+    source = material / "src"
+    source.mkdir()
+    request = JobCreate(
+        model_name="GLM5.2",           # bundled config fills config_path in
+        stage="prefill",
+        hardware="Nvidia B200",
+        report_path=str(report),
+        source_path=str(source),
+        result_path=str(tmp_path / "result"),
+    )
+    assert not hasattr(request, "launch_path")
+    assert request.config_path is not None

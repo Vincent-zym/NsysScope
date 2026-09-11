@@ -32,7 +32,6 @@ class JobCreate(BaseModel):
     hardware: str = Field(min_length=1, max_length=120)
     report_path: str | None = None
     config_path: str | None = None
-    launch_path: str | None = None
     source_path: str | None = None
     design_path: str | None = None
     # Optional torch.profiler Chrome trace. When supplied, the runner pre-resolves
@@ -70,7 +69,8 @@ class JobCreate(BaseModel):
         required = {
             "report_path": self.report_path,
             "config_path": self.config_path,
-            "launch_path": self.launch_path,
+            # No launch_path: the launch command comes out of the trace's own
+            # META_DATA_CAPTURE, so there is nothing for the caller to supply.
             "source_path": self.source_path,
             "result_path": self.result_path,
         }

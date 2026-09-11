@@ -82,6 +82,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "auth_required": bool(settings.api_token),
             "max_workers": settings.max_workers,
             "builtin_models": sorted(settings.builtin_model_configs),
+            # The path too, so the form can show which config a built-in model
+            # resolves to instead of leaving the field blank and unexplained.
+            "builtin_model_configs": {
+                name: str(path)
+                for name, path in sorted(settings.builtin_model_configs.items())
+            },
         }
 
     @app.get("/api/providers/{provider}/models", dependencies=[Depends(authorize)])
@@ -104,7 +110,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if not provider["ready"]:
                 raise HTTPException(status_code=422, detail=provider["message"])
         for field in (
-            "report_path", "config_path", "launch_path", "source_path",
+            "report_path", "config_path", "source_path",
             "design_path", "torch_trace_path", "existing_package_path",
         ):
             value = getattr(request, field)

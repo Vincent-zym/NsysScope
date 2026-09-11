@@ -58,7 +58,13 @@ ARTIFACT_CELL = "工具产物"
 
 
 def resolve_ku_binary(explicit: str | None) -> Path:
-    """Locate the `ku` CLI from the ku-doc-manage Skill."""
+    """Locate the `ku` CLI from the ku-doc-manage Skill.
+
+    `Path.home()` is not enough on its own: this script often runs as a different
+    user than the one whose home holds the checkout (a service, or a root shell),
+    so the installed Comate Skill directory and the checkout next to this project
+    are searched too.
+    """
     candidates = []
     if explicit:
         candidates.append(Path(explicit))
@@ -71,7 +77,15 @@ def resolve_ku_binary(explicit: str | None) -> Path:
     found = shutil.which("ku")
     if found:
         candidates.append(Path(found))
-    candidates.append(Path.home() / "ku-doc-manage" / "bin" / "ku")
+    roots = [Path.home()]
+    username = os.getenv("BAIDU_CC_USERNAME")
+    if username:
+        roots.append(Path("/home/users") / username)
+    # The project checkout's own parent: NsysScope and ku-doc-manage sit side by side.
+    roots.append(Path(__file__).resolve().parents[4].parent)
+    for root in roots:
+        candidates.append(root / "ku-doc-manage" / "bin" / "ku")
+        candidates.append(root / ".comate" / "skills" / ".system" / "ku-doc-manage" / "bin" / "ku")
     for candidate in candidates:
         if candidate.is_file() and os.access(candidate, os.X_OK):
             return candidate.resolve()

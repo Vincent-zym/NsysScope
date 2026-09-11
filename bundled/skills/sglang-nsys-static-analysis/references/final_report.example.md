@@ -27,7 +27,7 @@
 </tr>
 <tr>
 <th style="border:1px solid #999;text-align:center;vertical-align:middle;background-color:#d9e2f3">nsys 文件</th>
-<td style="border:1px solid #999;text-align:center;vertical-align:middle"><code>sglang_glm52_chunk64_p_kernel_opt_0824.nsys-rep</code></td>
+<td style="border:1px solid #999;text-align:center;vertical-align:middle"><code>sglang_glm52_chunk64_p_kernel_opt_0824.sqlite</code></td>
 </tr>
 </table>
 <h1 style="margin:0">2. 分析结果</h1>
@@ -93,7 +93,7 @@
 </tr>
 </table>
 <h3 style="margin:0">2.2.2 按功能模块划分统计</h3>
-<p style="margin:0">以下口径为<b>一个重复 pattern</b>内、稳定样本逐算子平均耗时之和，pattern 合计 41.51 ms，下表覆盖其中 41.10 ms（99.0%，余量为未归类的零散算子）。</p>
+<p style="margin:0">以下口径为<b>一个重复 pattern</b>内、稳定样本逐算子平均耗时之和，pattern 合计 41.51 ms，下表覆盖其中 41.10 ms（99.0%，余量为 kernel 之间的 GPU 空隙）。</p>
 <table border="1" cellspacing="0" cellpadding="6" style="border-collapse:collapse;border:1px solid #999;text-align:center;margin:0">
 <tr>
 <th style="border:1px solid #999;text-align:center;vertical-align:middle;background-color:#b4c7e7">功能模块</th>
@@ -167,6 +167,7 @@
 <p style="margin:0">按算子合计耗时从高到低排列，Top 15；同一 kernel 跨多个模块出现时，耗时/次数为跨模块合计，所属模块列出全部（按各自贡献从高到低排序）。</p>
 <table border="1" cellspacing="0" cellpadding="6" style="border-collapse:collapse;border:1px solid #999;text-align:center;margin:0">
 <tr>
+<th style="border:1px solid #999;text-align:center;vertical-align:middle;background-color:#b4c7e7">序号</th>
 <th style="border:1px solid #999;text-align:center;vertical-align:middle;background-color:#b4c7e7">算子名称</th>
 <th style="border:1px solid #999;text-align:center;vertical-align:middle;background-color:#b4c7e7">所属模块</th>
 <th style="border:1px solid #999;text-align:center;vertical-align:middle;background-color:#b4c7e7">耗时(ms)</th>
@@ -174,6 +175,7 @@
 <th style="border:1px solid #999;text-align:center;vertical-align:middle;background-color:#b4c7e7">启动次数</th>
 </tr>
 <tr>
+<td style="border:1px solid #999;text-align:center;vertical-align:middle">1</td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle"><code>sparse_attn_fwd_kernel_head64</code></td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle">MLA 稀疏注意力核心</td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle">12.71</td>
@@ -181,13 +183,15 @@
 <td style="border:1px solid #999;text-align:center;vertical-align:middle">4</td>
 </tr>
 <tr>
-<td style="border:1px solid #999;text-align:center;vertical-align:middle"><code>sm100_fp8_fp4_mega_moe_impl&lt;max_m=8256,H=6144,I=2048,E=256,topk=8&gt;</code></td>
+<td style="border:1px solid #999;text-align:center;vertical-align:middle">2</td>
+<td style="border:1px solid #999;text-align:center;vertical-align:middle"><code>sm100_fp8_fp4_mega_moe_impl&lt;…&gt;</code></td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle">MoE Experts 计算与输出</td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle">11.34</td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle">27.31%</td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle">4</td>
 </tr>
 <tr>
+<td style="border:1px solid #999;text-align:center;vertical-align:middle">3</td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle"><code>sm100_fp8_fp4_gemm_1d1d_impl&lt;N=6144,K=16384&gt;</code></td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle">Attention 输出与投影</td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle">1.95</td>
@@ -195,6 +199,7 @@
 <td style="border:1px solid #999;text-align:center;vertical-align:middle">4</td>
 </tr>
 <tr>
+<td style="border:1px solid #999;text-align:center;vertical-align:middle">4</td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle"><code>topk_optimized_kernel</code></td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle">NSA Indexer 稀疏索引</td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle">1.88</td>
@@ -202,6 +207,7 @@
 <td style="border:1px solid #999;text-align:center;vertical-align:middle">1</td>
 </tr>
 <tr>
+<td style="border:1px solid #999;text-align:center;vertical-align:middle">5</td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle"><code>gatherTopK&lt;float,uint,2,false&gt;</code></td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle">MoE 路由与 TopK</td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle">1.36</td>
@@ -209,6 +215,7 @@
 <td style="border:1px solid #999;text-align:center;vertical-align:middle">12</td>
 </tr>
 <tr>
+<td style="border:1px solid #999;text-align:center;vertical-align:middle">6</td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle"><code>sm100_fp8_mqa_logits&lt;32,128&gt;</code></td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle">NSA Indexer 稀疏索引</td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle">1.12</td>
@@ -216,6 +223,7 @@
 <td style="border:1px solid #999;text-align:center;vertical-align:middle">1</td>
 </tr>
 <tr>
+<td style="border:1px solid #999;text-align:center;vertical-align:middle">7</td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle"><code>_dequantize_k_cache_paged_kernel</code></td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle">MLA 输入吸收与 KV Cache</td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle">1.03</td>
@@ -223,6 +231,7 @@
 <td style="border:1px solid #999;text-align:center;vertical-align:middle">4</td>
 </tr>
 <tr>
+<td style="border:1px solid #999;text-align:center;vertical-align:middle">8</td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle"><code>per_token_group_quant_8bit_kernel&lt;bf16,fp8_e4m3&gt;</code></td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle">Attention 输出与投影、NSA Indexer 稀疏索引</td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle">0.98</td>
@@ -230,6 +239,7 @@
 <td style="border:1px solid #999;text-align:center;vertical-align:middle">6</td>
 </tr>
 <tr>
+<td style="border:1px solid #999;text-align:center;vertical-align:middle">9</td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle"><code>set_mla_kv_buffer_kernel</code></td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle">MLA 输入吸收与 KV Cache</td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle">0.87</td>
@@ -237,6 +247,7 @@
 <td style="border:1px solid #999;text-align:center;vertical-align:middle">4</td>
 </tr>
 <tr>
+<td style="border:1px solid #999;text-align:center;vertical-align:middle">10</td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle"><code>elementwise_kernel&lt;direct_copy&gt;</code></td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle">MLA 输入吸收与 KV Cache、NSA Indexer 稀疏索引</td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle">0.77</td>
@@ -244,6 +255,7 @@
 <td style="border:1px solid #999;text-align:center;vertical-align:middle">13</td>
 </tr>
 <tr>
+<td style="border:1px solid #999;text-align:center;vertical-align:middle">11</td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle"><code>_quantize_k_cache_fast_kernel</code></td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle">MLA 输入吸收与 KV Cache</td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle">0.73</td>
@@ -251,6 +263,7 @@
 <td style="border:1px solid #999;text-align:center;vertical-align:middle">4</td>
 </tr>
 <tr>
+<td style="border:1px solid #999;text-align:center;vertical-align:middle">12</td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle"><code>concat_mla_absorb_q_kernel</code></td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle">MLA 输入吸收与 KV Cache</td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle">0.72</td>
@@ -258,6 +271,7 @@
 <td style="border:1px solid #999;text-align:center;vertical-align:middle">4</td>
 </tr>
 <tr>
+<td style="border:1px solid #999;text-align:center;vertical-align:middle">13</td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle"><code>ncclDevKernel_AllGather_RING_LL</code></td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle">MLA 输入吸收与 KV Cache、NSA Indexer 稀疏索引</td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle">0.71</td>
@@ -265,6 +279,7 @@
 <td style="border:1px solid #999;text-align:center;vertical-align:middle">5</td>
 </tr>
 <tr>
+<td style="border:1px solid #999;text-align:center;vertical-align:middle">14</td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle"><code>sm100_fp8_fp4_gemm_1d1d_impl&lt;N=16384,K=2048&gt;</code></td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle">Attention 输入与投影</td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle">0.68</td>
@@ -272,6 +287,7 @@
 <td style="border:1px solid #999;text-align:center;vertical-align:middle">4</td>
 </tr>
 <tr>
+<td style="border:1px solid #999;text-align:center;vertical-align:middle">15</td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle"><code>rmsnorm_per_token_quant_kernel&lt;16,128,true,true&gt;</code></td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle">MoE 输入与共享专家、Attention 输入与投影</td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle">0.60</td>
@@ -281,12 +297,14 @@
 <tr>
 <th style="border:1px solid #999;text-align:center;vertical-align:middle;background-color:#d9e2f3">Top 15 累积耗时</th>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle">—</td>
+<td style="border:1px solid #999;text-align:center;vertical-align:middle">—</td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle">37.42</td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle">90.14%</td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle">78</td>
 </tr>
 <tr>
 <th style="border:1px solid #999;text-align:center;vertical-align:middle;background-color:#d9e2f3">pattern总耗时</th>
+<td style="border:1px solid #999;text-align:center;vertical-align:middle">—</td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle">—</td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle">41.51</td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle">100%</td>
@@ -297,6 +315,7 @@
 <p style="margin:0">仅统计核心计算类算子，按执行顺序排列；MFU/MBU 为该算子各次出现的均值，缺 shape 证据时留空。</p>
 <table border="1" cellspacing="0" cellpadding="6" style="border-collapse:collapse;border:1px solid #999;text-align:center;margin:0">
 <tr>
+<th style="border:1px solid #999;text-align:center;vertical-align:middle;background-color:#b4c7e7">序号</th>
 <th style="border:1px solid #999;text-align:center;vertical-align:middle;background-color:#b4c7e7">算子名称</th>
 <th style="border:1px solid #999;text-align:center;vertical-align:middle;background-color:#b4c7e7">所属模块</th>
 <th style="border:1px solid #999;text-align:center;vertical-align:middle;background-color:#b4c7e7">shape</th>
@@ -307,6 +326,7 @@
 <th style="border:1px solid #999;text-align:center;vertical-align:middle;background-color:#b4c7e7">启动次数</th>
 </tr>
 <tr>
+<td style="border:1px solid #999;text-align:center;vertical-align:middle">1</td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle"><code>sm100_fp8_fp4_gemm_1d1d_impl&lt;N=2624,K=6144&gt;</code></td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle">Attention 输入与投影</td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle"><code>(M=8192,N=2624,K=6144)</code></td>
@@ -317,6 +337,7 @@
 <td style="border:1px solid #999;text-align:center;vertical-align:middle">4</td>
 </tr>
 <tr>
+<td style="border:1px solid #999;text-align:center;vertical-align:middle">2</td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle"><code>sm100_fp8_fp4_gemm_1d1d_impl&lt;N=16384,K=2048&gt;</code></td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle">Attention 输入与投影</td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle"><code>(M=8192,N=16384,K=2048)</code></td>
@@ -327,6 +348,7 @@
 <td style="border:1px solid #999;text-align:center;vertical-align:middle">4</td>
 </tr>
 <tr>
+<td style="border:1px solid #999;text-align:center;vertical-align:middle">3</td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle"><code>sm100_fp8_fp4_gemm_1d1d_impl&lt;N=4096,K=2048&gt;</code></td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle">NSA Indexer 稀疏索引</td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle"><code>(M=8192,N=4096,K=2048)</code></td>
@@ -337,6 +359,7 @@
 <td style="border:1px solid #999;text-align:center;vertical-align:middle">1</td>
 </tr>
 <tr>
+<td style="border:1px solid #999;text-align:center;vertical-align:middle">4</td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle"><code>sm100_fp8_fp4_gemm_1d1d_impl&lt;N=128,K=6144&gt;</code></td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle">NSA Indexer 稀疏索引</td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle"><code>(M=8192,N=128,K=6144)</code></td>
@@ -347,6 +370,7 @@
 <td style="border:1px solid #999;text-align:center;vertical-align:middle">1</td>
 </tr>
 <tr>
+<td style="border:1px solid #999;text-align:center;vertical-align:middle">5</td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle"><code>nvjet_tst_32x64_64x16_1x2_2cta_h_bz_TNN</code></td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle">NSA Indexer 稀疏索引</td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle"><code>(M=8192,N=32,K=6144)</code></td>
@@ -357,6 +381,7 @@
 <td style="border:1px solid #999;text-align:center;vertical-align:middle">1</td>
 </tr>
 <tr>
+<td style="border:1px solid #999;text-align:center;vertical-align:middle">6</td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle"><code>sm100_fp8_mqa_logits&lt;32,128&gt;</code></td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle">NSA Indexer 稀疏索引</td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle"><code>—</code></td>
@@ -367,6 +392,7 @@
 <td style="border:1px solid #999;text-align:center;vertical-align:middle">1</td>
 </tr>
 <tr>
+<td style="border:1px solid #999;text-align:center;vertical-align:middle">7</td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle"><code>nvjet_tst_256x256_64x4_2x1_2cta_v_bz_TNT</code></td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle">MLA 输入吸收与 KV Cache</td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle"><code>(M=524288,N=512,K=192)</code></td>
@@ -377,6 +403,7 @@
 <td style="border:1px solid #999;text-align:center;vertical-align:middle">4</td>
 </tr>
 <tr>
+<td style="border:1px solid #999;text-align:center;vertical-align:middle">8</td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle"><code>sparse_attn_fwd_kernel_head64</code></td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle">MLA 稀疏注意力核心</td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle"><code>—</code></td>
@@ -387,6 +414,7 @@
 <td style="border:1px solid #999;text-align:center;vertical-align:middle">4</td>
 </tr>
 <tr>
+<td style="border:1px solid #999;text-align:center;vertical-align:middle">9</td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle"><code>nvjet_tst_128x256_64x6_2x1_2cta_v_bz_TNT</code></td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle">Attention 输出与投影</td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle"><code>(M=524288,N=256,K=512)</code></td>
@@ -397,6 +425,7 @@
 <td style="border:1px solid #999;text-align:center;vertical-align:middle">4</td>
 </tr>
 <tr>
+<td style="border:1px solid #999;text-align:center;vertical-align:middle">10</td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle"><code>sm100_fp8_fp4_gemm_1d1d_impl&lt;N=6144,K=16384&gt;</code></td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle">Attention 输出与投影</td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle"><code>(M=8192,N=6144,K=16384)</code></td>
@@ -407,6 +436,7 @@
 <td style="border:1px solid #999;text-align:center;vertical-align:middle">4</td>
 </tr>
 <tr>
+<td style="border:1px solid #999;text-align:center;vertical-align:middle">11</td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle"><code>sm100_fp8_fp4_gemm_1d1d_impl&lt;N=4096,K=6144&gt;</code></td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle">MoE 输入与共享专家</td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle"><code>(M=8192,N=4096,K=6144)</code></td>
@@ -417,6 +447,7 @@
 <td style="border:1px solid #999;text-align:center;vertical-align:middle">4</td>
 </tr>
 <tr>
+<td style="border:1px solid #999;text-align:center;vertical-align:middle">12</td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle"><code>sm100_fp8_fp4_gemm_1d1d_impl&lt;N=6144,K=2048&gt;</code></td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle">MoE 输入与共享专家</td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle"><code>(M=8192,N=6144,K=2048)</code></td>
@@ -427,6 +458,7 @@
 <td style="border:1px solid #999;text-align:center;vertical-align:middle">4</td>
 </tr>
 <tr>
+<td style="border:1px solid #999;text-align:center;vertical-align:middle">13</td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle"><code>nvjet_tst_128x128_64x8_2x2_2cta_h_bz_TNT</code></td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle">MoE 路由与 TopK</td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle"><code>(M=8192,N=256,K=6144)</code></td>
@@ -437,7 +469,8 @@
 <td style="border:1px solid #999;text-align:center;vertical-align:middle">4</td>
 </tr>
 <tr>
-<td style="border:1px solid #999;text-align:center;vertical-align:middle"><code>sm100_fp8_fp4_mega_moe_impl&lt;max_m=8256,H=6144,I=2048,E=256,topk=8&gt;</code></td>
+<td style="border:1px solid #999;text-align:center;vertical-align:middle">14</td>
+<td style="border:1px solid #999;text-align:center;vertical-align:middle"><code>sm100_fp8_fp4_mega_moe_impl&lt;…&gt;</code></td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle">MoE Experts 计算与输出</td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle"><code>(M=65536,N=6144,K=6144)</code></td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle">11.34</td>
@@ -450,6 +483,7 @@
 <th style="border:1px solid #999;text-align:center;vertical-align:middle;background-color:#d9e2f3">核心计算合计</th>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle">—</td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle">—</td>
+<td style="border:1px solid #999;text-align:center;vertical-align:middle">—</td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle">30.26</td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle">72.89%</td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle">—</td>
@@ -458,6 +492,7 @@
 </tr>
 <tr>
 <th style="border:1px solid #999;text-align:center;vertical-align:middle;background-color:#d9e2f3">pattern总耗时</th>
+<td style="border:1px solid #999;text-align:center;vertical-align:middle">—</td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle">—</td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle">—</td>
 <td style="border:1px solid #999;text-align:center;vertical-align:middle">41.51</td>
@@ -507,6 +542,6 @@
 </tr>
 <tr>
 <th style="border:1px solid #999;text-align:left;vertical-align:middle;background-color:#d9e2f3">工具产物</th>
-<td style="border:1px solid #999;text-align:left;vertical-align:middle"><code>analysis.json</code>（前端契约）、<code>final_report.md</code>（本报告）、<code>nsysscope-package.json</code>（包清单）、<code>csv/</code>（规范化表）、<code>xlsx/</code>（对应工作簿）、<code>trace/sglang_glm52_chunk64_p_kernel_opt_0824.sqlite</code>（导出的 SQLite trace，原始 nsys 文件：<code>/home/users/zhongyuanming/record_NsysScope_analysis/glm52_prefill_analysis_0829_1/trace/sglang_glm52_chunk64_p_kernel_opt_0824.sqlite</code>）</td>
+<td style="border:1px solid #999;text-align:left;vertical-align:middle"><code>analysis.json</code>（前端契约）、<code>final_report.md</code>（本报告）、<code>nsysscope-package.json</code>（包清单）、<code>csv/</code>（规范化表）、<code>xlsx/</code>（对应工作簿）、<code>trace/sglang_glm52_chunk64_p_kernel_opt_0824.sqlite</code>（导出的 SQLite trace，原始 nsys 文件：<code>/home/users/zhongyuanming/dev_dir/v15.4.7.4/sglang_glm52_chunk64_p_kernel_opt_0824.sqlite</code>）</td>
 </tr>
 </table>

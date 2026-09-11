@@ -17,6 +17,16 @@ GLM5.2 prefill analysis). Read it as the reference for the exact skeleton
 shape and for how terse 分析思路 is. When in doubt, match it rather than
 inventing a new shape.
 
+`build_final_report.py <package> --check` enforces the mechanical half of this
+document: it regenerates the skeleton, requires every generated line to be
+byte-identical (so a hand-added row or a rewritten generated note fails there),
+and measures each filled slot and each prose line. Length is counted as 中文字数
+plus one per run of Latin/digits, because an identifier like
+`flashinfer_mxfp4` is not compressible -- by that measure the calibration
+sentence below is 28 and the 240-character version it replaced was 90. The
+limits are 75 for a prose line and 35 for a section-1 config value. Run it
+after filling the markers; when it flags a generated line, fix the generator.
+
 ## Section layout
 
 ```text
@@ -32,9 +42,11 @@ inventing a new shape.
     <h3>2.2.3 按算子大类划分统计</h3>  首列 pattern总耗时，其余为核心计算/通信/
                                        小算子（辅助算子）
     <h3>2.2.4 按算子小类划分统计</h3>  按算子（kernel）合计耗时排序 Top 15，
-                                       含所属模块、占pattern耗时、启动次数，
-                                       表尾 Top N 累积耗时 + pattern总耗时 两行
-    <h3>2.2.5 按核心计算统计</h3>  核心计算算子按执行顺序，含 shape/MFU/MBU，
+                                       首列 序号，含所属模块、占pattern耗时、
+                                       启动次数，表尾 Top N 累积耗时 +
+                                       pattern总耗时 两行
+    <h3>2.2.5 按核心计算统计</h3>  一个 pattern 内全部核心计算算子，首列 序号，
+                                     按执行顺序，含 shape/MFU/MBU/启动次数，
                                      表尾 核心计算合计 + pattern总耗时 两行
   <h2>2.3 Draft部分耗时统计</h2>   only when the capture has a draft phase
                                      (speculative decoding enabled) -- omitted
@@ -98,6 +110,15 @@ after the table.
   time is) in one sentence -- it is not a place for conclusions or judgement,
   and it is the only prose sentence in the entire report that is not a table
   caption. Everything else is a table, a table's caption, or a `<!-- TODO -->`.
+  Concretely, it does **not** carry the sampling statistics behind the wall time
+  (`132 个稳态样本均值，min 40.21 / max 43.37 ms`) nor the per-variant 单层耗时 --
+  the first is methodology, the second is already 2.2.1's own row, and both are
+  what turned a 100-character line into a 240-character one in practice.
+- The notes above 2.2.2/2.2.4/2.2.5 are generated, already carry the numbers they
+  need, and are not an invitation to append. If a generated note is factually
+  wrong for this package (e.g. it says 余量为未归类的零散算子 when every operator
+  is classified), fix `build_final_report.py` so it derives the right wording from
+  the data -- do not hand-patch the report and leave the generator wrong.
 - Do not explain the methodology, the verification steps or the closure
   invariants. That belongs in references/output-spec.md, not in a report a
   performance engineer reads to decide what to optimise.
@@ -190,11 +211,15 @@ reintroduce a list where a table already covers the same ground.
 
 ## Table conventions
 
+- 2.2.4 and 2.2.5 carry a leading 序号 column so a row can be referred to by
+  number in a discussion; it is the row's position in that table's own ordering
+  (ranking for 2.2.4, execution order for 2.2.5), not an id from any CSV. The
+  footer rows put their label in that column.
 - Metrics are rows, entities are columns, so a table stays readable when it has
   eleven functional modules -- except the vertical fact tables in sections 1
-  and 3, and 2.2.4/2.2.5's per-kernel tables, where each row is one entity (one
-  config field, one kernel) because there is exactly one metric per row, not
-  several.
+  and 3, and 2.2.4/2.2.5, where each row is one entity (one config field, one
+  kernel, one core-compute operator) because there is exactly one metric per
+  row, not several.
 - Header row background `#b4c7e7`, first column `#d9e2f3`, every cell centred
   (`text-align:center`, see paste-fidelity rules above for why left-align is
   never used even in a fact table).
@@ -215,6 +240,29 @@ reintroduce a list where a table already covers the same ground.
   一个 其他 residual; an eager capture with a detected MTP/NextN layer
   segments draft by variant exactly like target's 2.2.1. Both shapes render
   through the same table, so do not assume 2.3.1 always looks like 2.2.1.
+- 算子名称 keeps only what distinguishes one kernel from another **in this
+  package**, decided from the package's whole name set rather than per name.
+  A template argument that is identical across every specialization of the same
+  base name tells the reader nothing and collapses into `…`:
+  `per_token_group_quant_8bit_kernel<__nv_bfloat16, __nv_fp8_e4m3, (bool)1,
+  (bool)1, unsigned int>` is the only specialization of its base, so it shows as
+  `per_token_group_quant_8bit_kernel<…>`; two specializations that differ in one
+  argument keep exactly that argument. Symbols under 60 characters are left
+  exactly as the table spelled them (shortening a readable name only loses
+  information), and a label must never merge two different kernels -- when
+  collapsing would collide, the dropped arguments come back until the labels
+  differ again.
+- Symbols whose parameters are baked into the identifier instead of a `<...>`
+  list (`bmm_MxE4m3_..._sm100f` at 203 characters, `kernel_cutlass_kernel_...`,
+  `fmhaSm103aKernel_QkvBfloat16...`, `triton_poi_fused__to_copy_...`) go through
+  the same idea applied to `_`-separated tokens: keep as much as fits in 60
+  characters -- a leading run of tokens, or the family name plus the tokens no
+  sibling has -- with `…` marking the elision and the last token (variant index,
+  arch tag) always kept. There is deliberately **no list of known families**:
+  the previous version special-cased two prefixes by name, so `bmm_...` and
+  `fmhaSm103aKernel_...` were not shortened at all, and the next new symbol
+  would not have been either. When nothing separates two names within the
+  budget, the full names are kept -- over-long beats ambiguous.
 - 2.2.4 ranks by each kernel's own total duration across every module and unit
   position it appears in -- one row per kernel, never split into one row per
   (kernel, module) pair, so 启动次数 and 耗时(ms) always agree with the totals
@@ -228,12 +276,26 @@ reintroduce a list where a table already covers the same ground.
   `pattern总耗时`, `核心计算合计` + `pattern总耗时`). The children never sum
   exactly to that total: they fall short by the unclassified remainder, or
   exceed it under multi-stream overlap. Showing the total is what makes that
-  gap visible; do not normalise the columns to make them add up.
-- 2.2.5 lists core-compute kernels in **execution order**, taken from the origin
-  table's `start_ns` within one `unit_position` and joined to the other tables on
-  `module`. Do not take the row order of `<prefix>_core_compute_table.csv` or the
-  operator overview for this -- both are grouped by functional module, which puts
-  an attention output projection ahead of the attention core that feeds it. MFU
-  and MBU are the mean over the kernel's occurrences in the unit (they differ by
-  well under a percentage point across unit positions); a kernel with no shape
-  evidence keeps an empty MFU/MBU rather than a fabricated one.
+  gap visible; do not normalise the columns to make them add up. 2.2.2's note
+  names the cause of the shortfall from the data rather than by habit: when the
+  module durations already sum to the operator table's 总计, nothing is
+  unclassified and the remainder is the GPU gap between kernels; only when they
+  sum below it is the remainder unclassified operators.
+- 2.2.5 lists **every core-compute operator** of one pattern in **execution
+  order**, one row per operator. An operator here is a (`module`, 算子名称,
+  `shape`) triple, not a kernel name: a package whose core table shortens every
+  deep-gemm specialization to `sm100_fp8_fp4_gemm_1d1d_impl<…>` has seven
+  different GEMMs sharing one name, and keying on the name merged q_b_proj,
+  o_proj, gate_up_proj and the indexer projections into one row spanning four
+  modules — which is the clustering this table must not do. Rows are aggregated
+  over the pattern's repeated unit positions (启动次数 says how many, MFU/MBU are
+  the mean over them, differing by well under a percentage point) because the
+  same operator at four layer positions is the same line of the timeline, not
+  four. The order comes from the origin table's `start_ns` -- the earliest
+  occurrence of each operator -- joined on (`unit_position`, `module`, kernel base
+  name); the core table shortens a symbol to `name<…>` while origin keeps the full
+  `void ns::name<args>`, so only the base names match, and an operator with no
+  start evidence goes last rather than being guessed into the middle. Do not take
+  the row order of `<prefix>_core_compute_table.csv` or the operator overview for
+  this -- both are grouped by functional module, which puts an attention output
+  projection ahead of the attention core that feeds it.

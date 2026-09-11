@@ -36,6 +36,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+from collections.abc import Iterable
 from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 
@@ -316,61 +317,235 @@ def category_table(rows: list[dict[str, str]], pattern_us: float) -> str | None:
 
 
 def abbreviate_kernel_name(name: str) -> str:
-    """Shorten a demangled kernel symbol so the 算子名称 column stays readable.
+    """Escape a kernel label for the 算子名称 column.
 
-    Some symbols carry a long chain of template arguments or a redundant
-    dispatcher prefix (e.g. `kernel_cutlass_kernel_TgvGemmCuteExtKernel_...`,
-    `fmhaSm100fKernel_QkvE4m3OBfloat16H512PagedKvDenseDynamicTokenSparse...`).
-    This keeps the kernel's own identifying name plus its most distinguishing
-    parameter(s) and collapses the rest into `…`, rather than truncating
-    blindly, so two different specializations don't collide on the same
-    abbreviation.
-
-    Every return path escapes `<`/`>` to `&lt;`/`&gt;`, including the
-    untouched short-name path: kernel symbols routinely carry their own
-    literal template angle brackets (e.g. `gatherTopK<float,uint,2,false>`),
-    and this string is placed inside `<code>...</code>` in the report, so an
-    unescaped `<...>` gets parsed as an HTML tag and silently disappears.
+    Shortening itself is decided per package by `kernel_labels()`, from the whole
+    name set rather than from prefixes hardcoded here -- an unknown long symbol
+    must shorten just as well as a known one. This function only does the last
+    step every path needs: escaping `<`/`>` to `&lt;`/`&gt;`. Kernel symbols carry
+    literal template angle brackets (`gatherTopK<float,uint,2,false>`) and this
+    string is placed inside `<code>...</code>`, so an unescaped `<...>` would be
+    parsed as an HTML tag and silently disappear.
     """
-    def escape(text: str) -> str:
-        return text.replace("<", "&lt;").replace(">", "&gt;")
-
-    if len(name) <= 60:
-        return escape(name)
-    # `kernel_cutlass_kernel_<RealName>_<template args...>`: drop the
-    # dispatcher prefix and keep <RealName> plus the first template arg.
-    if name.startswith("kernel_cutlass_kernel_"):
-        rest = name[len("kernel_cutlass_kernel_"):]
-        parts = rest.split("_")
-        real_name = parts[0]
-        first_arg = next((part for part in parts[1:] if part), "")
-        return f"{real_name}&lt;{first_arg},…&gt;" if first_arg else f"{real_name}&lt;…&gt;"
-    # `fmhaSm100fKernel_<CamelCaseFlags>`: flags are concatenated in CamelCase
-    # without a separator. Keep every digit-bearing token (H512, Q8, Kv128,
-    # ...) plus the last plain-word token before the common `AbForGen` tail
-    # (Static/Persistent/MultiCtas, ...) -- together these are what actually
-    # distinguish one specialization from another; dropping the latter would
-    # collide specializations that only differ by scheduling mode into one
-    # abbreviated name.
-    if name.startswith("fmhaSm100fKernel_"):
-        rest = name[len("fmhaSm100fKernel_"):]
-        import re
-        tokens = re.findall(r"[A-Z][a-z]*[0-9]*", rest)
-        distinguishing = [tok for tok in tokens if any(ch.isdigit() for ch in tok)]
-        scheduling = next(
-            (tok for tok in ("Static", "Persistent", "MultiCtas", "Dynamic")
-             if tok in tokens),
-            None,
-        )
-        keep_parts = distinguishing[:3] + ([scheduling] if scheduling else [])
-        keep = "、".join(keep_parts) if keep_parts else rest[:20]
-        return f"fmhaSm100fKernel&lt;{keep},…&gt;"
-    # Long name, no recognized pattern: escape as-is rather than dropping the
-    # brackets silently -- still readable, just not shortened.
-    return escape(name)
+    return name.replace("<", "&lt;").replace(">", "&gt;")
 
 
-def kernel_table(operator_rows: list[dict[str, str]], pattern_us: float, top_n: int = 15) -> str | None:
+def identifier_labels(names: Iterable[str], limit: int = 60) -> dict[str, str]:
+    """Shorten over-long symbols whose parameters are baked into the identifier.
+
+    `bmm_MxE4m3_MxE2m1MxE4m3_Fp32_Ab32_..._sm100f` (203 chars),
+    `kernel_cutlass_kernel_TgvGemmCuteExtKernel_cta64x16x128_...`,
+    `fmhaSm103aKernel_QkvBfloat16OBfloat16HQk192...` and
+    `triton_poi_fused__to_copy_arange_..._view_4` all have the same shape: a
+    family name followed by a long run of `_`-separated (or CamelCase-run) flags.
+    There is no list of families here on purpose -- the previous version special
+    cased two prefixes by name, so the next new long symbol was simply not
+    shortened at all.
+
+    The rule is "show as much as fits, and never merge two rows": candidate
+    labels are built by keeping a run of leading tokens, or only the tokens that
+    this member does not share with its siblings, each token clipped to a
+    character budget, with `…` marking what was dropped and the last token always
+    kept (it is usually the variant index or arch tag). Among the candidates that
+    give every name in the family its own label, the most detailed one that still
+    fits `limit` wins; if none fits, the shortest unique one does. When nothing
+    separates them, the full names are kept.
+    """
+    groups: dict[str, list[str]] = {}
+    for name in names:
+        groups.setdefault(name.split("_")[0], []).append(name)
+    labels: dict[str, str] = {}
+    for members in groups.values():
+        members = sorted(set(members))
+        if not any(len(name) > limit for name in members):
+            labels.update({name: name for name in members})
+            continue
+        tokens = {name: name.split("_") for name in members}
+        widest = max(len(parts) for parts in tokens.values())
+        unique: list[dict[str, str]] = []
+        for budget in (24, 40, 64, 1024):
+            for keep in range(2, widest + 1):
+                unique.append(_assemble(tokens, budget, keep=keep))
+            for stem in (1, 2, 3):
+                for count in range(1, 4):
+                    unique.append(_assemble(tokens, budget, stem=stem, count=count))
+        candidates = [
+            candidate for candidate in unique
+            if len(set(candidate.values())) == len(candidate)
+        ]
+        if not candidates:
+            labels.update({name: name for name in members})
+            continue
+        fitting = [c for c in candidates if max(len(v) for v in c.values()) <= limit]
+        if fitting:
+            # Most detail that still fits: a label is only useful if it is
+            # recognizable, so spend the whole budget rather than the minimum.
+            labels.update(max(fitting, key=lambda c: max(len(v) for v in c.values())))
+        else:
+            labels.update(min(candidates, key=lambda c: max(len(v) for v in c.values())))
+    return labels
+
+
+def _assemble(tokens: dict[str, list[str]], budget: int, keep: int | None = None,
+              stem: int = 1, count: int = 0) -> dict[str, str]:
+    """One candidate label per name.
+
+    Two shapes: a run of `keep` leading tokens, or a `stem`-token prefix plus the
+    first `count` tokens that no sibling has -- the latter is what reaches the
+    distinguishing part of a symbol whose siblings share a long common middle.
+    """
+    labels = {}
+    for name, parts in tokens.items():
+        if keep is not None:
+            head = parts[:keep]
+        else:
+            others = [other for other in tokens.values() if other is not parts]
+            head = parts[:stem] + [
+                part for part in parts[stem:-1]
+                if all(part not in other for other in others)
+            ][:count]
+        pieces = [_clip(part, budget) for part in head]
+        body = parts[len(head):] if keep is not None else [
+            part for part in parts[1:] if part not in head
+        ]
+        if body:
+            tail = parts[-1]
+            if len(body) > 1 or body[0] != tail:
+                pieces.append("…")
+            if tail not in head:
+                pieces.append(_clip(tail, budget))
+        labels[name] = "_".join(pieces)
+    return labels
+
+
+def _clip(token: str, budget: int) -> str:
+    """One token, cut to `budget` characters at a CamelCase boundary when possible."""
+    if len(token) <= budget:
+        return token
+    import re
+    words = re.findall(r"[A-Z]?[a-z]+\d*|[A-Z]+\d*|\d+", token)
+    kept: list[str] = []
+    for word in words:
+        if len("".join([*kept, word])) > budget:
+            break
+        kept.append(word)
+    head = "".join(kept) if kept else token[:budget]
+    return f"{head}…"
+
+
+def split_template_args(name: str) -> tuple[str, list[str] | None]:
+    """`base<a, b<c,d>, e>` → `("base", ["a", "b<c,d>", "e"])`.
+
+    Splits on top-level commas only, so a nested template argument stays whole.
+    Returns `None` for the argument list when the symbol carries no `<...>` at
+    all (`nvjet_tst_128x256_...`, `triton_poi_fused_...`): those have nothing to
+    drop -- the long middle is the kernel's identity, not a parameter.
+    """
+    start = name.find("<")
+    if start < 0 or not name.endswith(">"):
+        return name, None
+    base, inner = name[:start], name[start + 1:-1]
+    args: list[str] = []
+    depth = 0
+    current = ""
+    for char in inner:
+        if char in "<(":
+            depth += 1
+        elif char in ">)":
+            depth -= 1
+        if char == "," and depth == 0:
+            args.append(current.strip())
+            current = ""
+        else:
+            current += char
+    args.append(current.strip())
+    return base, args
+
+
+def kernel_labels(names: Iterable[str], limit: int = 60) -> dict[str, str]:
+    """Per-package display labels for kernel symbols: keep only what distinguishes.
+
+    A template argument that is identical across every specialization of the same
+    base name in this package carries no information for the reader -- it is the
+    same for all rows -- so it collapses into `…`. Only the positions that
+    actually differ are kept. `per_token_group_quant_8bit_kernel<__nv_bfloat16,
+    __nv_fp8_e4m3, (bool)1, (bool)1, unsigned int>` is the only specialization of
+    its base here, so nothing needs distinguishing and it becomes
+    `per_token_group_quant_8bit_kernel<…>`; two GEMM specializations that differ
+    in one argument keep exactly that argument.
+
+    This is decided from the package's own name set rather than per name, which is
+    what makes it consistent: previously only two hardcoded prefixes were
+    shortened and every other long symbol passed through, so whether a row was
+    abbreviated looked arbitrary.
+
+    A group is only touched when at least one of its names exceeds `limit`: a
+    short symbol is already readable, and shortening it would only cost the reader
+    information. When collapsing would make two names share one label, the
+    dropped positions are added back until they differ again -- a label must never
+    merge two different kernels.
+    """
+    groups: dict[str, list[str]] = {}
+    for name in names:
+        groups.setdefault(split_template_args(name)[0], []).append(name)
+    labels: dict[str, str] = {}
+    for base, members in groups.items():
+        members = sorted(set(members))
+        parsed = {name: split_template_args(name)[1] for name in members}
+        if not any(len(name) > limit for name in members):
+            labels.update({name: name for name in members})
+            continue
+        # `base<…>` in the source table is already opaque: it cannot take part in
+        # deciding which positions differ, or it would make every position differ.
+        concrete = {name: args for name, args in parsed.items()
+                    if args is not None and args != ["…"]}
+        if not concrete:
+            labels.update({name: name for name in members})
+            continue
+        width = max(len(args) for args in concrete.values())
+        differing = [
+            index for index in range(width)
+            if len({tuple(args[index:index + 1]) for args in concrete.values()}) > 1
+        ]
+        for extra in range(width + 1):
+            keep = sorted(set(differing) | set(range(extra)))
+            candidate = {}
+            for name, args in parsed.items():
+                if args is None:
+                    candidate[name] = name
+                elif args == ["…"]:
+                    candidate[name] = f"{base}<…>"
+                else:
+                    kept = [args[index] for index in keep if index < len(args)]
+                    if len(kept) == len(args):
+                        # Nothing was dropped: keep the symbol exactly as the
+                        # table spelled it instead of re-joining it and churning
+                        # whitespace for no gain.
+                        candidate[name] = name
+                        continue
+                    tail = "…" if len(kept) < len(args) else ""
+                    inner = ", ".join([*kept, tail] if tail else kept)
+                    candidate[name] = f"{base}<{inner}>"
+            if len(set(candidate.values())) == len(candidate):
+                labels.update(candidate)
+                break
+        else:
+            # Positions ran out and two names still share a label (the source
+            # table wrote the same base both expanded and collapsed): keep the
+            # full names rather than merging two kernels into one row label.
+            labels.update({name: name for name in members})
+    # Second pass for what the template rule cannot reach: symbols whose flags
+    # live in the identifier itself, with no `<...>` to thin out.
+    plain = [name for name, label in labels.items()
+             if len(label) > limit and "<" not in label]
+    compressed = identifier_labels(plain, limit)
+    for name in plain:
+        labels[name] = compressed.get(labels[name], compressed.get(name, labels[name]))
+    return labels
+
+
+def kernel_table(operator_rows: list[dict[str, str]], pattern_us: float,
+                 labels: dict[str, str] | None = None, top_n: int = 15) -> str | None:
     """Table 2.2.4: every distinct kernel, summed across all modules it appears
     in, ranked by total duration -- highest first.
 
@@ -403,7 +578,8 @@ def kernel_table(operator_rows: list[dict[str, str]], pattern_us: float, top_n: 
     for name, duration in ranked:
         modules = sorted(per_module[name].items(), key=lambda item: -item[1])
         module_names = "、".join(module for module, _ in modules if module)
-        rows.append([abbreviate_kernel_name(name), module_names, ms(duration),
+        rows.append([abbreviate_kernel_name((labels or {}).get(name, name)),
+                     module_names, ms(duration),
                      pct(duration / pattern_us * 100), str(counts[name])])
     lines = [
         '<p style="margin:0">按算子合计耗时从高到低排列，Top '
@@ -411,11 +587,13 @@ def kernel_table(operator_rows: list[dict[str, str]], pattern_us: float, top_n: 
         "所属模块列出全部（按各自贡献从高到低排序）。</p>",
         TABLE_OPEN,
         "<tr>",
-        *(th(cell, HEAD_BG) for cell in ("算子名称", "所属模块", "耗时(ms)", "占pattern耗时", "启动次数")),
+        *(th(cell, HEAD_BG) for cell in (
+            "序号", "算子名称", "所属模块", "耗时(ms)", "占pattern耗时", "启动次数")),
         "</tr>",
     ]
-    for name, module_names, duration_ms, share, count in rows:
+    for order, (name, module_names, duration_ms, share, count) in enumerate(rows, start=1):
         lines.append("<tr>")
+        lines.append(td(str(order)))
         lines.append(td(f"<code>{name}</code>"))
         lines.append(td(module_names))
         lines.append(td(duration_ms))
@@ -434,6 +612,7 @@ def kernel_table(operator_rows: list[dict[str, str]], pattern_us: float, top_n: 
         lines.append("<tr>")
         lines.append(th(label, LABEL_BG))
         lines.append(td("—"))
+        lines.append(td("—"))
         lines.append(td(value_ms))
         lines.append(td(value_pct))
         lines.append(td(value_count))
@@ -442,98 +621,115 @@ def kernel_table(operator_rows: list[dict[str, str]], pattern_us: float, top_n: 
     return "\n".join(lines)
 
 
-def execution_order(origin_rows: list[dict[str, str]]) -> dict[str, int]:
-    """Rank each origin `module` by when it first runs inside one unit position.
+def kernel_base(name: str) -> str:
+    """The kernel's own name, without namespace, template arguments or signature.
 
-    The core-compute and operator tables are grouped by functional module, not
-    emitted in execution order -- their row order puts an attention output
-    projection before the attention core it feeds, which reads as nonsense in a
-    table that claims execution order. The origin table is the only one with
-    `start_ns`, so the order comes from there: one unit position (so positions
-    do not interleave), sorted by start time, taking each module's first
-    appearance. `module` is the join key every other table copies from origin.
+    The core-compute table already shortens a symbol to
+    `sm100_fp8_fp4_gemm_1d1d_impl<…>` while the origin table keeps the full
+    `void deep_gemm::sm100_fp8_fp4_gemm_1d1d_impl<(cute::UMMA::Major)0, ...>`,
+    so the two only join on the base name.
     """
-    positions = [row.get("unit_position") or "" for row in origin_rows]
-    first = next((p for p in positions if p), "")
-    within = [row for row in origin_rows if (row.get("unit_position") or "") == first]
-    try:
-        within.sort(key=lambda row: int(row.get("start_ns") or 0))
-    except (TypeError, ValueError):
-        return {}
-    rank: dict[str, int] = {}
-    for row in within:
-        module = row.get("module") or ""
-        if module and module not in rank:
-            rank[module] = len(rank)
-    return rank
+    head = name.split("<")[0].replace("void ", "").strip()
+    return head.split("::")[-1].split("(")[0].strip()
+
+
+def occurrence_starts(origin_rows: list[dict[str, str]]) -> dict[tuple[str, str, str], list[int]]:
+    """`start_ns` queues per (unit position, module, kernel), earliest first.
+
+    The origin table is the only one carrying `start_ns`, and it is what turns
+    the core-compute table -- which is grouped by functional module, so an
+    attention output projection sits before the attention core that feeds it --
+    back into the order the GPU actually ran. A queue rather than a single value
+    because one kernel can run several times inside the same module.
+    """
+    queues: dict[tuple[str, str, str], list[int]] = {}
+    for row in sorted(origin_rows, key=lambda item: int(item.get("start_ns") or 0)):
+        key = (
+            row.get("unit_position") or "",
+            row.get("module") or "",
+            kernel_base(row.get("operator_name") or ""),
+        )
+        queues.setdefault(key, []).append(int(row.get("start_ns") or 0))
+    return queues
 
 
 def core_compute_table(core_rows: list[dict[str, str]],
                        origin_rows: list[dict[str, str]],
-                       pattern_us: float) -> str | None:
-    """Table 2.2.5: core-compute kernels in execution order, with shape/MFU/MBU.
+                       pattern_us: float,
+                       labels: dict[str, str] | None = None) -> str | None:
+    """Table 2.2.5: every core-compute operator of one pattern, in execution order.
 
-    One row per distinct kernel, summed over its occurrences in the unit. MFU
-    and MBU are the mean over those occurrences: the same kernel at four unit
-    positions differs by well under a percentage point, so a mean reads cleaner
-    than four values or a range, and a kernel with no shape evidence keeps an
-    empty MFU rather than a fabricated one.
+    One row per operator, where an operator is a (dispatch site, kernel, shape)
+    triple -- not per kernel name. The name alone is not an identity: a package
+    whose core table shortens every deep-gemm specialization to
+    `sm100_fp8_fp4_gemm_1d1d_impl<…>` has seven different GEMMs sharing one name,
+    and keying on it merged q_b_proj, o_proj, gate_up_proj and the indexer
+    projections into a single meaningless row spanning four modules. Keying on the
+    triple keeps them as the seven operators they are.
+
+    Rows are aggregated over the pattern's repeated unit positions (启动次数 says
+    how many), because the pattern's four layer positions run the same operator
+    with the same shape -- four identical rows would be noise, not a timeline.
+    MFU/MBU are the mean over those occurrences; they differ by well under a
+    percentage point across positions.
     """
     data = [row for row in core_rows if (row.get("序号") or "").strip().isdigit()]
     if not data:
         return None
-    rank = execution_order(origin_rows)
-    unranked = len(rank)
-    aggregate: dict[str, dict] = {}
-    for row in data:
-        name = row.get("算子名称") or ""
-        entry = aggregate.setdefault(name, {
-            "us": 0.0, "count": 0, "shape": set(), "mfu": [], "mbu": [],
-            "modules": {}, "rank": unranked,
-        })
-        duration = float(row.get("算子耗时(us)") or 0)
-        entry["us"] += duration
-        entry["count"] += 1
-        entry["rank"] = min(entry["rank"], rank.get(row.get("module") or "", unranked))
+    queues = occurrence_starts(origin_rows)
+    aggregate: dict[tuple[str, str, str], dict] = {}
+    for index, row in enumerate(data):
         shape = (row.get("shape") or "").strip()
-        if shape:
-            entry["shape"].add(shape)
-        for key in ("mfu", "mbu"):
-            raw = (row.get(key) or "").strip().rstrip("%")
+        key = (row.get("module") or "", row.get("算子名称") or "", shape)
+        entry = aggregate.setdefault(key, {
+            "us": 0.0, "count": 0, "mfu": [], "mbu": [], "order": (True, 0, index),
+            "module": row.get("功能模块") or "", "name": row.get("算子名称") or "",
+            "shape": shape,
+        })
+        entry["us"] += float(row.get("算子耗时(us)") or 0)
+        entry["count"] += 1
+        queue = queues.get((
+            row.get("单元位置") or "",
+            row.get("module") or "",
+            kernel_base(row.get("算子名称") or ""),
+        ))
+        start = queue.pop(0) if queue else None
+        if start is not None:
+            entry["order"] = min(entry["order"], (False, start, index))
+        for column in ("mfu", "mbu"):
+            raw = (row.get(column) or "").strip().rstrip("%")
             if raw:
                 try:
-                    entry[key].append(float(raw))
+                    entry[column].append(float(raw))
                 except ValueError:
                     pass
-        module = row.get("功能模块") or ""
-        entry["modules"][module] = entry["modules"].get(module, 0.0) + duration
     lines = [
         '<p style="margin:0">仅统计核心计算类算子，按执行顺序排列；'
         "MFU/MBU 为该算子各次出现的均值，缺 shape 证据时留空。</p>",
         TABLE_OPEN,
         "<tr>",
         *(th(cell, HEAD_BG) for cell in (
-            "算子名称", "所属模块", "shape", "耗时(ms)", "占pattern耗时", "MFU", "MBU", "启动次数")),
+            "序号", "算子名称", "所属模块", "shape", "耗时(ms)", "占pattern耗时",
+            "MFU", "MBU", "启动次数")),
         "</tr>",
     ]
     total_us = 0.0
     total_count = 0
-    ordered = sorted(aggregate.items(), key=lambda item: (item[1]["rank"], -item[1]["us"]))
-    for name, entry in ordered:
+    ordered = sorted(aggregate.values(), key=lambda item: item["order"])
+    for order, entry in enumerate(ordered, start=1):
         total_us += entry["us"]
         total_count += entry["count"]
-        modules = sorted(entry["modules"].items(), key=lambda item: -item[1])
-        module_names = "、".join(module for module, _ in modules if module)
-        shape = "、".join(sorted(entry["shape"])) if entry["shape"] else "—"
-        shape = shape.replace("<", "&lt;").replace(">", "&gt;")
+        shape = (entry["shape"] or "—").replace("<", "&lt;").replace(">", "&gt;")
         lines.append("<tr>")
-        lines.append(td(f"<code>{abbreviate_kernel_name(name)}</code>"))
-        lines.append(td(module_names))
+        lines.append(td(str(order)))
+        label = (labels or {}).get(entry["name"], entry["name"])
+        lines.append(td(f"<code>{abbreviate_kernel_name(label)}</code>"))
+        lines.append(td(entry["module"] or "—"))
         lines.append(td(f"<code>{shape}</code>"))
         lines.append(td(ms(entry["us"])))
         lines.append(td(pct(entry["us"] / pattern_us * 100)))
-        for key in ("mfu", "mbu"):
-            values = entry[key]
+        for column in ("mfu", "mbu"):
+            values = entry[column]
             lines.append(td(pct(sum(values) / len(values)) if values else "—"))
         lines.append(td(str(entry["count"])))
         lines.append("</tr>")
@@ -543,8 +739,8 @@ def core_compute_table(core_rows: list[dict[str, str]],
     ):
         lines.append("<tr>")
         lines.append(th(label, LABEL_BG))
-        lines.extend([td("—"), td("—"), td(value_ms), td(value_pct), td("—"), td("—"),
-                      td(value_count)])
+        lines.extend([td("—"), td("—"), td("—"), td(value_ms), td(value_pct), td("—"),
+                      td("—"), td(value_count)])
         lines.append("</tr>")
     lines.append("</table>")
     return "\n".join(lines)
@@ -637,13 +833,17 @@ def build(package: Path, prefix: str) -> str:
     pattern_us = float(manifest.get("total_duration_us") or 0) or 1.0
 
     trace = Path(context.get("sqlite_path") or "")
+    # 原始输入文件：任务给的可能就是 .sqlite 导出，这时把名字改写成 .nsys-rep 会写出一个
+    # 不存在的文件名，所以优先用 report_path 本身的名字，它是什么后缀就报什么后缀。
+    original = Path(context.get("report_path") or context.get("report") or "")
     stage = manifest.get("stage") or context.get("stage") or "—"
     model = context.get("model_name") or prefix
     # 硬件字段只写硬件型号本身：采样 rank / device 是工具的取样细节，不是输入条件，
     # 已经在第3节"工具启动指令"里报告，这里不重复。
     hardware = manifest.get("hardware") or "—"
     parallelism = ((manifest.get("job") or {}).get("parallelism")
-                   or "<!-- TODO TP/EP/PP/DCP 等 -->")
+                   or "<!-- TODO TP/EP/PP/CP 等，只写短名（TP=8、megamoe、EAGLE 投机解码），"
+                      "不要贴 --flag 原文、不要解释 -->")
     shape_parts = [
         f"chunked-prefill-size={manifest['chunk_size']}"
         if manifest.get("chunk_size") else None,
@@ -651,8 +851,9 @@ def build(package: Path, prefix: str) -> str:
     ]
     shape = "、".join(part for part in shape_parts if part) or ""
     shape = (shape + ("、" if shape else "")
-              + "<!-- TODO ctx len/mtp 等运行时 shape -->")
-    nsys_name = trace.name.replace(".sqlite", ".nsys-rep") if trace.name else "—"
+              + "<!-- TODO ctx len/mtp 等运行时 shape，只列值，缺的项直接不写、"
+                "不要解释为什么缺 -->")
+    nsys_name = original.name or trace.name or "—"
     head = [
         h1(f"{model} {stage} 典型shape Nsys TimeLine分析结果"),
         h1("1. 输入配置"),
@@ -678,7 +879,14 @@ def build(package: Path, prefix: str) -> str:
     # 分析思路 belongs here, not under section 2: it states which repeating pattern
     # was selected and its wall time, and that pattern is only the denominator for
     # 2.2's tables -- 2.1 is a forward-step split that does not use it.
-    body.append(p(f"<b>分析思路</b>：<!-- TODO 重复 pattern 的选取依据与 pattern 耗时 -->"))
+    # The hint spells out the length limit and what not to restate, because the
+    # failure mode here is not an empty marker but a 200-character paragraph that
+    # repeats 2.2.1's 单层耗时 row and adds min/max sampling stats no table asks for.
+    body.append(p(
+        "<b>分析思路</b>：<!-- TODO 一句话写出重复 pattern 的选取依据与 pattern 耗时，"
+        "100 字以内，参照 references/final_report.example.md 的同一句；"
+        "不要写采样 min/max、不要重复 2.2.1 已有的单层耗时、不要下结论 -->"
+    ))
     if forward:
         body.append(h3("2.2.1 整体耗时统计"))
         body.append(forward[1])
@@ -688,6 +896,10 @@ def build(package: Path, prefix: str) -> str:
         float(row.get("模块耗时(us)") or 0) for row in stage_rows
         if (row.get("序号") or "").strip().isdigit()
     )
+    classification_rows = read_csv(csv_dir / f"{prefix}_op_classification_table.csv")
+    classified_us = next(
+        (float(row.get("总耗时(us)") or 0) for row in classification_rows
+         if (row.get("算子类型") or "").strip() == "总计"), 0.0)
     # Modules can sum above the unit wall span when variants run on their own
     # streams, and calling that excess "unclassified leftovers" -- as this line
     # used to unconditionally -- is both self-contradictory and wrong.
@@ -699,30 +911,46 @@ def build(package: Path, prefix: str) -> str:
             f"{covered / pattern_us * 100 - 100:.1f}%，按实测原样呈现、不归一化到 100%。"
         ))
     else:
+        # 余量的成因不能一概而论：模块之和已经等于全部算子耗时之和时没有未归类算子，
+        # 差额只能是 pattern 内 kernel 之间的 GPU 空隙；只有模块之和还不到算子总和，
+        # 余量里才真的有未归类的零散算子。写错了方向就是把一个没有证据的成因塞进报告。
+        if classified_us and abs(classified_us - covered) <= 1.0:
+            remainder = "余量为 kernel 之间的 GPU 空隙"
+        else:
+            remainder = "余量为未归类的零散算子"
         body.append(p(
             "以下口径为<b>一个重复 pattern</b>内、稳定样本逐算子平均耗时之和，"
             f"pattern 合计 {ms(pattern_us)} ms，下表覆盖其中 {ms(covered)} ms"
-            f"（{covered / pattern_us * 100:.1f}%，余量为未归类的零散算子）。"
+            f"（{covered / pattern_us * 100:.1f}%，{remainder}）。"
         ))
     modules = module_table(stage_rows, operator_rows, pattern_us)
     if modules:
         body.append(modules)
 
     body.append(h3("2.2.3 按算子大类划分统计"))
-    categories = category_table(
-        read_csv(csv_dir / f"{prefix}_op_classification_table.csv"), pattern_us)
+    categories = category_table(classification_rows, pattern_us)
     if categories:
         body.append(categories)
 
     body.append(h3("2.2.4 按算子小类划分统计"))
-    kernels = kernel_table(operator_rows, pattern_us)
+    core_rows = read_csv(csv_dir / f"{prefix}_core_compute_table.csv")
+    # One label map for the whole report, computed from every kernel name the
+    # package mentions: which template arguments are worth showing depends on
+    # what else is in the table, so 2.2.4 and 2.2.5 must decide it together or
+    # the same kernel would appear under two different labels.
+    labels = kernel_labels(
+        [row.get("算子名称") or "" for row in (*operator_rows, *core_rows)
+         if (row.get("序号") or "").strip().isdigit()]
+    )
+    kernels = kernel_table(operator_rows, pattern_us, labels)
     if kernels:
         body.append(kernels)
 
     core = core_compute_table(
-        read_csv(csv_dir / f"{prefix}_core_compute_table.csv"),
+        core_rows,
         read_csv(csv_dir / f"{prefix}_operator_origin_table.csv"),
         pattern_us,
+        labels,
     )
     if core:
         body.append(h3("2.2.5 按核心计算统计"))
@@ -759,7 +987,7 @@ def build(package: Path, prefix: str) -> str:
             "<code>xlsx/</code>（对应工作簿）"
             + (
                 f"、<code>trace/{trace.name}</code>（导出的 SQLite trace，"
-                f"原始 nsys 文件：<code>{trace}</code>）"
+                f"原始 nsys 文件：<code>{original or trace}</code>）"
                 if trace.name else ""
             ),
         ),
@@ -767,15 +995,114 @@ def build(package: Path, prefix: str) -> str:
     return "\n".join(head + body + tail)
 
 
+PROSE_LIMIT = 75    # 一句正文的长度上限（分析思路、表说明、冲突说明）
+VALUE_LIMIT = 35    # 第1节一个配置字段的上限：值的枚举比正文短，不该变成段落
+
+
+def strip_tags(line: str) -> str:
+    """Visible text of one HTML line, for measuring how long the prose actually is."""
+    import html
+    import re
+    return html.unescape(re.sub(r"<[^>]+>", "", line)).strip()
+
+
+def text_length(text: str) -> int:
+    """长度按"中文字数 + 每段连续英文/数字算 1 个词"计。
+
+    纯字符数会把 `flashinfer_mxfp4`、`41.51 ms` 这类不可压缩的标识符算成十几个
+    字，于是一句合规的短句（example.md 的分析思路，146 个字符）反而比一段冗长的
+    中文更"长"。按这个口径，那句校准句是 28，被用户驳回的 240 字符版本是 90。
+    """
+    import re
+    cjk = r"\u3000-\u9fff\uff00-\uffef"
+    return (len(re.findall(f"[{cjk}]", text))
+            + len(re.findall(f"[^{cjk}]+", text)))
+
+
+def check_report(package: Path, prefix: str, report_path: Path) -> list[str]:
+    """Compare a finished report against the skeleton this file would generate.
+
+    The report is written by the generator and then has its `<!-- TODO -->` slots
+    filled in by hand, which historically let two kinds of drift through unseen:
+    a hand-added row or a rewritten generated note (structure drift), and a
+    filled slot that grew into a 240-character paragraph (length drift). Both are
+    mechanical to catch -- regenerate the skeleton, require every non-TODO line
+    to survive byte-identical, and measure the text of the lines that were filled.
+    """
+    problems: list[str] = []
+    skeleton = build(package, prefix).splitlines()
+    report = report_path.read_text().splitlines()
+    measured: set[int] = set()
+    for index, (want, got) in enumerate(zip(skeleton, report), start=1):
+        if "<!-- TODO" not in want:
+            if want != got:
+                problems.append(
+                    f"第 {index} 行与生成骨架不一致（生成的内容不应手改，"
+                    f"要改就改 build_final_report.py）：\n  骨架：{want}\n  报告：{got}"
+                )
+            continue
+        head_part, _, rest = want.partition("<!-- TODO")
+        tail_part = rest.partition("-->")[2]
+        if not (got.startswith(head_part) and got.endswith(tail_part)):
+            problems.append(
+                f"第 {index} 行的 TODO 槽位以外被改动了：\n  骨架：{want}\n  报告：{got}"
+            )
+            continue
+        if "<!-- TODO" in got:
+            continue  # 未填的 marker 是诚实的"尚未分析"，不算错
+        measured.add(index)
+        filled = strip_tags(got[len(head_part):len(got) - len(tail_part) or None])
+        limit = PROSE_LIMIT if got.lstrip().startswith("<p") else VALUE_LIMIT
+        if text_length(filled) > limit:
+            problems.append(
+                f"第 {index} 行填写内容长度 {text_length(filled)}，超过上限 {limit}："
+                f"只说结论与数字，采样口径、推导过程、表里已有的数字都不要写\n  {filled}"
+            )
+    if len(report) > len(skeleton):
+        extra = "\n  ".join(report[len(skeleton):][:5])
+        problems.append(
+            f"报告比生成骨架多 {len(report) - len(skeleton)} 行"
+            f"（第1/3节的字段与表格由生成器决定，不要自行增删）：\n  {extra}"
+        )
+    elif len(report) < len(skeleton):
+        problems.append(f"报告比生成骨架少 {len(skeleton) - len(report)} 行")
+    for index, line in enumerate(report, start=1):
+        if index in measured or "<!-- TODO" in line:
+            continue
+        if not line.lstrip().startswith("<p"):
+            continue
+        text = strip_tags(line)
+        if text_length(text) > PROSE_LIMIT:
+            problems.append(
+                f"第 {index} 行正文长度 {text_length(text)}，超过上限 {PROSE_LIMIT}：\n  {text}"
+            )
+    return problems
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("package", help="result package directory (holds csv/ and metadata/)")
     parser.add_argument("--prefix", default="analysis")
     parser.add_argument("--output", default=None, help="defaults to <package>/final_report.md")
+    parser.add_argument(
+        "--check", action="store_true",
+        help="不写文件，只检查已有报告：非 TODO 行必须与骨架一致，填写内容不得超长",
+    )
     args = parser.parse_args()
 
     package = Path(args.package).resolve()
     output = Path(args.output) if args.output else package / "final_report.md"
+    if args.check:
+        if not output.is_file():
+            raise SystemExit(f"[final-report] 找不到报告：{output}")
+        problems = check_report(package, args.prefix, output)
+        if problems:
+            print(f"[final-report] {output} 有 {len(problems)} 处问题：")
+            for problem in problems:
+                print(f"  - {problem}")
+            raise SystemExit(1)
+        print(f"[final-report] {output} 结构与骨架一致，正文长度合规")
+        return
     output.write_text(build(package, args.prefix))
     print(f"[final-report] wrote {output}")
 

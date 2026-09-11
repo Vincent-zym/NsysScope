@@ -123,7 +123,12 @@ the interleaving is explained in `mapping_reason` on the operator rows
 involved.
 
 Origin keeps full demangled names. Other tables use compact CUDA leaf symbols.
-Put semantic descriptions in `功能介绍`, never in `算子名称`.
+Put semantic descriptions in `功能介绍`, never in `算子名称`. When shortening a
+templated symbol, keep whatever distinguishes one specialization from another
+(`sm100_fp8_fp4_gemm_1d1d_impl<N=16384,K=2048>`, not
+`sm100_fp8_fp4_gemm_1d1d_impl<…>` for all seven GEMMs of a layer) -- otherwise
+different operators become indistinguishable by name and every consumer has to
+fall back to `module`+`shape` to tell them apart.
 
 ## Total rows
 
