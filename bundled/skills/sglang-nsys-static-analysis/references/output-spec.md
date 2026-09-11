@@ -353,6 +353,23 @@ inputs — never inferred from the timeline:
 - `config.json` → `num_hidden_layers` is the target forward's layer count (look under
   `text_config` / `language_config` on a multimodal checkpoint), and
   `num_nextn_predict_layers` is the draft model's
+- `boundary_evidence.layer_start_kernel` must fire **exactly once per layer**, and
+  the count is checked: `build_forward_pipeline_table.py` counts its launches inside
+  every sampled step and refuses the marker when that count is not
+  `num_hidden_layers + num_nextn_predict_layers × draft forwards`. A pre-norm/quant
+  kernel is the classic trap -- `rmsnorm_per_token_quant_kernel` fires twice per
+  GLM5.2 layer (before attention and before the MoE), 155 times against 79 declared
+  layers, and segmented one capture's draft forward into 2 layers against a declared
+  1, while `qkv_norm_quant_kernel` on the same trace gives exactly 79. The rejection
+  message lists the kernels that do fire the declared number of times, so picking a
+  replacement does not need another investigation.
+- A variant's `trace_marker_kernels` should be **absent from the other variants**. A
+  marker that fires in every layer (GLM5.2's W_KC absorption BMM, or the shared
+  sparse-attention core) only labels its variant as the fallback after the others are
+  ruled out; that works but is order-dependent, and inside a draft forward it can
+  label the prologue fragment as an extra layer. The builder records every variant
+  marker's per-step count in the manifest and notes the universal ones -- as a note,
+  not a conflict, because "the layers without an indexer" is a legitimate definition.
 - the launch command → `--speculative-algorithm` decides whether a draft forward runs
   at all (weights can carry an MTP layer that never runs), `--speculative-num-steps`
   how many draft forwards a decode step runs, `--speculative-num-draft-tokens` the

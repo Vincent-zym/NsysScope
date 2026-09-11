@@ -129,9 +129,17 @@ def sweep_sidecars(
 
 
 def place_trace(trace: Path, result_dir: Path, trace_dir: Path) -> Path:
-    """Put the exported trace under trace/, moving it when it is already ours."""
+    """Put the exported trace under trace/, moving it when it is already ours.
+
+    Running twice has to be a no-op. The Skill's own last step calls this, and a
+    job driven by the tool calls it again afterwards with the path the export
+    wrote -- by then the file is already in `trace/`, so the given path no longer
+    exists. That is the expected second run, not a missing input.
+    """
     target = trace_dir / trace.name
     if trace.resolve() == target.resolve():
+        return target
+    if not trace.exists() and target.is_file():
         return target
     trace_dir.mkdir(exist_ok=True)
     if trace.is_relative_to(result_dir):

@@ -783,6 +783,7 @@ def draft_forward_end(
 def segment_steps(
     cur: sqlite3.Cursor, device: int, info: Dict[str, Any], max_steps: int,
     layer_boundary: str, variant_cores: Dict[str, str], gap_threshold_us: float,
+    declared_draft_layers: Optional[int] = None,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """Cut each sampled step into the four contiguous phases plus their children."""
     starts = info["target_starts"]
@@ -880,9 +881,12 @@ def segment_steps(
             prep_windows = [(target_end, draft_start), (draft_end, a2)]
             if info.get("draft_children_style") == "layers":
                 # The draft model is the MTP/NextN layer, so segment it exactly like
-                # the target: its layer is one of the model's declared variants.
+                # the target: its layer is one of the model's declared variants. The
+                # declared count caps it, so the draft prologue cannot be published as
+                # an extra layer.
                 step["draft_children"] = target_children(
                     rows, draft_start, draft_end, layer_boundary, variant_cores,
+                    max_layers=declared_draft_layers,
                 )
             else:
                 step["draft_children"] = draft_children(
@@ -949,6 +953,7 @@ def segment_steps(
 def target_children(
     rows: Sequence[Tuple[Any, ...]], phase_start: int, phase_end: int,
     layer_boundary: str, variant_cores: Dict[str, str],
+    max_layers: Optional[int] = None,
 ) -> Dict[str, float]:
     """Wall time per layer variant inside the target forward, plus the remainder.
 
@@ -994,15 +999,27 @@ def target_children(
         # next. Buffer such blocks and flush them into that layer. Core-less blocks
         # after the last core are the forward tail and stay in 其他.
         pending_start: Optional[int] = None
+        assigned: List[Tuple[str, int, int]] = []
         for lo, hi, label in blocks:
             if pending_start is None:
                 pending_start = lo
             if label is None:
                 continue
-            per_variant[label] += (hi - pending_start) / 1e3
-            counts[label] += 1
-            spans.append((pending_start, hi))
+            assigned.append((label, pending_start, hi))
             pending_start = None
+        # The declaration says how many layers a phase has; the trace only says where
+        # they are. A draft forward is one MTP layer, but its prologue (hidden-state
+        # concat, the EAGLE projection GEMM) contains the same kernels a layer does,
+        # so the segmenter can read it as a layer of its own -- one capture reported 2
+        # draft layers against a declared 1. Surplus *leading* segments are that
+        # prologue: they go back to 其他 rather than being published as a layer the
+        # model does not have.
+        if max_layers is not None and 0 < max_layers < len(assigned):
+            assigned = assigned[len(assigned) - max_layers:]
+        for label, lo, hi in assigned:
+            per_variant[label] += (hi - lo) / 1e3
+            counts[label] += 1
+            spans.append((lo, hi))
     covered = sum(per_variant.values())
     out = {name: value for name, value in per_variant.items() if counts[name]}
     out["_counts"] = counts  # type: ignore[assignment]
@@ -1479,6 +1496,165 @@ def record_conflict(info: Dict[str, Any], message: str, policy: str) -> None:
     print(f"[forward-pipeline] declaration conflict: {message}")
 
 
+def marker_step_counts(
+    cur: sqlite3.Cursor, device: int, layer_boundary: str, starts: List[int],
+) -> List[int]:
+    """How many times the layer-boundary marker fires inside each sampled step.
+
+    A layer boundary is only a boundary if it fires once per layer. Counting it
+    against the declared layer total is what separates "this marker is wrong" from
+    "this rank is wrong" -- the same wrong marker fails on all eight ranks, and
+    without this the failure surfaces as eight rejected devices.
+    """
+    needles = [n for n in layer_boundary.split(",") if n]
+    if not needles or len(starts) < 2:
+        return []
+    hits = [
+        int(row[0]) for row in cur.execute(
+            "select k.start, s.value from CUPTI_ACTIVITY_KIND_KERNEL k "
+            "join StringIds s on s.id = k.shortName "
+            "where k.deviceId = ? and k.start >= ? and k.start < ? order by k.start",
+            (device, starts[0], starts[-1]),
+        ).fetchall()
+        if any(needle in row[1] for needle in needles)
+    ]
+    return [
+        sum(1 for hit in hits if lo <= hit < hi)
+        for lo, hi in zip(starts, starts[1:])
+    ]
+
+
+def once_per_layer_candidates(
+    cur: sqlite3.Cursor, device: int, starts: List[int], expected: int,
+    limit: int = 10,
+) -> List[str]:
+    """Kernels that fire exactly `expected` times in every sampled step.
+
+    Offered as suggestions when the declared boundary does not: without them the
+    conflict says "this marker is wrong" and leaves finding a right one to whoever
+    reads the log. Firing once per layer does not by itself make a kernel a layer
+    *start*, so these are candidates to verify, not a silent replacement.
+    """
+    if len(starts) < 2 or expected <= 0:
+        return []
+    windows = list(zip(starts, starts[1:]))
+    hits: Dict[str, List[int]] = {}
+    for start, name in cur.execute(
+        "select k.start, s.value from CUPTI_ACTIVITY_KIND_KERNEL k "
+        "join StringIds s on s.id = k.shortName "
+        "where k.deviceId = ? and k.start >= ? and k.start < ? order by k.start",
+        (device, starts[0], starts[-1]),
+    ).fetchall():
+        hits.setdefault(str(name), []).append(int(start))
+    matching = [
+        name for name, occurrences in hits.items()
+        if all(
+            sum(1 for hit in occurrences if lo <= hit < hi) == expected
+            for lo, hi in windows
+        )
+    ]
+    return sorted(matching)[:limit]
+
+
+def verify_layer_marker(
+    cur: sqlite3.Cursor, device: int, layer_boundary: str, starts: List[int],
+    decl: Dict[str, Any], info: Dict[str, Any], policy: str = "degrade",
+) -> None:
+    """Reject a layer-boundary marker whose per-step count is not the layer total.
+
+    `rmsnorm_per_token_quant_kernel` fires twice per GLM5.2 layer (before attention
+    and before the MoE), so as a boundary it segmented one capture's draft forward
+    into two layers and contradicted `num_nextn_predict_layers=1`; the strictly
+    once-per-layer `qkv_norm_quant_kernel` on the same trace gives 79 = 78 + 1. Both
+    look plausible in prose evidence, so the count is the only thing that tells them
+    apart, and it is cheap: one query against the sampled steps.
+    """
+    expected = decl.get("target_layers")
+    draft = decl.get("draft_layers")
+    forwards = decl.get("draft_forwards")
+    if not isinstance(expected, int):
+        return
+    if isinstance(draft, int) and isinstance(forwards, int):
+        expected += draft * forwards
+    counts = marker_step_counts(cur, device, layer_boundary, starts)
+    if not counts:
+        return
+    info["layer_marker_counts"] = {
+        "per_step": counts, "expected_layers_per_step": expected,
+    }
+    observed = sorted(set(counts))
+    if observed == [expected]:
+        return
+    candidates = once_per_layer_candidates(cur, device, starts, expected)
+    info["layer_marker_counts"]["once_per_layer_candidates"] = candidates
+    record_conflict(
+        info,
+        f"the layer boundary {layer_boundary!r} fires {observed} time(s) per step, but "
+        f"config/launch declare {expected} layer(s) per step (target + draft). A "
+        "boundary kernel has to fire exactly once per layer -- a pre-norm/quant kernel "
+        "usually fires twice (before attention and before the FFN/MoE), and its pattern "
+        "changes again inside an EAGLE draft forward. Pick a strictly once-per-layer "
+        "kernel and record it as boundary_evidence.layer_start_kernel"
+        + (
+            f"; kernels that do fire exactly {expected} time(s) per step here (verify "
+            "one of them really opens a layer rather than sitting mid-layer): "
+            + ", ".join(candidates)
+            if candidates else ""
+        )
+        + ".",
+        policy,
+    )
+
+
+def verify_variant_markers(
+    cur: sqlite3.Cursor, device: int, variant_cores: Dict[str, List[str]],
+    starts: List[int], decl: Dict[str, Any], info: Dict[str, Any],
+    policy: str = "degrade",
+) -> None:
+    """Record how discriminating each variant marker is, and warn about a universal one.
+
+    A marker that fires in every layer cannot say which variant a layer is; it only
+    works as the *fallback* label, because the loop checks the other variants first.
+    That is a legitimate pattern (GLM5.2's shared-Indexer layers are "the ones
+    without an indexer") but an order-dependent one, and inside a draft forward it
+    can label the prologue fragment as an extra layer -- which is how one capture
+    reported 2 draft layers against a declared 1. So the counts always go into the
+    manifest, and a universal marker gets a note rather than a conflict: flagging it
+    as a conflict would condemn every package that legitimately uses the fallback.
+    """
+    expected = decl.get("target_layers")
+    draft = decl.get("draft_layers")
+    forwards = decl.get("draft_forwards")
+    if not isinstance(expected, int) or not variant_cores or len(starts) < 2:
+        return
+    if isinstance(draft, int) and isinstance(forwards, int):
+        expected += draft * forwards
+    counts: Dict[str, List[int]] = {}
+    for name, needles in variant_cores.items():
+        per_step = marker_step_counts(cur, device, ",".join(needles), starts)
+        if per_step:
+            counts[name] = per_step
+    info["variant_marker_counts"] = {
+        name: {"per_step": per_step, "layers_per_step": expected}
+        for name, per_step in counts.items()
+    }
+    universal = [
+        name for name, per_step in counts.items() if min(per_step) >= expected
+    ]
+    if universal:
+        notes: List[str] = info.setdefault("variant_marker_notes", [])
+        for name in universal:
+            notes.append(
+                f"the variant marker for {name!r} ({', '.join(variant_cores[name])}) "
+                f"fires {sorted(set(counts[name]))} time(s) per step, i.e. in every one "
+                f"of the {expected} declared layers, so it labels this variant only as "
+                "the fallback after the other variants are ruled out. That is "
+                "order-dependent, and in the draft forward it can label a prologue "
+                "fragment as an extra layer -- prefer a kernel only this variant runs."
+            )
+            print(f"[forward-pipeline] variant marker note: {notes[-1]}")
+
+
 def verify_declared_layers(
     decl: Dict[str, Any], target_layers: int, draft_layers: int, gpu_count: int,
     info: Dict[str, Any], policy: str = "degrade",
@@ -1573,9 +1749,28 @@ def analyse_device(
         )
     if decl.get("speculative_tokens") and not info.get("speculative_tokens"):
         info["speculative_tokens"] = decl["speculative_tokens"]
+    # Before segmenting: does this boundary kernel fire once per declared layer? A
+    # marker that fires twice per layer still produces a table, just one whose layer
+    # rows mean something else -- catching it here names the marker instead of
+    # blaming eight ranks in turn.
+    verify_layer_marker(
+        cur, device, layer_boundary, info.get("target_starts") or [], decl, info,
+        policy,
+    )
+    verify_variant_markers(
+        cur, device, variant_cores, info.get("target_starts") or [], decl, info,
+        policy,
+    )
+    declared_draft = decl.get("draft_layers")
+    declared_forwards = decl.get("draft_forwards")
+    draft_cap = (
+        declared_draft * declared_forwards
+        if isinstance(declared_draft, int) and isinstance(declared_forwards, int)
+        else None
+    )
     steps, gap_holes = segment_steps(
         cur, device, info, args.max_steps, layer_boundary, variant_cores,
-        args.gap_threshold_us,
+        args.gap_threshold_us, declared_draft_layers=draft_cap,
     )
     target_layers = max(
         (sum((s["target_children"].get("_counts") or {}).values()) for s in steps),

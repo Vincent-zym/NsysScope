@@ -2138,3 +2138,167 @@ def test_a_job_no_longer_needs_a_launch_script(tmp_path: Path) -> None:
     )
     assert not hasattr(request, "launch_path")
     assert request.config_path is not None
+
+
+def load_packager():
+    """Load the Skill's packager by file, like the other scripts."""
+    spec = importlib.util.spec_from_file_location(
+        "nsysscope_finalize_package", SKILL / "scripts" / "finalize_package.py",
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_packaging_twice_leaves_the_trace_where_it_is(tmp_path: Path) -> None:
+    module = load_packager()
+    result = tmp_path / "package"
+    (result / "trace").mkdir(parents=True)
+    exported = result / "report.sqlite"
+    exported.write_text("trace bytes")
+
+    first = module.place_trace(exported.resolve(), result, result / "trace")
+    assert first == result / "trace/report.sqlite"
+    assert first.read_text() == "trace bytes"
+    assert not exported.exists()
+
+    # The Skill's own last step already ran, so the tool's follow-up call arrives
+    # with the pre-move path. That is the same package, not a missing input.
+    second = module.place_trace(exported.resolve(), result, result / "trace")
+    assert second == first
+    assert second.read_text() == "trace bytes"
+
+    # A trace that is genuinely absent, with nothing in trace/, still fails.
+    (result / "trace/report.sqlite").unlink()
+    with pytest.raises(FileNotFoundError):
+        module.place_trace(exported.resolve(), result, result / "trace")
+
+
+def load_pipeline_builder():
+    """Load the Skill's forward-pipeline builder by file."""
+    spec = importlib.util.spec_from_file_location(
+        "nsysscope_forward_pipeline",
+        SKILL / "scripts" / "build_forward_pipeline_table.py",
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def kernel_trace(path: Path, launches: dict[str, list[int]]) -> None:
+    """A minimal nsys-shaped SQLite holding just kernel names and start times."""
+    import sqlite3
+    connection = sqlite3.connect(path)
+    with connection:
+        connection.execute("CREATE TABLE StringIds (id INTEGER PRIMARY KEY, value TEXT)")
+        connection.execute(
+            "CREATE TABLE CUPTI_ACTIVITY_KIND_KERNEL "
+            "(start INTEGER, end INTEGER, deviceId INTEGER, shortName INTEGER)"
+        )
+        for index, (name, starts) in enumerate(launches.items(), start=1):
+            connection.execute("INSERT INTO StringIds VALUES (?, ?)", (index, name))
+            connection.executemany(
+                "INSERT INTO CUPTI_ACTIVITY_KIND_KERNEL VALUES (?, ?, 0, ?)",
+                [(start, start + 10, index) for start in starts],
+            )
+    connection.close()
+
+
+def test_a_layer_marker_that_fires_twice_per_layer_is_rejected(tmp_path: Path) -> None:
+    module = load_pipeline_builder()
+    import sqlite3
+    trace = tmp_path / "trace.sqlite"
+    # Two steps of 3 declared layers: the good marker fires 3 times per step, the
+    # pre-norm marker twice per layer, and a third kernel is a decoy.
+    kernel_trace(trace, {
+        "qkv_norm_quant_kernel": [100, 200, 300, 1100, 1200, 1300],
+        "rmsnorm_per_token_quant_kernel": [
+            90, 110, 190, 210, 290, 310, 1090, 1110, 1190, 1210, 1290, 1310,
+        ],
+        "some_other_kernel": [150, 1150],
+    })
+    cur = sqlite3.connect(f"file:{trace}?mode=ro", uri=True).cursor()
+    starts = [50, 1050, 2050]
+    declared = {"target_layers": 3, "draft_layers": 0, "draft_forwards": 0}
+
+    good: dict[str, object] = {}
+    module.verify_layer_marker(
+        cur, 0, "qkv_norm_quant_kernel", starts, declared, good, "degrade",
+    )
+    assert good.get("declaration_conflicts") is None
+    assert good["layer_marker_counts"]["per_step"] == [3, 3]
+
+    bad: dict[str, object] = {}
+    module.verify_layer_marker(
+        cur, 0, "rmsnorm_per_token_quant_kernel", starts, declared, bad, "degrade",
+    )
+    conflict = " ".join(bad["declaration_conflicts"])
+    assert "fires [6] time(s) per step" in conflict and "declare 3 layer(s)" in conflict
+    # The message names a marker that would work, so fixing it needs no new dig.
+    assert "qkv_norm_quant_kernel" in conflict
+
+
+def test_a_universal_variant_marker_is_noted_not_failed(tmp_path: Path) -> None:
+    module = load_pipeline_builder()
+    import sqlite3
+    trace = tmp_path / "trace.sqlite"
+    kernel_trace(trace, {
+        "indexer_core": [100, 1100],
+        "absorb_bmm": [100, 200, 300, 1100, 1200, 1300],
+    })
+    cur = sqlite3.connect(f"file:{trace}?mode=ro", uri=True).cursor()
+    info: dict[str, object] = {}
+    module.verify_variant_markers(
+        cur, 0, {"Full": ["indexer_core"], "Shared": ["absorb_bmm"]},
+        [50, 1050, 2050],
+        {"target_layers": 3, "draft_layers": 0, "draft_forwards": 0},
+        info, "degrade",
+    )
+    # The variant that only fires in its own layers is fine; the one firing in every
+    # layer is recorded as a note, because "the layers without an indexer" is a valid
+    # definition and failing it would condemn every package that uses the fallback.
+    assert info.get("declaration_conflicts") is None
+    notes = " ".join(info["variant_marker_notes"])
+    assert "Shared" in notes and "absorb_bmm" in notes
+    assert info["variant_marker_counts"]["Full"]["per_step"] == [1, 1]
+
+
+def test_a_failed_job_still_mirrors_the_report_to_the_wiki(tmp_path: Path) -> None:
+    runner = JobRunner(settings(tmp_path), JobStore(tmp_path / "jobs.json"))
+    job_dir = tmp_path / "job"
+    (job_dir / "metadata").mkdir(parents=True)
+    (job_dir / "final_report.md").write_text("<h1>report</h1>", encoding="utf-8")
+
+    config = tmp_path / "config.json"
+    config.write_text("{}", encoding="utf-8")
+    request = JobCreate(
+        model_name="GLM5.2", stage="prefill", hardware="Nvidia B200",
+        report_path=str(tmp_path / "report.sqlite"),
+        config_path=str(config),
+        source_path=str(tmp_path),
+        result_path=str(job_dir),
+        wiki_url="https://ku.baidu-int.com/knowledge/a/b/c/d",
+        wiki_username="someone",
+    )
+    job_id = "wiki-after-failure"
+    runner.store.create(job_id, request, job_dir)
+    (tmp_path / "report.sqlite").write_text("")
+
+    published: list[tuple[str | None, str | None]] = []
+    runner.publish_to_wiki = (  # type: ignore[method-assign]
+        lambda job, package, url, username=None: published.append((url, username))
+    )
+    # Fail where the real job failed: after the report exists, during packaging.
+    runner.export_nsys = (  # type: ignore[method-assign]
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("packaging blew up"))
+    )
+    runner.run(job_id)
+
+    job = runner.store.get(job_id)
+    assert job["status"] == "failed"
+    assert "packaging blew up" in job["error"]
+    # The page still gets the report: the analysis output is not held hostage by a
+    # later step's failure.
+    assert published == [("https://ku.baidu-int.com/knowledge/a/b/c/d", "someone")]

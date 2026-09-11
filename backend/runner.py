@@ -497,6 +497,20 @@ class JobRunner:
                     message="分析失败", error=str(exc),
                 )
                 self.log_quietly(job_dir, traceback.format_exc())
+                # `final_report.md` is written before packaging, so a failure in
+                # packaging or validation must not also swallow the wiki mirror the
+                # caller asked for -- that is how one job left its page empty after
+                # the analysis itself had already finished. Attempted once here; its
+                # own failure is only logged, because the job is already failed and
+                # the original error is the one worth reporting.
+                try:
+                    self.publish_to_wiki(
+                        job_dir, job_dir, request.wiki_url, request.wiki_username,
+                    )
+                except Exception as publish_failure:  # noqa: BLE001
+                    self.log_quietly(
+                        job_dir, f"[wiki] 失败后补发也未成功：{publish_failure}",
+                    )
         finally:
             staged_skill = job_dir / ".comate"
             if staged_skill.exists():
