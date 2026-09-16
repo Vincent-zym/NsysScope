@@ -30,7 +30,7 @@ after filling the markers; when it flags a generated line, fix the generator.
 ## Section layout
 
 ```text
-<h1>{model} {stage} 典型shape Nsys TimeLine分析结果</h1>
+<h1>{model}-{stage}-{规模}</h1>        规模：decode 用 bs{batch}、prefill 用 inputlen{chunk}；取不到则省略为 {model}-{stage}
 <h1>1. 输入配置</h1>              vertical fact table: 模型/硬件/阶段/代码版本/
                                   引擎配置/运行时 shape/nsys 文件
 <h1>2. 分析结果</h1>
@@ -281,6 +281,16 @@ reintroduce a list where a table already covers the same ground.
   module durations already sum to the operator table's 总计, nothing is
   unclassified and the remainder is the GPU gap between kernels; only when they
   sum below it is the remainder unclassified operators.
+- Whenever a table's numbers add up past 100% of the pattern wall-clock (the
+  functional modules of 2.2.2, the categories of 2.2.3, or 2.2.4's `Top N 累积耗时`
+  footer), a note goes **directly below that table** stating the cause: percentages
+  use the wall-clock as denominator while the numerators are per-operator busy
+  times, and concurrent CUDA streams (communication overlapping compute, dual-stream
+  MoE) make the busy-time sum exceed the wall-clock. `build_final_report.py`'s
+  `overlap_note()` emits it automatically when and only when the sum overshoots, so
+  every >100% in the report carries its reason under the data rather than leaving
+  the reader to guess. The numbers are shown as measured; the columns are never
+  normalised to force a 100% total.
 - 2.2.5 lists **every core-compute operator** of one pattern in **execution
   order**, one row per operator. An operator here is a (`module`, 算子名称,
   `shape`) triple, not a kernel name: a package whose core table shortens every

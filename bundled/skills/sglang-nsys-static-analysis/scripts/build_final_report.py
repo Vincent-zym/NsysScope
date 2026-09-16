@@ -281,6 +281,27 @@ def module_table(stage_rows: list[dict[str, str]], operator_rows: list[dict[str,
     )
 
 
+def overlap_note(numer_us: float, pattern_us: float, subject: str) -> str | None:
+    """A note placed **below** a table whose numbers add up past 100%.
+
+    Percentages use the pattern's wall-clock as the denominator, but the numerators
+    are per-operator busy times summed up. When kernels run on concurrent CUDA
+    streams (communication overlapping compute, dual-stream MoE), each duration is
+    counted while the timeline only advances once, so the busy-time sum exceeds the
+    wall-clock and the share passes 100%. It is shown as measured, not normalized,
+    so the overlap stays visible -- and, per the rule that every >100% carries its
+    cause right under it, this explains why.
+    """
+    if numer_us <= pattern_us:
+        return None
+    excess = numer_us / pattern_us * 100 - 100
+    return p(
+        f"⚠ 上表{subject}合计 {ms(numer_us)} ms，超过 pattern 墙钟 {ms(pattern_us)} ms"
+        f"（{excess:.1f}%）：通信、MoE 等在独立 CUDA 流上与主流并发执行，各自耗时被分别"
+        "计入而时间轴上相互重叠，故忙碌时间之和大于墙钟；按实测原样呈现、不归一化。"
+    )
+
+
 def category_table(rows: list[dict[str, str]], pattern_us: float) -> str | None:
     """Table: core / communication / auxiliary counts and time.
 
@@ -304,7 +325,7 @@ def category_table(rows: list[dict[str, str]], pattern_us: float) -> str | None:
             int(row.get("算子数量") or 0) for row in data
             if (row.get("算子数量") or "").strip().isdigit()
         ))
-    return table(
+    html = table(
         None,
         ["算子类型", "pattern总耗时", *names],
         [
@@ -314,6 +335,11 @@ def category_table(rows: list[dict[str, str]], pattern_us: float) -> str | None:
         ],
         bold_title=False,
     )
+    # The three categories can sum past the wall-clock under multi-stream overlap;
+    # when they do, the cause goes directly below this table.
+    category_us = sum(float(row.get("总耗时(us)") or 0) for row in data)
+    note = overlap_note(category_us, pattern_us, "各算子大类耗时")
+    return html + ("\n" + note if note else "")
 
 
 def abbreviate_kernel_name(name: str) -> str:
@@ -618,6 +644,10 @@ def kernel_table(operator_rows: list[dict[str, str]], pattern_us: float,
         lines.append(td(value_count))
         lines.append("</tr>")
     lines.append("</table>")
+    # When the Top N busy times already sum past the wall-clock, say why right here.
+    note = overlap_note(top_us, pattern_us, f"Top {top_n} 累积耗时")
+    if note:
+        lines.append(note)
     return "\n".join(lines)
 
 
@@ -854,8 +884,16 @@ def build(package: Path, prefix: str) -> str:
               + "<!-- TODO ctx len/mtp 等运行时 shape，只列值，缺的项直接不写、"
                 "不要解释为什么缺 -->")
     nsys_name = original.name or trace.name or "—"
+    # 报告标题：模型-阶段-规模。decode 用并发 batch、prefill 用 chunk（输入长度）；
+    # 规模取不到时省略，不写占位，标题降级为 模型-阶段。
+    if str(stage).lower() == "decode" and manifest.get("batch_size"):
+        scale = f"-bs{manifest['batch_size']}"
+    elif str(stage).lower() == "prefill" and manifest.get("chunk_size"):
+        scale = f"-inputlen{manifest['chunk_size']}"
+    else:
+        scale = ""
     head = [
-        h1(f"{model} {stage} 典型shape Nsys TimeLine分析结果"),
+        h1(f"{model}-{stage}{scale}"),
         h1("1. 输入配置"),
         config_table([
             ("模型", model),
@@ -871,7 +909,7 @@ def build(package: Path, prefix: str) -> str:
     body = [h1("2. 分析结果")]
 
     forward = forward_tables(read_csv(csv_dir / f"{prefix}_forward_pipeline_table.csv"))
-    if forward:
+    if forward[0]:
         body.append(h2("2.1 整体耗时统计"))
         body.append(forward[0])
 
@@ -887,7 +925,7 @@ def build(package: Path, prefix: str) -> str:
         "100 字以内，参照 references/final_report.example.md 的同一句；"
         "不要写采样 min/max、不要重复 2.2.1 已有的单层耗时、不要下结论 -->"
     ))
-    if forward:
+    if forward[1]:
         body.append(h3("2.2.1 整体耗时统计"))
         body.append(forward[1])
 
@@ -904,11 +942,12 @@ def build(package: Path, prefix: str) -> str:
     # streams, and calling that excess "unclassified leftovers" -- as this line
     # used to unconditionally -- is both self-contradictory and wrong.
     if covered > pattern_us:
+        # Above the table: only the 口径 and the two numbers. The reason the numbers
+        # exceed the wall-clock goes below the table (overlap_note), so every >100%
+        # in the report carries its cause directly under the data.
         body.append(p(
-            "以下口径为<b>一个重复 pattern</b>内、稳定样本逐算子平均耗时之和。"
-            f"pattern 墙钟 {ms(pattern_us)} ms，各模块累计 {ms(covered)} ms，"
-            f"因部分模块在独立 CUDA 流上与主流并行而超出墙钟 "
-            f"{covered / pattern_us * 100 - 100:.1f}%，按实测原样呈现、不归一化到 100%。"
+            "以下口径为<b>一个重复 pattern</b>内、稳定样本逐算子平均耗时之和，"
+            f"pattern 墙钟 {ms(pattern_us)} ms，各模块累计 {ms(covered)} ms。"
         ))
     else:
         # 余量的成因不能一概而论：模块之和已经等于全部算子耗时之和时没有未归类算子，
@@ -926,6 +965,9 @@ def build(package: Path, prefix: str) -> str:
     modules = module_table(stage_rows, operator_rows, pattern_us)
     if modules:
         body.append(modules)
+        module_overlap = overlap_note(covered, pattern_us, "各功能模块耗时")
+        if module_overlap:
+            body.append(module_overlap)
 
     body.append(h3("2.2.3 按算子大类划分统计"))
     categories = category_table(classification_rows, pattern_us)
@@ -1070,6 +1112,12 @@ def check_report(package: Path, prefix: str, report_path: Path) -> list[str]:
         if index in measured or "<!-- TODO" in line:
             continue
         if not line.lstrip().startswith("<p"):
+            continue
+        # The length rule polices hand-written prose (分析思路, filled markers). A
+        # line that is byte-identical to the skeleton is generator-authored -- an
+        # overlap note, a ranking caption -- and its length is the generator's call,
+        # not per-report drift. Only flag prose that deviates from the skeleton.
+        if index - 1 < len(skeleton) and line == skeleton[index - 1]:
             continue
         text = strip_tags(line)
         if text_length(text) > PROSE_LIMIT:

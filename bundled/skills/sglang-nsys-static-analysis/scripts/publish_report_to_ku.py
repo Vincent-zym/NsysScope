@@ -176,7 +176,8 @@ def split_title(html: str) -> tuple[str | None, str]:
     A 如流 page already renders its document name as the heading at the top, so
     keeping the report's first `<h1>` in the body would show the same line twice.
     The heading is the report's title by construction (build_final_report.py emits
-    `{model} {stage} 典型shape Nsys TimeLine分析结果` first), so it becomes the
+    the `{model}-{stage}-{规模}` banner, e.g. `DeepSeek-V4.1-Flash-decode-bs256`,
+    first), so it becomes the
     document name and is dropped from the content.
     """
     match = re.match(r'\s*<h1[^>]*>(.*?)</h1>\s*\n?', html, re.S)
