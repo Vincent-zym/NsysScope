@@ -1259,20 +1259,41 @@ def kernel_tokens(text: str) -> List[str]:
     return out
 
 
+def repeating_units(tax: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """The repeating-unit dict(s) a taxonomy declares.
+
+    A schema-1.1 multi-region taxonomy has one repeating_unit per region; the
+    forward-pipeline table is a whole-step view, so its variant counts and layer
+    boundaries are gathered across every region. A single-region taxonomy returns
+    its one repeating_unit and behaves exactly as before.
+    """
+    regions = tax.get("regions")
+    if isinstance(regions, list) and regions:
+        return [
+            region.get("repeating_unit") or {}
+            for region in regions if isinstance(region, dict)
+        ]
+    return [tax.get("repeating_unit") or {}]
+
+
 def expected_variant_ratio(tax: Dict[str, Any]) -> Dict[str, int]:
-    """Layer count per variant declared by the taxonomy's repeating-unit pattern."""
-    unit = tax.get("repeating_unit") or {}
+    """Layer count per variant declared by the taxonomy's repeating-unit pattern.
+
+    Summed across regions for a multi-region taxonomy, since the forward step runs
+    every region's layers."""
     counts: Dict[str, int] = {}
-    for position in unit.get("positions") or []:
-        name = position.get("unit_variant")
-        if name:
-            counts[name] = counts.get(name, 0) + 1
+    for unit in repeating_units(tax):
+        for position in unit.get("positions") or []:
+            name = position.get("unit_variant")
+            if name:
+                counts[name] = counts.get(name, 0) + 1
     if counts:
         return counts
-    for token in str(unit.get("pattern") or "").split(","):
-        name = token.strip()
-        if name:
-            counts[name] = counts.get(name, 0) + 1
+    for unit in repeating_units(tax):
+        for token in str(unit.get("pattern") or "").split(","):
+            name = token.strip()
+            if name:
+                counts[name] = counts.get(name, 0) + 1
     return counts
 
 
@@ -1294,16 +1315,33 @@ def excluded_layer_variant_counts(tax: Dict[str, Any]) -> Dict[str, int]:
     the root silently produced an empty contribution and rejected a correct
     taxonomy with "variant markers do not reproduce the declared repeating unit".
     """
-    excluded = (
-        tax.get("excluded_from_repeating_unit")
-        or (tax.get("repeating_unit") or {}).get("excluded_from_repeating_unit")
-        or {}
-    )
-    layer_variants = excluded.get("layer_variants") or {}
+    if not (isinstance(tax.get("regions"), list) and tax.get("regions")):
+        excluded = (
+            tax.get("excluded_from_repeating_unit")
+            or (tax.get("repeating_unit") or {}).get("excluded_from_repeating_unit")
+            or {}
+        )
+        blocks = [excluded]
+    else:
+        # Multi-region: a prelude/head exclusion may sit at the root or inside any
+        # region; gather every declared block.
+        blocks = []
+        if tax.get("excluded_from_repeating_unit"):
+            blocks.append(tax["excluded_from_repeating_unit"])
+        for region in tax["regions"]:
+            if not isinstance(region, dict):
+                continue
+            block = (
+                region.get("excluded_from_repeating_unit")
+                or (region.get("repeating_unit") or {}).get("excluded_from_repeating_unit")
+            )
+            if block:
+                blocks.append(block)
     counts: Dict[str, int] = {}
-    for name in layer_variants.values():
-        if name:
-            counts[name] = counts.get(name, 0) + 1
+    for block in blocks:
+        for name in (block.get("layer_variants") or {}).values():
+            if name:
+                counts[name] = counts.get(name, 0) + 1
     return counts
 
 
@@ -1318,14 +1356,17 @@ def markers_from_taxonomy(
     """
     with open(path, encoding="utf-8") as fh:
         tax = json.load(fh)
-    unit = tax.get("repeating_unit") or {}
-    evidence = unit.get("boundary_evidence") or {}
     boundaries: List[str] = []
-    explicit = evidence.get("layer_start_kernel")
-    if explicit:
-        boundaries = [explicit] if isinstance(explicit, str) else list(explicit)
-    else:
-        boundaries = kernel_tokens(evidence.get("layer_start_marker", ""))[:1]
+    for unit in repeating_units(tax):
+        evidence = unit.get("boundary_evidence") or {}
+        explicit = evidence.get("layer_start_kernel")
+        if explicit:
+            values = [explicit] if isinstance(explicit, str) else list(explicit)
+        else:
+            values = kernel_tokens(evidence.get("layer_start_marker", ""))[:1]
+        for value in values:
+            if value and value not in boundaries:
+                boundaries.append(value)
 
     variants: Dict[str, List[str]] = {}
     for variant in tax.get("variants") or []:

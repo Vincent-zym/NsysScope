@@ -25,16 +25,12 @@ SUFFIXES = (
     "_auxiliary_operator_table.csv",
     "_op_classification_table.csv",
     "_stage_table.csv",
-)
-# The forward-pipeline table is a valuable seventh table when the capture supports
-# it (it is the only place the package says what fraction of a forward step the
-# measured unit is), but some captures genuinely cannot produce it -- a single
-# forward step, no usable step marker, or a schema this analyzer version does not
-# yet handle. Treat it as optional so one flaky table does not fail an otherwise
-# complete package; validate_forward_pipeline() below still checks it when present.
-OPTIONAL_SUFFIXES = (
+    # The forward-pipeline table is the only place the package states what fraction
+    # of a forward step the measured unit is, so it is now a required seventh table
+    # rather than a nice-to-have. validate_forward_pipeline() checks its shape.
     "_forward_pipeline_table.csv",
 )
+OPTIONAL_SUFFIXES: tuple[str, ...] = ()
 CATEGORY_LABELS = {
     "核心计算": "core",
     "通信": "communication",

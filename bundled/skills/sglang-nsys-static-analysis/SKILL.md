@@ -16,7 +16,7 @@ Generate:
 4. `<prefix>_auxiliary_operator_table.csv`
 5. `<prefix>_op_classification_table.csv`
 6. `<prefix>_stage_table.csv`
-7. `<prefix>_forward_pipeline_table.csv` (optional; see below)
+7. `<prefix>_forward_pipeline_table.csv` (required; see below)
 8. `<prefix>_architecture_taxonomy.json`
 9. `<prefix>_analysis_manifest.json`
 10. a position-aware statistics sidecar
@@ -46,12 +46,12 @@ result/
 Never hand-place files to imitate this: run the packager, so a Skill run by hand
 and a run driven by the NsysScope service end in the same directory.
 
-The first six tables are required. The seventh relates the measured repeating unit
-to a whole forward step, so a package with it can additionally answer what fraction
-of a step the unit is -- generate and validate it whenever the capture supports it,
-but do not fail the package when it cannot: a single forward step, no usable step
-marker, or a schema this analyzer version does not yet handle should record the
-reason and continue with six tables rather than block the rest of the analysis.
+All seven tables are required. The seventh (the forward-pipeline table) relates
+the measured repeating unit to a whole forward step, so the package can answer
+what fraction of a step the unit is. Generate and validate it as part of every
+package; `scripts/build_forward_pipeline_table.py` produces it from the trace
+after the six tables exist (whole-step, region-agnostic — for a multi-region
+taxonomy it counts variant layers across all regions).
 
 When generating the seventh table, always pass the job's own declarations --
 `--model-config` (config.json), `--launch`, `--runtime-evidence` and `--stage`. They
@@ -190,6 +190,21 @@ positive markers only). The forward-pipeline table cuts a step into layers with
 them; without them it parses prose and may refuse to publish. See
 references/architecture-taxonomy.md ("Machine-readable trace markers").
 
+If the model is not one periodic region but several periodic regions stacked
+back to back with **different periods** — e.g. DeepSeek-V4.1-Flash's encoder
+region (NSA index recomputed every 6 layers: 1 source + 5 reuse) followed by its
+decoder region (recomputed every 4 layers: 1 reindex + 3 reuse) — do not force
+them into one `repeating_unit`, and do not treat one as the other's head/tail.
+Use the schema-1.1 `regions` form: bump `schema_version` to `1.1` and declare a
+`regions` array, each region carrying its own `layer_range` and `repeating_unit`
+(positions contiguous from 1 within that region), with `variants` staying one
+global list. Then in step 5 select and map **one representative period per
+region** so the origin CSV covers every region; downstream the tables, the
+report and the package gate produce one §2.x block per region, each with its own
+denominator. See references/architecture-taxonomy.md ("Multiple periodic
+regions"). A model with a single periodic region keeps the single
+`repeating_unit` form unchanged.
+
 Keep the two semantic levels distinct: `module` is the fine-grained
 source/execution attribution, while `功能模块` is the architecture rollup.
 Default to 5–8 ordered functional modules per variant. Merge adjacent
@@ -239,6 +254,10 @@ Within one representative device/process:
 - select the smallest full sequence that repeats;
 - include every distinct variant in a composite pattern;
 - include attention/state-space, output, FFN/MoE and final merge tails.
+- for a multi-region taxonomy (step 3, schema 1.1): repeat this selection **once
+  per region** — pick each region's own smallest repeating period and map its
+  layers — so the origin CSV carries one representative period for every region.
+  Each row's `layer_id` decides its region via the region's `layer_range`.
 
 Verify each selected structural unit through:
 

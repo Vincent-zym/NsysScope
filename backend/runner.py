@@ -2032,16 +2032,14 @@ Requirements:
         self, job_id: str, job_dir: Path, package: Path, prefix: str,
         sqlite_path: Path, metadata_root: Path | None = None,
     ) -> None:
-        """Generate the optional forward-pipeline table, the package's seventh table.
+        """Generate the forward-pipeline table, the package's required seventh table.
 
         It is the only place the package relates the measured unit to a whole
-        forward step, so it is worth having whenever the capture supports it -- but
-        some captures genuinely cannot produce it (a single forward step, no usable
-        step marker, a schema quirk the builder does not yet handle). Log and
-        continue instead of failing the whole job: the other six tables remain a
-        complete, valid package on their own, and the frontend already renders
-        without this module when it is absent (see app/page.js's optional-chained
-        forwardPipeline check).
+        forward step, and is now a required table (validate_analysis_package.py
+        rejects a package without it). The runner still generates it defensively
+        rather than crashing: if the trace genuinely cannot produce it (a single
+        forward step, no usable step marker), log the reason -- the package gate
+        will then surface the missing table instead of the job dying mid-run.
         """
         script = self.settings.skill_dir / "scripts" / "build_forward_pipeline_table.py"
         if not script.exists():
@@ -2088,7 +2086,7 @@ Requirements:
         completed = subprocess.run(command, text=True, capture_output=True)
         if completed.returncode != 0:
             detail = (completed.stderr or completed.stdout or "").strip()[:1500]
-            self.log(job_dir, f"[forward-pipeline] 生成 forward 链路耗时表失败，跳过（不影响任务其余产出）：{detail}")
+            self.log(job_dir, f"[forward-pipeline] 生成 forward 链路耗时表失败：{detail}（该表已是必需表，校验会拦截缺失）")
             return
         if completed.stdout:
             self.log(job_dir, f"[forward-pipeline] {completed.stdout.strip()}")
@@ -2100,12 +2098,12 @@ Requirements:
         self, job_id: str, job_dir: Path, package: Path, prefix: str,
         sqlite_path: Path | None, metadata_root: Path | None = None,
     ) -> None:
-        """Regenerate the optional seventh table from the trace when possible.
+        """Regenerate the required seventh table from the trace when possible.
 
         An imported package may already ship the table without shipping a trace, and
         a package produced before the table existed can still be completed as long as
-        the trace is available. When neither holds, the package simply ships without
-        it -- this table is a bonus view, not a gate on task success.
+        the trace is available. It is a required table now, so when it cannot be
+        produced the package gate flags it rather than passing silently.
         """
         table = package / f"{prefix}{FORWARD_PIPELINE_SUFFIX}"
         if table.is_file():
