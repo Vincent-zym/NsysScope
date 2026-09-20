@@ -107,6 +107,23 @@ Record conflicts. Do not infer runtime branches from source defaults.
 - Read [references/output-spec.md](references/output-spec.md) before generating
   or validating the package.
 
+## Filesystem guardrails
+
+- NEVER run a whole-filesystem search. No `find /`, `grep -r /`, `ls -R /`, or any
+  scan rooted at `/`, `/root`, `/home`, `$HOME` or another huge tree. On a shared
+  server `/` spans Docker overlay layers and network mounts, so such a scan blocks
+  in uninterruptible I/O for many minutes and stalls the whole job. This is a real
+  incident: an agent's `find / -name "*semantic_map*.json"` sat in D-state for
+  20+ minutes and the job never recovered.
+- Scope every file search to a known directory: the job/package dir, the skill dir
+  (`scripts/`, `references/`), or a path named in the task. Prefer `ls DIR`,
+  `find DIR -maxdepth N`, or a grep with an explicit directory over an unbounded
+  walk, and always bound the depth.
+- You do not need to hunt the filesystem for example packages or origin CSVs.
+  Everything required is the trace, the model config/source named in the task, and
+  this skill's own `references/`. Build the origin CSV from the trace, never from a
+  found example.
+
 ## Workflow
 
 ### 1. Recover the launch command
