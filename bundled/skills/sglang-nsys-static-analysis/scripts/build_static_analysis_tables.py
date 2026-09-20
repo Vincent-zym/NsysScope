@@ -18,7 +18,7 @@ from typing import Any
 
 
 ORIGIN_COLUMNS = [
-    "序号", "module", "operator_name", "duration_us", "start_ns", "end_ns",
+    "序号", "region", "module", "operator_name", "duration_us", "start_ns", "end_ns",
     "device", "stream", "layer_id", "unit_position", "unit_id", "unit_variant",
     "duration_min_us", "duration_max_us",
     "duration_diff_us", "duration_avg_us", "duration_avg_pct_of_total",
@@ -26,26 +26,26 @@ ORIGIN_COLUMNS = [
     "dispatch_code_snippet",
 ]
 OPERATOR_COLUMNS = [
-    "序号", "单元位置", "单元ID", "单元类型", "功能模块", "module",
+    "序号", "region", "单元位置", "单元ID", "单元类型", "功能模块", "module",
     "算子名称",
     "算子耗时(us)", "算子耗时占比(%)",
     "shape", "mfu", "mbu", "模块耗时(us)", "模块耗时占比(%)", "python_function",
     "功能介绍",
 ]
 CORE_COLUMNS = [
-    "序号", "单元位置", "单元ID", "单元类型", "功能模块", "module",
+    "序号", "region", "单元位置", "单元ID", "单元类型", "功能模块", "module",
     "算子名称", "算子耗时(us)",
     "算子耗时占比(%)", "模块耗时(us)", "模块耗时占比(%)", "shape", "mfu", "mbu",
     "python_function", "功能介绍",
 ]
 AUX_COLUMNS = [
-    "序号", "单元位置", "单元ID", "单元类型", "功能模块", "算子名称",
+    "序号", "region", "单元位置", "单元ID", "单元类型", "功能模块", "算子名称",
     "算子耗时(us)", "算子耗时占比(%)", "模块耗时(us)", "模块耗时占比(%)",
     "python_function", "功能介绍",
 ]
-CLASS_COLUMNS = ["序号", "算子类型", "算子数量", "总耗时(us)", "耗时占比(%)"]
+CLASS_COLUMNS = ["序号", "region", "算子类型", "算子数量", "总耗时(us)", "耗时占比(%)"]
 STAGE_COLUMNS = [
-    "序号", "单元位置", "单元ID", "单元类型", "功能模块",
+    "序号", "region", "单元位置", "单元ID", "单元类型", "功能模块",
     "模块耗时(us)", "模块耗时占比(%)", "代表区间并集(us)",
     "代表墙钟跨度(us)", "耗时口径", "功能介绍",
 ]
@@ -178,12 +178,17 @@ def load_taxonomy(path: Path | None) -> dict[str, Any]:
     data = json.loads(path.read_text())
     if not isinstance(data, dict):
         raise ValueError("architecture taxonomy must be a JSON object")
-    if data.get("schema_version") != "1.0":
-        raise ValueError("architecture taxonomy schema_version must be 1.0")
+    if data.get("schema_version") not in ("1.0", "1.1"):
+        raise ValueError("architecture taxonomy schema_version must be 1.0 or 1.1")
+    regions = data.get("regions")
+    multi_region = isinstance(regions, list) and bool(regions)
     repeating = data.get("repeating_unit")
     variants = data.get("variants")
     evidence = data.get("evidence")
-    if not isinstance(repeating, dict) or not isinstance(repeating.get("positions"), list):
+    if multi_region:
+        if repeating is not None:
+            raise ValueError("architecture taxonomy: regions and repeating_unit are mutually exclusive")
+    elif not isinstance(repeating, dict) or not isinstance(repeating.get("positions"), list):
         raise ValueError("architecture taxonomy needs repeating_unit.positions")
     if not isinstance(variants, list) or not variants:
         raise ValueError("architecture taxonomy needs a non-empty variants list")
@@ -196,26 +201,59 @@ def load_taxonomy(path: Path | None) -> dict[str, Any]:
     }
     if len(variant_names) != len(variants):
         raise ValueError("architecture taxonomy variant names must be non-empty and unique")
-    positions = repeating["positions"]
-    seen_positions: set[int] = set()
-    seen_unit_ids: set[str] = set()
-    for item in positions:
-        if not isinstance(item, dict):
-            raise ValueError("each repeating-unit position must be an object")
-        position = item.get("position")
-        variant = item.get("unit_variant")
-        if not isinstance(position, int) or position <= 0 or position in seen_positions:
-            raise ValueError("repeating-unit positions must be unique positive integers")
-        if variant not in variant_names:
-            raise ValueError(f"position {position} references undeclared variant {variant!r}")
-        if not item.get("unit_id"):
-            raise ValueError(f"position {position} needs unit_id")
-        if str(item["unit_id"]) in seen_unit_ids:
-            raise ValueError(f"position {position} repeats unit_id {item['unit_id']!r}")
-        seen_positions.add(position)
-        seen_unit_ids.add(str(item["unit_id"]))
-    if seen_positions != set(range(1, len(positions) + 1)):
-        raise ValueError("repeating-unit positions must be contiguous from 1")
+
+    def _check_positions(positions: Any, label: str = "repeating-unit") -> None:
+        if not isinstance(positions, list) or not positions:
+            raise ValueError(f"{label} needs a non-empty positions list")
+        seen_positions: set[int] = set()
+        seen_unit_ids: set[str] = set()
+        for item in positions:
+            if not isinstance(item, dict):
+                raise ValueError(f"each {label} position must be an object")
+            position = item.get("position")
+            variant = item.get("unit_variant")
+            if not isinstance(position, int) or position <= 0 or position in seen_positions:
+                raise ValueError(f"{label} positions must be unique positive integers")
+            if variant not in variant_names:
+                raise ValueError(f"{label} position {position} references undeclared variant {variant!r}")
+            if not item.get("unit_id"):
+                raise ValueError(f"{label} position {position} needs unit_id")
+            if str(item["unit_id"]) in seen_unit_ids:
+                raise ValueError(f"{label} position {position} repeats unit_id {item['unit_id']!r}")
+            seen_positions.add(position)
+            seen_unit_ids.add(str(item["unit_id"]))
+        if seen_positions != set(range(1, len(positions) + 1)):
+            raise ValueError(f"{label} positions must be contiguous from 1")
+
+    if multi_region:
+        seen_names: set[str] = set()
+        ranges: list[tuple[int, int, str]] = []
+        for region in regions:
+            if not isinstance(region, dict):
+                raise ValueError("each region must be an object")
+            name = region.get("name")
+            if not name or not isinstance(name, str) or name in seen_names:
+                raise ValueError("each region needs a unique non-empty name")
+            seen_names.add(name)
+            layer_range = region.get("layer_range")
+            if (
+                not isinstance(layer_range, list) or len(layer_range) != 2
+                or not all(isinstance(x, int) for x in layer_range)
+                or layer_range[0] > layer_range[1]
+            ):
+                raise ValueError(f"region {name!r} layer_range must be [low, high] integers")
+            ranges.append((layer_range[0], layer_range[1], name))
+            unit = region.get("repeating_unit")
+            _check_positions(
+                unit.get("positions") if isinstance(unit, dict) else None,
+                label=f"region {name!r}",
+            )
+        ranges.sort()
+        for (lo1, hi1, n1), (lo2, hi2, n2) in zip(ranges, ranges[1:]):
+            if lo2 <= hi1:
+                raise ValueError(f"region layer ranges overlap: {n1!r} and {n2!r}")
+    else:
+        _check_positions(repeating["positions"])
 
     for item in variants:
         modules = item.get("ordered_functional_modules")
@@ -269,6 +307,52 @@ def load_taxonomy(path: Path | None) -> dict[str, Any]:
                 "two logical_owners and attribution_policy=indivisible"
             )
     return data
+
+
+def regions_from_taxonomy(taxonomy: dict[str, Any]) -> list[tuple[str, tuple[int, int] | None, list]]:
+    """Return [(region_name, layer_range_or_None, positions), ...].
+
+    A taxonomy without a `regions` array yields one implicit region named "" that
+    owns every row, so the single-region code path is unchanged."""
+    regions = taxonomy.get("regions") if taxonomy else None
+    if isinstance(regions, list) and regions:
+        out: list[tuple[str, tuple[int, int] | None, list]] = []
+        for region in regions:
+            name = str(region.get("name"))
+            lo, hi = region["layer_range"]
+            positions = (region.get("repeating_unit") or {}).get("positions") or []
+            out.append((name, (int(lo), int(hi)), positions))
+        return out
+    positions = (taxonomy.get("repeating_unit") or {}).get("positions") or [] if taxonomy else []
+    return [("", None, positions)]
+
+
+def region_scoped_taxonomy(taxonomy: dict[str, Any], positions: list) -> dict[str, Any]:
+    """A shallow taxonomy view whose single repeating_unit holds one region's
+    positions, so taxonomy_position_for_row / resolve_unit_fields work unchanged."""
+    if not taxonomy:
+        return {}
+    scoped = dict(taxonomy)
+    scoped.pop("regions", None)
+    scoped["repeating_unit"] = {"positions": positions}
+    return scoped
+
+
+def route_region(row: dict[str, str], regions: list[tuple[str, tuple[int, int] | None, list]]) -> str:
+    """Assign a source row to a region. A pre-tagged `region` field wins; else the
+    row's layer_id is matched against each region's layer_range."""
+    tagged = str(row.get("region", "")).strip()
+    if tagged:
+        return tagged
+    if len(regions) == 1 and regions[0][1] is None:
+        return regions[0][0]
+    layer_raw = str(row.get("layer_id", "")).strip()
+    if layer_raw.lstrip("-").isdigit():
+        layer_id = int(layer_raw)
+        for name, layer_range, _ in regions:
+            if layer_range is not None and layer_range[0] <= layer_id <= layer_range[1]:
+                return name
+    return ""
 
 
 def taxonomy_position_for_row(
@@ -746,12 +830,16 @@ def compute_mbu(
     return f"{utilization:.2f}%", None
 
 
-def main() -> None:
-    args = parse_args()
-    _, source_rows = read_csv(args.origin_csv)
-    semantics = load_semantics(args.semantic_map)
-    taxonomy = load_taxonomy(args.taxonomy)
-    hardware_profiles = load_hardware_profiles(args.hardware_profiles)
+def analyze_one_region(
+    source_rows: list[dict[str, str]],
+    taxonomy: dict[str, Any],
+    semantics: dict[str, Any],
+    hardware_profiles: dict[str, Any],
+    args: argparse.Namespace,
+) -> dict[str, Any]:
+    """Build one region's six table row-lists (with their footers/P-rows) plus
+    that region's denominator. This is the original single-region computation;
+    the multi-region driver calls it once per region and concatenates."""
     rules = semantics.get("rules", [])
 
     total_candidates = [r for r in source_rows if r.get("module") == "__layer_total__"]
@@ -1058,17 +1146,91 @@ def main() -> None:
         "功能介绍": "全部结构位置和功能模块总计。",
     })
 
+    return {
+        "origin_rows": origin_rows,
+        "operator_rows": operator_rows,
+        "core_rows": core_rows,
+        "aux_rows": aux_rows,
+        "class_rows": class_rows,
+        "stage_rows": stage_rows,
+        "total_duration": total_duration,
+        "mfu_evidence": mfu_evidence,
+        "mbu_rejections": mbu_rejections,
+    }
+
+
+def _renumber(rows: list[dict[str, Any]], counter: dict[str, int]) -> None:
+    """Renumber numeric 序号 monotonically across concatenated regions; leave the
+    P-prefixed pattern rows and 总计 footers as their own per-region markers,
+    except P-rows get a fresh global P-index so they stay unique."""
+    for row in rows:
+        raw = str(row.get("序号", ""))
+        if raw.isdigit():
+            counter["n"] += 1
+            row["序号"] = counter["n"]
+        elif raw.startswith("P"):
+            counter["p"] += 1
+            row["序号"] = f"P{counter['p']}"
+
+
+def main() -> None:
+    args = parse_args()
+    _, source_rows = read_csv(args.origin_csv)
+    semantics = load_semantics(args.semantic_map)
+    taxonomy = load_taxonomy(args.taxonomy)
+    hardware_profiles = load_hardware_profiles(args.hardware_profiles)
+
+    regions = regions_from_taxonomy(taxonomy)
+    grouped: dict[str, list[dict[str, str]]] = {name: [] for name, _, _ in regions}
+    unrouted: list[dict[str, str]] = []
+    for row in source_rows:
+        name = route_region(row, regions)
+        if name in grouped:
+            grouped[name].append(row)
+        elif regions:
+            # a row that fits no declared range (e.g. an untagged global total):
+            # keep it with the first region so nothing is silently dropped.
+            unrouted.append(row)
+            grouped[regions[0][0]].append(row)
+
+    table_keys = [
+        ("origin_rows", ORIGIN_COLUMNS, "_operator_origin_table.csv"),
+        ("operator_rows", OPERATOR_COLUMNS, "_opreator_table.csv"),
+        ("core_rows", CORE_COLUMNS, "_core_compute_table.csv"),
+        ("aux_rows", AUX_COLUMNS, "_auxiliary_operator_table.csv"),
+        ("class_rows", CLASS_COLUMNS, "_op_classification_table.csv"),
+        ("stage_rows", STAGE_COLUMNS, "_stage_table.csv"),
+    ]
+    combined: dict[str, list[dict[str, Any]]] = {key: [] for key, _, _ in table_keys}
+    counters: dict[str, dict[str, int]] = {key: {"n": 0, "p": 0} for key, _, _ in table_keys}
+    region_totals: dict[str, float] = {}
+    mfu_evidence: list[dict[str, Any]] = []
+    mbu_rejections: list[dict[str, Any]] = []
+
+    for name, _layer_range, positions in regions:
+        scoped = region_scoped_taxonomy(taxonomy, positions)
+        result = analyze_one_region(
+            grouped.get(name, []), scoped, semantics, hardware_profiles, args,
+        )
+        region_totals[name] = round(result["total_duration"], 3)
+        mfu_evidence.extend(result["mfu_evidence"])
+        mbu_rejections.extend(result["mbu_rejections"])
+        for key, _cols, _suffix in table_keys:
+            rows = result[key]
+            for row in rows:
+                row["region"] = name
+            _renumber(rows, counters[key])
+            combined[key].extend(rows)
+
     outputs = {
-        f"{args.prefix}_operator_origin_table.csv": (ORIGIN_COLUMNS, origin_rows),
-        f"{args.prefix}_opreator_table.csv": (OPERATOR_COLUMNS, operator_rows),
-        f"{args.prefix}_core_compute_table.csv": (CORE_COLUMNS, core_rows),
-        f"{args.prefix}_auxiliary_operator_table.csv": (AUX_COLUMNS, aux_rows),
-        f"{args.prefix}_op_classification_table.csv": (CLASS_COLUMNS, class_rows),
-        f"{args.prefix}_stage_table.csv": (STAGE_COLUMNS, stage_rows),
+        f"{args.prefix}{suffix}": (columns, combined[key])
+        for key, columns, suffix in table_keys
     }
     for filename, (columns, rows) in outputs.items():
         write_csv(args.output_dir / filename, columns, rows)
 
+    total_duration = sum(region_totals.values())
+    multi_region = len(regions) > 1 or (regions and regions[0][0] != "")
     manifest = {
         "origin_csv": str(args.origin_csv),
         "output_dir": str(args.output_dir),
@@ -1079,12 +1241,14 @@ def main() -> None:
         "hardware": args.hardware,
         "hardware_profiles": str(args.hardware_profiles) if args.hardware_profiles else None,
         "total_duration_us": round(total_duration, 3),
+        "region_totals_us": region_totals if multi_region else None,
+        "regions": [name for name, _, _ in regions] if multi_region else None,
         "duration_basis": "duration_avg_us when available, otherwise duration_us",
-        "percentage_denominator": "sqlite repeating-unit wall-span (__layer_total__)",
+        "percentage_denominator": "per-region repeating-unit wall-span (__layer_total__)",
         "semantic_map": str(args.semantic_map) if args.semantic_map else None,
         "architecture_taxonomy": str(args.taxonomy) if args.taxonomy else None,
         "taxonomy_schema_version": taxonomy.get("schema_version") if taxonomy else None,
-        "table_contract_version": "1.2",
+        "table_contract_version": "1.3",
         "total_rows": {
             "required": True,
             "marker": "序号=总计；原始表使用 module=__layer_total__",

@@ -848,6 +848,75 @@ def extract_prompt_inputs(prompt_path: Path) -> str:
     return "<br>".join(html.escape(line) for line in lines)
 
 
+def _region_rows(rows: list[dict[str, str]], region: str | None) -> list[dict[str, str]]:
+    """Rows belonging to one region. `region=None` (single-region packages) keeps
+    every row untouched so the output stays byte-identical to the pre-region tool."""
+    if region is None:
+        return rows
+    return [row for row in rows if (row.get("region") or "") == region]
+
+
+def render_breakdowns(
+    body: list[str],
+    stage_rows: list[dict[str, str]],
+    operator_rows: list[dict[str, str]],
+    classification_rows: list[dict[str, str]],
+    core_rows: list[dict[str, str]],
+    origin_rows: list[dict[str, str]],
+    pattern_us: float,
+    labels: dict[str, str],
+    titles: tuple[str, str, str, str],
+) -> None:
+    """Emit the four §x.x breakdown tables (功能模块 / 算子大类 / 算子小类 / 核心计算)
+    for one denominator. Single-region and each multi-region block share this so
+    the tables read identically; only the section numbers and the row subset differ.
+    """
+    body.append(h3(titles[0]))
+    covered = sum(
+        float(row.get("模块耗时(us)") or 0) for row in stage_rows
+        if (row.get("序号") or "").strip().isdigit()
+    )
+    classified_us = next(
+        (float(row.get("总耗时(us)") or 0) for row in classification_rows
+         if (row.get("算子类型") or "").strip() == "总计"), 0.0)
+    if covered > pattern_us:
+        body.append(p(
+            "以下口径为<b>一个重复 pattern</b>内、稳定样本逐算子平均耗时之和，"
+            f"pattern 墙钟 {ms(pattern_us)} ms，各模块累计 {ms(covered)} ms。"
+        ))
+    else:
+        if classified_us and abs(classified_us - covered) <= 1.0:
+            remainder = "余量为 kernel 之间的 GPU 空隙"
+        else:
+            remainder = "余量为未归类的零散算子"
+        body.append(p(
+            "以下口径为<b>一个重复 pattern</b>内、稳定样本逐算子平均耗时之和，"
+            f"pattern 合计 {ms(pattern_us)} ms，下表覆盖其中 {ms(covered)} ms"
+            f"（{covered / pattern_us * 100:.1f}%，{remainder}）。"
+        ))
+    modules = module_table(stage_rows, operator_rows, pattern_us)
+    if modules:
+        body.append(modules)
+        module_overlap = overlap_note(covered, pattern_us, "各功能模块耗时")
+        if module_overlap:
+            body.append(module_overlap)
+
+    body.append(h3(titles[1]))
+    categories = category_table(classification_rows, pattern_us)
+    if categories:
+        body.append(categories)
+
+    body.append(h3(titles[2]))
+    kernels = kernel_table(operator_rows, pattern_us, labels)
+    if kernels:
+        body.append(kernels)
+
+    core = core_compute_table(core_rows, origin_rows, pattern_us, labels)
+    if core:
+        body.append(h3(titles[3]))
+        body.append(core)
+
+
 def build(package: Path, prefix: str) -> str:
     csv_dir = package / "csv" if (package / "csv").is_dir() else package
     metadata_dir = package / "metadata"
@@ -913,6 +982,18 @@ def build(package: Path, prefix: str) -> str:
         body.append(h2("2.1 整体耗时统计"))
         body.append(forward[0])
 
+    classification_rows = read_csv(csv_dir / f"{prefix}_op_classification_table.csv")
+    core_rows = read_csv(csv_dir / f"{prefix}_core_compute_table.csv")
+    origin_rows = read_csv(csv_dir / f"{prefix}_operator_origin_table.csv")
+    # One label map for the whole report, computed from every kernel name the
+    # package mentions: which template arguments are worth showing depends on
+    # what else is in the table, so 2.2.4 and 2.2.5 must decide it together or
+    # the same kernel would appear under two different labels.
+    labels = kernel_labels(
+        [row.get("算子名称") or "" for row in (*operator_rows, *core_rows)
+         if (row.get("序号") or "").strip().isdigit()]
+    )
+
     body.append(h2("2.2 Target部分耗时统计"))
     # 分析思路 belongs here, not under section 2: it states which repeating pattern
     # was selected and its wall time, and that pattern is only the denominator for
@@ -929,81 +1010,56 @@ def build(package: Path, prefix: str) -> str:
         body.append(h3("2.2.1 整体耗时统计"))
         body.append(forward[1])
 
-    body.append(h3("2.2.2 按功能模块划分统计"))
-    covered = sum(
-        float(row.get("模块耗时(us)") or 0) for row in stage_rows
-        if (row.get("序号") or "").strip().isdigit()
-    )
-    classification_rows = read_csv(csv_dir / f"{prefix}_op_classification_table.csv")
-    classified_us = next(
-        (float(row.get("总耗时(us)") or 0) for row in classification_rows
-         if (row.get("算子类型") or "").strip() == "总计"), 0.0)
-    # Modules can sum above the unit wall span when variants run on their own
-    # streams, and calling that excess "unclassified leftovers" -- as this line
-    # used to unconditionally -- is both self-contradictory and wrong.
-    if covered > pattern_us:
-        # Above the table: only the 口径 and the two numbers. The reason the numbers
-        # exceed the wall-clock goes below the table (overlap_note), so every >100%
-        # in the report carries its cause directly under the data.
-        body.append(p(
-            "以下口径为<b>一个重复 pattern</b>内、稳定样本逐算子平均耗时之和，"
-            f"pattern 墙钟 {ms(pattern_us)} ms，各模块累计 {ms(covered)} ms。"
-        ))
+    regions_list = manifest.get("regions") or []
+    region_totals = manifest.get("region_totals_us") or {}
+    if regions_list:
+        # Multi-region (schema 1.1): each region is a periodic sub-structure with its
+        # own denominator, rendered as its own §2.k block. This internalizes what the
+        # hand-merge scripts used to do by slicing region reports together.
+        for offset, region in enumerate(regions_list):
+            k = offset + 3  # 2.1 forward, 2.2 target overview, regions start at 2.3
+            body.append(h2(f"2.{k} {region}区耗时统计"))
+            body.append(p(
+                f"<b>分析思路</b>：<!-- TODO {region} 区：一句话写出该区重复 pattern 的"
+                "选取依据与 pattern 耗时，100 字以内；不要下结论 -->"
+            ))
+            region_us = float(region_totals.get(region) or 0) or 1.0
+            render_breakdowns(
+                body,
+                _region_rows(stage_rows, region),
+                _region_rows(operator_rows, region),
+                _region_rows(classification_rows, region),
+                _region_rows(core_rows, region),
+                _region_rows(origin_rows, region),
+                region_us,
+                labels,
+                (
+                    f"2.{k}.1 按功能模块划分统计",
+                    f"2.{k}.2 按算子大类划分统计",
+                    f"2.{k}.3 按算子小类划分统计",
+                    f"2.{k}.4 按核心计算统计",
+                ),
+            )
+        draft_section_no = 3 + len(regions_list)
     else:
-        # 余量的成因不能一概而论：模块之和已经等于全部算子耗时之和时没有未归类算子，
-        # 差额只能是 pattern 内 kernel 之间的 GPU 空隙；只有模块之和还不到算子总和，
-        # 余量里才真的有未归类的零散算子。写错了方向就是把一个没有证据的成因塞进报告。
-        if classified_us and abs(classified_us - covered) <= 1.0:
-            remainder = "余量为 kernel 之间的 GPU 空隙"
-        else:
-            remainder = "余量为未归类的零散算子"
-        body.append(p(
-            "以下口径为<b>一个重复 pattern</b>内、稳定样本逐算子平均耗时之和，"
-            f"pattern 合计 {ms(pattern_us)} ms，下表覆盖其中 {ms(covered)} ms"
-            f"（{covered / pattern_us * 100:.1f}%，{remainder}）。"
-        ))
-    modules = module_table(stage_rows, operator_rows, pattern_us)
-    if modules:
-        body.append(modules)
-        module_overlap = overlap_note(covered, pattern_us, "各功能模块耗时")
-        if module_overlap:
-            body.append(module_overlap)
-
-    body.append(h3("2.2.3 按算子大类划分统计"))
-    categories = category_table(classification_rows, pattern_us)
-    if categories:
-        body.append(categories)
-
-    body.append(h3("2.2.4 按算子小类划分统计"))
-    core_rows = read_csv(csv_dir / f"{prefix}_core_compute_table.csv")
-    # One label map for the whole report, computed from every kernel name the
-    # package mentions: which template arguments are worth showing depends on
-    # what else is in the table, so 2.2.4 and 2.2.5 must decide it together or
-    # the same kernel would appear under two different labels.
-    labels = kernel_labels(
-        [row.get("算子名称") or "" for row in (*operator_rows, *core_rows)
-         if (row.get("序号") or "").strip().isdigit()]
-    )
-    kernels = kernel_table(operator_rows, pattern_us, labels)
-    if kernels:
-        body.append(kernels)
-
-    core = core_compute_table(
-        core_rows,
-        read_csv(csv_dir / f"{prefix}_operator_origin_table.csv"),
-        pattern_us,
-        labels,
-    )
-    if core:
-        body.append(h3("2.2.5 按核心计算统计"))
-        body.append(core)
+        render_breakdowns(
+            body, stage_rows, operator_rows, classification_rows, core_rows,
+            origin_rows, pattern_us, labels,
+            (
+                "2.2.2 按功能模块划分统计",
+                "2.2.3 按算子大类划分统计",
+                "2.2.4 按算子小类划分统计",
+                "2.2.5 按核心计算统计",
+            ),
+        )
+        draft_section_no = 3
 
     # Only when the capture has a draft phase at all (speculative decoding
     # enabled) -- an ordinary run has no third child table to show, and the
     # section is skipped rather than emitted empty.
     if forward and forward[2]:
-        body.append(h2("2.3 Draft部分耗时统计"))
-        body.append(h3("2.3.1 整体耗时统计"))
+        body.append(h2(f"2.{draft_section_no} Draft部分耗时统计"))
+        body.append(h3(f"2.{draft_section_no}.1 整体耗时统计"))
         body.append(forward[2])
 
     tail: list[str] = []

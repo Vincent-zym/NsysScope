@@ -704,33 +704,59 @@ def main() -> None:
     if sum(core_counter.values()) or sum(auxiliary_counter.values()):
         errors.append("core/auxiliary tables contain rows absent from overview")
 
+    # Region-grouped so a multi-region package (schema 1.1) validates each region
+    # against its own classification rows. Single-region rows all carry region="",
+    # so grouping by "" reproduces the original whole-table checks exactly.
+    region_names: list[str] = []
+    for row in overview:
+        name = str(row.get("region", ""))
+        if name not in region_names:
+            region_names.append(name)
+    if not region_names:
+        region_names = [""]
+
+    totals_by_region: dict[str, dict[str, dict[str, float]]] = {}
+    for region in region_names:
+        idxs = [i for i, row in enumerate(overview) if str(row.get("region", "")) == region]
+        totals_by_region[region] = {
+            category: {
+                "count": sum(categories[i] == category for i in idxs),
+                "duration": sum(
+                    number(overview[i].get("算子耗时(us)")) or 0
+                    for i in idxs if categories[i] == category
+                ),
+            }
+            for category in ("core", "communication", "auxiliary")
+        }
     totals = {
         category: {
-            "count": sum(item == category for item in categories),
-            "duration": sum(
-                number(row.get("算子耗时(us)")) or 0
-                for row, item in zip(overview, categories, strict=True)
-                if item == category
-            ),
+            "count": sum(totals_by_region[r][category]["count"] for r in region_names),
+            "duration": sum(totals_by_region[r][category]["duration"] for r in region_names),
         }
         for category in ("core", "communication", "auxiliary")
     }
-    if [row.get("算子类型") for row in classes] != list(CATEGORY_LABELS):
-        errors.append("classification rows must be 核心计算, 通信, 辅助算子 in order")
+
+    classes_by_region: dict[str, list[dict[str, str]]] = defaultdict(list)
     for row in classes:
-        category = CATEGORY_LABELS.get(row.get("算子类型", ""))
-        if not category:
-            continue
-        row_count = number(row.get("算子数量"))
-        if row_count is None or int(row_count) != totals[category]["count"]:
-            errors.append(f"{row['算子类型']} count disagrees with operator membership")
-        row_duration = number(row.get("总耗时(us)"))
-        if row_duration is None or not math.isclose(
-            row_duration,
-            totals[category]["duration"],
-            abs_tol=0.01,
-        ):
-            errors.append(f"{row['算子类型']} duration disagrees with operator membership")
+        classes_by_region[str(row.get("region", ""))].append(row)
+    for region in region_names:
+        region_classes = classes_by_region.get(region, [])
+        if [row.get("算子类型") for row in region_classes] != list(CATEGORY_LABELS):
+            errors.append("classification rows must be 核心计算, 通信, 辅助算子 in order")
+        for row in region_classes:
+            category = CATEGORY_LABELS.get(row.get("算子类型", ""))
+            if not category:
+                continue
+            row_count = number(row.get("算子数量"))
+            if row_count is None or int(row_count) != totals_by_region[region][category]["count"]:
+                errors.append(f"{row['算子类型']} count disagrees with operator membership")
+            row_duration = number(row.get("总耗时(us)"))
+            if row_duration is None or not math.isclose(
+                row_duration,
+                totals_by_region[region][category]["duration"],
+                abs_tol=0.01,
+            ):
+                errors.append(f"{row['算子类型']} duration disagrees with operator membership")
 
     for row in core:
         mfu = number(row.get("mfu"))
@@ -772,9 +798,15 @@ def main() -> None:
         "stages": [row for row in stages_all if is_total_row(row)],
     }
     if total_rows_required:
+        # One total row per region per table (single-region packages have the one
+        # region "" and so require exactly one, as before).
         for name, rows in total_rows.items():
-            if len(rows) != 1:
-                errors.append(f"{name} table needs exactly one total row")
+            grouped: dict[str, int] = defaultdict(int)
+            for row in rows:
+                grouped[str(row.get("region", ""))] += 1
+            for region in region_names:
+                if grouped.get(region, 0) != 1:
+                    errors.append(f"{name} table needs exactly one total row per region")
         final_markers = {
             "origin": bool(origin) and origin[-1].get("module") == "__layer_total__",
             "overview": bool(overview_all) and is_total_row(overview_all[-1]),
@@ -795,49 +827,64 @@ def main() -> None:
         if operator_index <= 0 or overview_fields[operator_index - 1] != "module":
             errors.append("overview module must immediately precede 算子名称")
 
-        accumulated_duration = sum(
-            number(row.get("算子耗时(us)")) or 0 for row in overview
-        )
-        core_duration = totals["core"]["duration"]
-        auxiliary_duration = totals["auxiliary"]["duration"]
-        total_duration = (
-            number(total_rows["origin"][0].get("duration_avg_us"))
-            or number(total_rows["origin"][0].get("duration_us"))
-            if total_rows["origin"] else None
-        )
+        accumulated_by_region: dict[str, float] = defaultdict(float)
+        count_by_region: dict[str, int] = defaultdict(int)
+        for row in overview:
+            region = str(row.get("region", ""))
+            accumulated_by_region[region] += number(row.get("算子耗时(us)")) or 0
+            count_by_region[region] += 1
+        core_by_region = {r: totals_by_region[r]["core"]["duration"] for r in region_names}
+        aux_by_region = {r: totals_by_region[r]["auxiliary"]["duration"] for r in region_names}
+
+        origin_totals_by_region: dict[str, list[dict[str, str]]] = defaultdict(list)
+        for row in total_rows["origin"]:
+            origin_totals_by_region[str(row.get("region", ""))].append(row)
 
         def check_total(
-            name: str, field: str, expected: float, *, count_field: str | None = None,
-            expected_count: int | None = None,
+            name: str, field: str, expected: dict[str, float], *,
+            count_field: str | None = None, expected_count: dict[str, int] | None = None,
         ) -> None:
-            rows = total_rows[name]
-            if len(rows) != 1:
-                return
-            actual = number(rows[0].get(field))
-            if actual is None or not math.isclose(actual, expected, abs_tol=0.01):
-                errors.append(f"{name} total {field} disagrees with data rows")
-            if count_field:
-                actual_count = number(rows[0].get(count_field))
-                if actual_count is None or int(actual_count) != expected_count:
-                    errors.append(f"{name} total {count_field} disagrees with data rows")
+            grouped: dict[str, list[dict[str, str]]] = defaultdict(list)
+            for row in total_rows[name]:
+                grouped[str(row.get("region", ""))].append(row)
+            for region in region_names:
+                rows = grouped.get(region, [])
+                if len(rows) != 1:
+                    continue
+                actual = number(rows[0].get(field))
+                if actual is None or not math.isclose(
+                    actual, expected.get(region, 0.0), abs_tol=0.01
+                ):
+                    errors.append(f"{name} total {field} disagrees with data rows")
+                if count_field and expected_count is not None:
+                    actual_count = number(rows[0].get(count_field))
+                    if actual_count is None or int(actual_count) != expected_count.get(region, 0):
+                        errors.append(f"{name} total {count_field} disagrees with data rows")
 
-        check_total("overview", "算子耗时(us)", accumulated_duration)
-        check_total("overview", "模块耗时(us)", accumulated_duration)
-        check_total("core", "算子耗时(us)", core_duration)
-        check_total("auxiliary", "算子耗时(us)", auxiliary_duration)
+        check_total("overview", "算子耗时(us)", accumulated_by_region)
+        check_total("overview", "模块耗时(us)", accumulated_by_region)
+        check_total("core", "算子耗时(us)", core_by_region)
+        check_total("auxiliary", "算子耗时(us)", aux_by_region)
         check_total(
-            "classes", "总耗时(us)", accumulated_duration,
-            count_field="算子数量", expected_count=len(overview),
+            "classes", "总耗时(us)", accumulated_by_region,
+            count_field="算子数量", expected_count=count_by_region,
         )
-        check_total("stages", "模块耗时(us)", accumulated_duration)
-        if total_duration is None or total_duration <= 0:
-            errors.append("origin total row needs a positive repeating-unit duration")
-        elif not math.isclose(
-            number(total_rows["origin"][0].get("duration_avg_pct_of_total")) or -1,
-            100.0,
-            abs_tol=0.01,
-        ):
-            errors.append("origin total row percentage must be 100")
+        check_total("stages", "模块耗时(us)", accumulated_by_region)
+        for region in region_names:
+            region_origin = origin_totals_by_region.get(region, [])
+            region_total_duration = (
+                number(region_origin[0].get("duration_avg_us"))
+                or number(region_origin[0].get("duration_us"))
+                if region_origin else None
+            )
+            if region_total_duration is None or region_total_duration <= 0:
+                errors.append("origin total row needs a positive repeating-unit duration")
+            elif not math.isclose(
+                number(region_origin[0].get("duration_avg_pct_of_total")) or -1,
+                100.0,
+                abs_tol=0.01,
+            ):
+                errors.append("origin total row percentage must be 100")
     taxonomy = portable_json(
         metadata_root,
         args.taxonomy or manifest.get("architecture_taxonomy"),
@@ -904,46 +951,72 @@ def main() -> None:
                 errors.append(f"composite position {position} changes its variant")
 
     if taxonomy:
-        taxonomy_positions = {
-            str(item.get("position")): item
-            for item in (taxonomy.get("repeating_unit") or {}).get("positions", [])
-            if isinstance(item, dict) and item.get("position") is not None
-        }
-        emitted_positions = {
-            row.get("单元位置") for row in overview if row.get("单元位置")
-        }
-        if emitted_positions != set(taxonomy_positions):
-            errors.append(
-                "overview positions do not exactly match architecture taxonomy: "
-                f"{sorted(emitted_positions)} != {sorted(taxonomy_positions)}"
-            )
-        for position, definition in taxonomy_positions.items():
-            expected_id = str(definition.get("unit_id") or "")
-            expected_variant = str(definition.get("unit_variant") or "")
-            origin_rows = [
-                row for row in origin_ops if row.get("unit_position") == position
+        tax_regions = (
+            taxonomy.get("regions")
+            if isinstance(taxonomy.get("regions"), list) and taxonomy.get("regions")
+            else None
+        )
+        if tax_regions:
+            region_position_map = [
+                (str(region.get("name")), {
+                    str(item.get("position")): item
+                    for item in (region.get("repeating_unit") or {}).get("positions", [])
+                    if isinstance(item, dict) and item.get("position") is not None
+                })
+                for region in tax_regions
             ]
-            overview_rows = [
-                row for row in overview if row.get("单元位置") == position
-            ]
-            stage_rows = [
-                row for row in stages if row.get("单元位置") == position
-            ]
-            if not origin_rows or not overview_rows or not stage_rows:
+        else:
+            region_position_map = [("", {
+                str(item.get("position")): item
+                for item in (taxonomy.get("repeating_unit") or {}).get("positions", [])
+                if isinstance(item, dict) and item.get("position") is not None
+            })]
+        # Single-region keeps whole-table matching (positions carry region="");
+        # multi-region matches each region's positions against that region's rows,
+        # because position numbers restart per region.
+        single_region = len(region_position_map) == 1 and region_position_map[0][0] == ""
+        for region_name, taxonomy_positions in region_position_map:
+            if single_region:
+                region_overview, region_origin, region_stages = overview, origin_ops, stages
+            else:
+                region_overview = [r for r in overview if str(r.get("region", "")) == region_name]
+                region_origin = [r for r in origin_ops if str(r.get("region", "")) == region_name]
+                region_stages = [r for r in stages if str(r.get("region", "")) == region_name]
+            emitted_positions = {
+                row.get("单元位置") for row in region_overview if row.get("单元位置")
+            }
+            if emitted_positions != set(taxonomy_positions):
                 errors.append(
-                    f"taxonomy position {position} must appear in origin, overview and stage tables"
+                    "overview positions do not exactly match architecture taxonomy: "
+                    f"{sorted(emitted_positions)} != {sorted(taxonomy_positions)}"
                 )
-                continue
-            if {
-                (row.get("unit_id"), row.get("unit_variant"))
-                for row in origin_rows
-            } != {(expected_id, expected_variant)}:
-                errors.append(f"origin identity changes at taxonomy position {position}")
-            if {
-                (row.get("单元ID"), row.get("单元类型"))
-                for row in [*overview_rows, *stage_rows]
-            } != {(expected_id, expected_variant)}:
-                errors.append(f"human-facing identity changes at taxonomy position {position}")
+            for position, definition in taxonomy_positions.items():
+                expected_id = str(definition.get("unit_id") or "")
+                expected_variant = str(definition.get("unit_variant") or "")
+                origin_rows = [
+                    row for row in region_origin if row.get("unit_position") == position
+                ]
+                overview_rows = [
+                    row for row in region_overview if row.get("单元位置") == position
+                ]
+                stage_rows = [
+                    row for row in region_stages if row.get("单元位置") == position
+                ]
+                if not origin_rows or not overview_rows or not stage_rows:
+                    errors.append(
+                        f"taxonomy position {position} must appear in origin, overview and stage tables"
+                    )
+                    continue
+                if {
+                    (row.get("unit_id"), row.get("unit_variant"))
+                    for row in origin_rows
+                } != {(expected_id, expected_variant)}:
+                    errors.append(f"origin identity changes at taxonomy position {position}")
+                if {
+                    (row.get("单元ID"), row.get("单元类型"))
+                    for row in [*overview_rows, *stage_rows]
+                } != {(expected_id, expected_variant)}:
+                    errors.append(f"human-facing identity changes at taxonomy position {position}")
 
         taxonomy_variants = {
             item.get("name"): item
@@ -986,12 +1059,24 @@ def main() -> None:
     check_stage_composition(
         stages, load_vocabulary_index(args.vocabulary), taxonomy, warnings,
     )
-    unit_duration = (
-        number(total_rows["origin"][0].get("duration_avg_us"))
-        or number(total_rows["origin"][0].get("duration_us"))
-        if total_rows["origin"] else None
-    )
-    validate_unit_attribution(origin_ops, unit_duration, errors)
+    # Per region: each region's operators are bounded by that region's own
+    # repeating-unit wall span, so a decoder kernel is not judged against the
+    # (shorter) encoder unit. Single-region collapses to the one region "".
+    origin_totals_by_region: dict[str, list[dict[str, str]]] = defaultdict(list)
+    for row in total_rows["origin"]:
+        origin_totals_by_region[str(row.get("region", ""))].append(row)
+    for region in region_names:
+        region_ops = (
+            origin_ops if region_names == [""]
+            else [row for row in origin_ops if str(row.get("region", "")) == region]
+        )
+        region_totals_rows = origin_totals_by_region.get(region, [])
+        region_unit_duration = (
+            number(region_totals_rows[0].get("duration_avg_us"))
+            or number(region_totals_rows[0].get("duration_us"))
+            if region_totals_rows else None
+        )
+        validate_unit_attribution(region_ops, region_unit_duration, errors)
     validate_sampling(manifest, errors)
 
     analysis = None

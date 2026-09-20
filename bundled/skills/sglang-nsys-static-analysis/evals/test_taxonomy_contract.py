@@ -206,3 +206,113 @@ def test_builder_never_merges_same_named_stage_across_variants(tmp_path: Path):
             assert rows[-1]["module"] == "__layer_total__"
         else:
             assert rows[-1]["序号"] == "总计"
+
+
+def multi_region_taxonomy() -> dict:
+    variants = [
+        {
+            "name": name,
+            "source_evidence": f"layer selects {name}",
+            "discriminators": [f"config.{name}", f"{name}_core"],
+            "ordered_functional_modules": ["Attention 输入与投影", "Attention 核心"],
+        }
+        for name in ("Source", "Reuse", "Reindex")
+    ]
+    return {
+        "schema_version": "1.1",
+        "model": "Synthetic2Region",
+        "evidence": [{"kind": "config", "path": "/evidence/config.json"}],
+        "variants": variants,
+        "regions": [
+            {"name": "encoder", "layer_range": [2, 3], "repeating_unit": {"positions": [
+                {"position": 1, "unit_id": "L2.source", "unit_variant": "Source", "layer_id": 2},
+                {"position": 2, "unit_id": "L3.reuse", "unit_variant": "Reuse", "layer_id": 3},
+            ]}},
+            {"name": "decoder", "layer_range": [20, 21], "repeating_unit": {"positions": [
+                {"position": 1, "unit_id": "L20.reindex", "unit_variant": "Reindex", "layer_id": 20},
+                {"position": 2, "unit_id": "L21.reuse", "unit_variant": "Reuse", "layer_id": 21},
+            ]}},
+        ],
+    }
+
+
+def test_multi_region_taxonomy_validates():
+    assert load_validator().validate(multi_region_taxonomy()) == []
+    overlap = multi_region_taxonomy()
+    overlap["regions"][1]["layer_range"] = [3, 21]
+    assert any("overlap" in error for error in load_validator().validate(overlap))
+
+
+# PLACEHOLDER_MULTI_REGION_BUILDER
+
+
+def test_multi_region_builder_gives_each_region_its_own_denominator(tmp_path: Path):
+    origin = tmp_path / "origin.csv"
+    fieldnames = [
+        "序号", "module", "operator_name", "duration_us", "start_ns", "end_ns",
+        "device", "stream", "layer_id", "duration_avg_us",
+    ]
+
+    def row(seq, mod, op, dur, start, end, layer):
+        return {
+            "序号": seq, "module": mod, "operator_name": op, "duration_us": dur,
+            "start_ns": start, "end_ns": end, "device": 0, "stream": 1,
+            "layer_id": layer, "duration_avg_us": dur,
+        }
+
+    rows = [
+        # encoder period (layers 2,3): gemm 10us core + norm 5us aux -> 30us wall
+        row(1, "layers.2/attn_core", "gemm_kernel", 10, 0, 10000, 2),
+        row(2, "layers.2/input_norm", "rmsnorm_kernel", 5, 10000, 15000, 2),
+        row(3, "layers.3/attn_core", "gemm_kernel", 10, 15000, 25000, 3),
+        row(4, "layers.3/input_norm", "rmsnorm_kernel", 5, 25000, 30000, 3),
+        # decoder period (layers 20,21): gemm 40us + norm 8us -> 96us wall
+        row(5, "layers.20/attn_core", "gemm_kernel", 40, 100000, 140000, 20),
+        row(6, "layers.20/input_norm", "rmsnorm_kernel", 8, 140000, 148000, 20),
+        row(7, "layers.21/attn_core", "gemm_kernel", 40, 148000, 188000, 21),
+        row(8, "layers.21/input_norm", "rmsnorm_kernel", 8, 188000, 196000, 21),
+    ]
+    with origin.open("w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(rows)
+
+    semantic = {"rules": [
+        {"module_regex": "attn_core$", "functional_module": "Attention 核心"},
+        {"module_regex": "input_norm$", "functional_module": "Attention 输入与投影"},
+    ]}
+    taxonomy_path = tmp_path / "taxonomy.json"
+    semantic_path = tmp_path / "semantic.json"
+    taxonomy_path.write_text(json.dumps(multi_region_taxonomy()))
+    semantic_path.write_text(json.dumps(semantic))
+
+    subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "scripts" / "build_static_analysis_tables.py"),
+            "--origin-csv", str(origin), "--output-dir", str(tmp_path),
+            "--prefix", "mr", "--semantic-map", str(semantic_path),
+            "--taxonomy", str(taxonomy_path), "--stage", "decode",
+        ],
+        check=True, capture_output=True, text=True,
+    )
+
+    manifest = json.loads((tmp_path / "mr_analysis_manifest.json").read_text())
+    assert manifest["region_totals_us"] == {"encoder": 30.0, "decoder": 96.0}
+    assert manifest["regions"] == ["encoder", "decoder"]
+
+    with (tmp_path / "mr_op_classification_table.csv").open(newline="") as handle:
+        classes = list(csv.DictReader(handle))
+    # every row carries its region, and each region has its own 核心/通信/辅助 + 总计
+    assert {row["region"] for row in classes} == {"encoder", "decoder"}
+    core = {row["region"]: row for row in classes if row["算子类型"] == "核心计算"}
+    # region-relative percentages: encoder 20/30, decoder 80/96
+    assert core["encoder"]["耗时占比(%)"] == "66.667"
+    assert core["decoder"]["耗时占比(%)"] == "83.333"
+    totals = [row for row in classes if row["序号"] == "总计"]
+    assert {row["region"] for row in totals} == {"encoder", "decoder"}
+
+    with (tmp_path / "mr_stage_table.csv").open(newline="") as handle:
+        stages = list(csv.DictReader(handle))
+    pattern_rows = [row for row in stages if row["单元ID"] == "__pattern_total__"]
+    assert {row["region"] for row in pattern_rows} == {"encoder", "decoder"}

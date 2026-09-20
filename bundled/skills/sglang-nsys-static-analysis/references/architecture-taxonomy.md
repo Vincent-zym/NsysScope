@@ -129,6 +129,65 @@ most common cause of "taxonomy-derived variant markers do not reproduce the
 declared repeating unit" rejections that are actually taxonomy bugs, not
 trace problems.
 
+## Multiple periodic regions (schema 1.1)
+
+Some models are not one periodic region with a head/tail: they stack several
+periodic regions with **different periods** back to back inside one forward
+step. DeepSeek-V4.1-Flash is the canonical case — an encoder region whose NSA
+index is recomputed every 6 layers (1 source + 5 reuse) followed by a decoder
+region recomputed every 4 layers (1 reindex + 3 reuse). Two different periods
+cannot share one `repeating_unit`, and neither is a head/tail of the other, so
+`excluded_from_repeating_unit` does not apply.
+
+For this, bump `schema_version` to `1.1` and replace the single
+`repeating_unit` with a `regions` array. Each region carries its own
+`layer_range` and its own `repeating_unit` (same object shape as above,
+positions contiguous from 1 within that region). `variants` stays a single
+top-level list that every region's positions reference by name. `regions` and a
+top-level `repeating_unit` are mutually exclusive.
+
+```json
+{
+  "schema_version": "1.1",
+  "model": "DeepSeek-V4.1-Flash",
+  "evidence": [{"kind": "config", "path": "/path/config.json"}],
+  "regions": [
+    {
+      "name": "encoder",
+      "layer_range": [2, 19],
+      "repeating_unit": {
+        "kind": "composite",
+        "boundary_evidence": {"layer_start_kernel": ["layer_start_kernel_name"]},
+        "positions": [
+          {"position": 1, "unit_id": "L2.source",  "unit_variant": "Source", "layer_id": 2},
+          {"position": 2, "unit_id": "L3.reuse",    "unit_variant": "Reuse",  "layer_id": 3}
+        ]
+      }
+    },
+    {
+      "name": "decoder",
+      "layer_range": [20, 39],
+      "repeating_unit": {
+        "kind": "composite",
+        "positions": [
+          {"position": 1, "unit_id": "L20.reindex", "unit_variant": "Reindex", "layer_id": 20},
+          {"position": 2, "unit_id": "L21.reuse",   "unit_variant": "Reuse",   "layer_id": 21}
+        ]
+      }
+    }
+  ],
+  "variants": [ {"name": "Source", "...": "..."}, {"name": "Reuse", "...": "..."}, {"name": "Reindex", "...": "..."} ]
+}
+```
+
+Region `layer_range` values must be `[low, high]` integers, must not overlap,
+and should cover every layer that carries a periodic marker. A prelude/head that
+fits no region is still declared through each region's
+`excluded_from_repeating_unit` as before. Each region gets its own denominator
+(its own period wall-span), its own `__pattern_total__:<region>` rollup, and its
+own §2.2 block in the final report; the CSV rows gain a `region` column. A
+taxonomy without `regions` keeps the exact single-region behaviour and output.
+
 ## Machine-readable trace markers
 
 `repeating_unit.boundary_evidence.layer_start_kernel` and

@@ -669,10 +669,34 @@ def main() -> None:
         row for row in read_csv(root / f"{prefix}_stage_table.csv")
         if not is_total_row(row)
     ]
-    classes = [
+    classes_raw = [
         row for row in read_csv(root / f"{prefix}_op_classification_table.csv")
         if not is_total_row(row)
     ]
+    # A multi-region package (schema 1.1) carries one 核心/通信/辅助 triple per
+    # region. The frontend summary is a whole-model view, so fold duplicates by
+    # category. A single-region package has three unique rows and is left untouched.
+    class_types = [row.get("算子类型") for row in classes_raw]
+    if len(class_types) != len(set(class_types)):
+        folded: dict[str, dict[str, float]] = {}
+        order: list[str] = []
+        for row in classes_raw:
+            name = row.get("算子类型")
+            if name not in folded:
+                folded[name] = {"count": 0.0, "duration": 0.0}
+                order.append(name)
+            folded[name]["count"] += number(row.get("算子数量")) or 0
+            folded[name]["duration"] += number(row.get("总耗时(us)")) or 0.0
+        classes = [
+            {
+                "算子类型": name,
+                "算子数量": str(int(folded[name]["count"])),
+                "总耗时(us)": f"{folded[name]['duration']:.3f}",
+            }
+            for name in order
+        ]
+    else:
+        classes = classes_raw
     # The manifest normally sits in metadata/, but a package whose producer wrote it
     # next to the tables is still a valid package -- and silently falling back to an
     # empty manifest costs the unit composition, the sample count and the devices.

@@ -40,10 +40,20 @@ the structural position and variant in every composite-unit row.
 
 ## Columns
 
+Every table's second column is `region` (immediately after `序号`). It is empty
+for a single-region package and carries the region name for a multi-region
+package (taxonomy schema 1.1, see architecture-taxonomy.md). A multi-region
+package repeats the per-region total/pattern rows once per region — each region
+is a self-contained block with its own `__layer_total__` / `序号=总计` /
+`__pattern_total__` rows and its own denominator — and `region_totals_us` in the
+manifest maps each region name to its wall-span. The column contracts below show
+the single-region form; multi-region tables are identical plus the populated
+`region` column and the repeated per-region footer rows.
+
 Origin:
 
 ```text
-序号,module,operator_name,duration_us,start_ns,end_ns,device,stream,layer_id,
+序号,region,module,operator_name,duration_us,start_ns,end_ns,device,stream,layer_id,
 unit_position,unit_id,unit_variant,duration_min_us,duration_max_us,
 duration_diff_us,duration_avg_us,duration_avg_pct_of_total,python_function,
 function_introduction,mapping_reason,dispatch_code_snippet
