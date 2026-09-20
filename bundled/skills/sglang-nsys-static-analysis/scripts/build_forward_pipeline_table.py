@@ -1915,6 +1915,82 @@ def analyse_device(
     }
 
 
+def _device_kernel_span_us(cur: sqlite3.Cursor, device: Optional[int]) -> float:
+    """Wall span of a device's kernels in microseconds (0 if none)."""
+    if device is not None:
+        row = cur.execute(
+            "select min(start), max(end) from CUPTI_ACTIVITY_KIND_KERNEL where deviceId = ?",
+            (device,),
+        ).fetchone()
+    else:
+        row = cur.execute(
+            "select min(start), max(end) from CUPTI_ACTIVITY_KIND_KERNEL"
+        ).fetchone()
+    if row and row[0] is not None and row[1] is not None and row[1] > row[0]:
+        return (row[1] - row[0]) / 1000.0
+    return 0.0
+
+
+def write_degraded_forward_pipeline(
+    cur: sqlite3.Cursor, args: argparse.Namespace,
+    candidates: List[int], reason: str,
+) -> bool:
+    """Emit a valid but degraded forward-pipeline table instead of failing the job.
+
+    The seventh table is required, but segmentation genuinely fails on some
+    captures (no usable step marker, one forward step, markers that do not
+    reproduce the declared unit). Rather than exiting non-zero -- which used to
+    fail the whole analysis -- write a single `total` row carrying the device's
+    GPU wall span, clearly labelled as un-segmented, so the package always ships
+    the table and the report simply omits the §2.1 split. Returns False only when
+    the trace has no kernels at all (nothing measurable).
+    """
+    busiest = cur.execute(
+        "select deviceId, count(*) c from CUPTI_ACTIVITY_KIND_KERNEL "
+        "group by deviceId order by c desc limit 1"
+    ).fetchone()
+    device = candidates[0] if candidates else (busiest[0] if busiest else None)
+    span_us = _device_kernel_span_us(cur, device)
+    if span_us <= 0:
+        span_us = _device_kernel_span_us(cur, None)
+    if span_us <= 0:
+        return False
+    note = (
+        "分段失败，退化为整段 GPU 跨度（非单个 forward step，仅保证第 7 张表存在）；"
+        "原因：" + reason.replace("\n", " ")[:400]
+    )
+    total_row = {field: "" for field in FIELDS}
+    total_row.update({
+        "环节": "整段 trace GPU 跨度（未分段）",
+        "环节类型": "total",
+        "总耗时(us)": f"{span_us:.3f}",
+        "占forward步(%)": "100",
+        "备注": note,
+    })
+    os.makedirs(args.output_dir, exist_ok=True)
+    out_path = os.path.join(args.output_dir, f"{args.prefix}_forward_pipeline_table.csv")
+    with open(out_path, "w", encoding="utf-8", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=list(FIELDS))
+        writer.writeheader()
+        writer.writerow(total_row)
+    print(out_path)
+    manifest = {
+        "forward_pipeline": {
+            "trace": trace_fingerprint(args.sqlite),
+            "device": device,
+            "device_candidates": candidates or None,
+            "segmentation_failed": True,
+            "degraded": True,
+            "degradation_reason": reason,
+            "note": "un-segmented fallback: total row is the device GPU wall span",
+        }
+    }
+    if args.manifest_out:
+        with open(args.manifest_out, "w", encoding="utf-8") as fh:
+            json.dump(manifest, fh, ensure_ascii=False, indent=2)
+    return True
+
+
 def main() -> None:
     args = parse_args()
     variant_cores: Dict[str, List[str]] = {}
@@ -1943,7 +2019,17 @@ def main() -> None:
     declared = declared_topology(
         args.model_config, args.launch, args.runtime_evidence, args.stage,
     )
-    candidates = device_candidates(cur, args.device, variant_cores, expected_ratio)
+    try:
+        candidates = device_candidates(cur, args.device, variant_cores, expected_ratio)
+    except SystemExit as exc:
+        # e.g. "trace has no CUDA kernels" -- degrade rather than fail the job,
+        # unless the caller explicitly opted into strict failure.
+        if args.on_declaration_conflict != "fail" and write_degraded_forward_pipeline(
+            cur, args, [], str(exc)
+        ):
+            con.close()
+            return
+        raise
     rejected: List[str] = []
     result: Optional[Dict[str, Any]] = None
     for device in candidates:
@@ -1967,9 +2053,17 @@ def main() -> None:
             f"device {device}: {'; '.join(attempt['conflicts'])}"
         )
     if result is None:
-        raise SystemExit(
-            "no device could be segmented into forward steps:\n" + "\n".join(rejected)
-        )
+        # The seventh table is required and must never fail the job (a recurring
+        # past failure mode): when no device segments, ship a degraded total-only
+        # table instead of exiting non-zero -- unless the caller passed
+        # --on-declaration-conflict fail to opt into strict failure.
+        reason = "no device could be segmented into forward steps:\n" + "\n".join(rejected)
+        if args.on_declaration_conflict != "fail" and write_degraded_forward_pipeline(
+            cur, args, candidates, reason
+        ):
+            con.close()
+            return
+        raise SystemExit(reason)
     device = result["device"]
     info = result["info"]
     steps = result["steps"]

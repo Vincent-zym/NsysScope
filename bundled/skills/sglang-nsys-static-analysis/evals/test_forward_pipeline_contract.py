@@ -642,3 +642,63 @@ def test_pp_sendrecv_unrelated_to_any_variant_count_still_warns(tmp_path: Path):
 
     _, manifest = build_server(tmp_path, "--device", str(device), "--step-marker", "%lm_head_kernel%")
     assert manifest["layer_shard_note"] is not None
+
+
+def test_unsegmentable_trace_degrades_instead_of_failing(tmp_path: Path):
+    # The seventh table is required and must never fail the job. A trace that has
+    # kernels but no segmentable forward structure (no repeating marker, one blob)
+    # must still yield a valid total-only table with returncode 0, flagged as a
+    # degraded fallback -- not a non-zero exit that fails the whole analysis.
+    trace = tmp_path / "trace.sqlite"
+    con = sqlite3.connect(trace)
+    con.executescript(
+        "create table StringIds (id integer primary key, value text);"
+        "create table CUPTI_ACTIVITY_KIND_KERNEL ("
+        "  start integer, end integer, deviceId integer, shortName integer,"
+        "  gridX integer, graphId integer, streamId integer);"
+    )
+    # A handful of one-off kernels on device 0: no periodicity, so no step marker
+    # can be auto-selected and no device segments into >=2 forward steps.
+    rows = []
+    cursor = 0
+    for i in range(8):
+        con.execute("insert into StringIds values (?, ?)", (i + 1, f"oneoff_kernel_{i}"))
+        rows.append((cursor, cursor + 10 * US, 0, i + 1, 1, None, 7))
+        cursor += 10 * US
+    con.executemany(
+        "insert into CUPTI_ACTIVITY_KIND_KERNEL values (?, ?, ?, ?, ?, ?, ?)", rows,
+    )
+    con.commit()
+    con.close()
+
+    manifest_path = tmp_path / "manifest.json"
+    command = [
+        sys.executable, str(BUILDER),
+        "--sqlite", str(trace),
+        "--output-dir", str(tmp_path),
+        "--prefix", "synthetic",
+        "--manifest-out", str(manifest_path),
+    ]
+    completed = subprocess.run(command, capture_output=True, text=True)
+    assert completed.returncode == 0, completed.stderr
+
+    table = tmp_path / "synthetic_forward_pipeline_table.csv"
+    assert table.is_file()
+    with table.open(newline="") as handle:
+        table_rows = list(csv.DictReader(handle))
+    assert len(table_rows) == 1
+    assert table_rows[0]["环节类型"] == "total"
+    assert float(table_rows[0]["总耗时(us)"]) > 0
+
+    # And the degraded table must still pass the package validator's shape check.
+    validator_path = ROOT / "scripts" / "validate_analysis_package.py"
+    spec = importlib.util.spec_from_file_location("pkg_validator_fp", validator_path)
+    validator = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    spec.loader.exec_module(validator)
+    errors: list[str] = []
+    validator.validate_forward_pipeline(table, errors)
+    assert errors == [], errors
+
+    manifest = json.loads(manifest_path.read_text())
+    assert manifest["forward_pipeline"]["segmentation_failed"] is True

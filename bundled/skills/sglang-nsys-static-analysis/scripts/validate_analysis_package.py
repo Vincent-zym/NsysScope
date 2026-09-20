@@ -384,6 +384,14 @@ def validate_forward_pipeline(path: Path, errors: list[str]) -> None:
     if not step_us or step_us <= 0:
         errors.append("forward pipeline total row needs a positive 总耗时(us)")
         return
+    non_total = [r for r in rows if r.get("环节类型") != "total"]
+    if not non_total:
+        # A degraded, un-segmented fallback: the builder emits a single total row
+        # (the device's GPU wall span, flagged in 备注 and the manifest) instead of
+        # failing when a capture cannot be segmented into forward steps. The seventh
+        # table is required and must never fail the job, so a total-only table is a
+        # valid degraded shape -- there are no phases to close.
+        return
     tol = step_us * 0.005
 
     # Nesting is positional: rows after a phase row belong to it until the next one.
