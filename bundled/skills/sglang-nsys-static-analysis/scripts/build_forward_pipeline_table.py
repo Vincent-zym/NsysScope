@@ -1931,19 +1931,55 @@ def _device_kernel_span_us(cur: sqlite3.Cursor, device: Optional[int]) -> float:
     return 0.0
 
 
+def _estimate_step_count(
+    cur: sqlite3.Cursor, device: Optional[int],
+) -> Tuple[Optional[int], Optional[str], Optional[float]]:
+    """Best-effort number of forward steps from the most evenly-spaced kernel.
+
+    A once-per-forward-step kernel has near-constant inter-arrival gaps (lowest
+    coefficient of variation); a per-layer kernel is bursty across step
+    boundaries and scores worse. This is the same signal the strict marker
+    selector uses, but here we take the best candidate unconditionally -- the
+    forward duration is recoverable from any real trace even when strict
+    segmentation is not, so we return an estimate instead of giving up.
+    """
+    rows = cur.execute(
+        "select s.value, k.start from CUPTI_ACTIVITY_KIND_KERNEL k "
+        "join StringIds s on s.id = k.shortName where k.deviceId = ? order by k.start",
+        (device,),
+    ).fetchall()
+    starts: Dict[str, List[int]] = {}
+    for name, start in rows:
+        starts.setdefault(str(name), []).append(int(start))
+    best: Optional[Tuple[float, int, str]] = None
+    for name, values in starts.items():
+        if len(values) < 2:
+            continue
+        gaps = [b - a for a, b in zip(values, values[1:])]
+        if not gaps or min(gaps) <= 0:
+            continue
+        mean = sum(gaps) / len(gaps)
+        cv = (sum((g - mean) ** 2 for g in gaps) / len(gaps)) ** 0.5 / mean
+        if best is None or cv < best[0]:
+            best = (cv, len(values), name)
+    if best is None:
+        return None, None, None
+    return best[1], best[2], best[0]
+
+
 def write_degraded_forward_pipeline(
     cur: sqlite3.Cursor, args: argparse.Namespace,
     candidates: List[int], reason: str,
 ) -> bool:
     """Emit a valid but degraded forward-pipeline table instead of failing the job.
 
-    The seventh table is required, but segmentation genuinely fails on some
-    captures (no usable step marker, one forward step, markers that do not
-    reproduce the declared unit). Rather than exiting non-zero -- which used to
-    fail the whole analysis -- write a single `total` row carrying the device's
-    GPU wall span, clearly labelled as un-segmented, so the package always ships
-    the table and the report simply omits the §2.1 split. Returns False only when
-    the trace has no kernels at all (nothing measurable).
+    The seventh table is required, and a real trace always contains the forward
+    cadence even when fine per-layer/per-variant segmentation fails. So the
+    fallback still reports the forward-step duration: estimate the step count from
+    the most evenly-spaced kernel and divide the device's GPU wall span by it. Only
+    when no periodic kernel exists at all do we treat the span as a single step.
+    A single `total` row (no phases) keeps the table valid; the report then omits
+    the §2.1 split. Returns False only when the trace has no kernels at all.
     """
     busiest = cur.execute(
         "select deviceId, count(*) c from CUPTI_ACTIVITY_KIND_KERNEL "
@@ -1952,19 +1988,34 @@ def write_degraded_forward_pipeline(
     device = candidates[0] if candidates else (busiest[0] if busiest else None)
     span_us = _device_kernel_span_us(cur, device)
     if span_us <= 0:
+        device = None
         span_us = _device_kernel_span_us(cur, None)
     if span_us <= 0:
         return False
-    note = (
-        "分段失败，退化为整段 GPU 跨度（非单个 forward step，仅保证第 7 张表存在）；"
-        "原因：" + reason.replace("\n", " ")[:400]
-    )
+    step_count, marker, cv = _estimate_step_count(cur, device)
+    reason_tail = reason.replace("\n", " ")[:300]
+    if step_count and step_count >= 1:
+        forward_us = span_us / step_count
+        label = "Forward step（估算）"
+        note = (
+            f"未能精细分段，按最规律核 {marker}（发射 {step_count} 次，cv={cv:.2f}）"
+            f"估算 forward 步数：Forward step ≈ 整段 GPU 跨度 / {step_count}。原因：{reason_tail}"
+        )
+    else:
+        forward_us = span_us
+        step_count = 1
+        note = (
+            "未检出周期性核，按单个 forward step 处理（≈整段 GPU 跨度）。"
+            f"原因：{reason_tail}"
+        )
+        label = "Forward step（估算·单步）"
     total_row = {field: "" for field in FIELDS}
     total_row.update({
-        "环节": "整段 trace GPU 跨度（未分段）",
+        "环节": label,
         "环节类型": "total",
-        "总耗时(us)": f"{span_us:.3f}",
+        "总耗时(us)": f"{forward_us:.3f}",
         "占forward步(%)": "100",
+        "样本数": str(step_count),
         "备注": note,
     })
     os.makedirs(args.output_dir, exist_ok=True)
@@ -1982,7 +2033,14 @@ def write_degraded_forward_pipeline(
             "segmentation_failed": True,
             "degraded": True,
             "degradation_reason": reason,
-            "note": "un-segmented fallback: total row is the device GPU wall span",
+            "forward_step_estimate": {
+                "forward_step_us": round(forward_us, 3),
+                "estimated_step_count": step_count,
+                "span_us": round(span_us, 3),
+                "step_marker": marker,
+                "step_marker_cv": round(cv, 4) if cv is not None else None,
+            },
+            "note": "degraded fallback: forward step estimated as GPU span / step count",
         }
     }
     if args.manifest_out:
