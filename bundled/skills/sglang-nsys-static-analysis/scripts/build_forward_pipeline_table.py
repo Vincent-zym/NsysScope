@@ -1221,10 +1221,11 @@ def build_rows(
                  for total, s in zip(draft_series, steps)], parent=draft_avg,
                 note="draft 前导 / lm_head / 投机采样循环")
 
-    add("步间间隙", "gap", series("gap"),
-        note=f"整步扫描 >{gap_threshold_us:g}us 的空洞（层内停顿归该层，不计入），"
+    add("步内空隙(GPU idle)", "gap", series("gap"),
+        note=f"一个 forward step 内部的 GPU 空闲（>{gap_threshold_us:g}us 的空洞，层内停顿归该层、不计入），"
              f"命中 {gap_hole_count} 处；与各 phase 同级参与求和"
-             f"（forward step = target{' + draft' if speculative else ''} + 步间间隙）")
+             f"（forward step = target{' + draft' if speculative else ''} + 步内空隙）。"
+             "注意：这是步内空隙，不是 token 与 token 之间的间隙")
     return rows
 
 

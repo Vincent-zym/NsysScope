@@ -28,19 +28,19 @@ ORIGIN_COLUMNS = [
 OPERATOR_COLUMNS = [
     "序号", "region", "单元位置", "单元ID", "单元类型", "功能模块", "module",
     "算子名称",
-    "算子耗时(us)", "算子耗时占比(%)",
+    "算子耗时(us)", "算子耗时占比(%)", "并发占比(%)",
     "shape", "mfu", "mbu", "模块耗时(us)", "模块耗时占比(%)", "python_function",
     "功能介绍",
 ]
 CORE_COLUMNS = [
     "序号", "region", "单元位置", "单元ID", "单元类型", "功能模块", "module",
     "算子名称", "算子耗时(us)",
-    "算子耗时占比(%)", "模块耗时(us)", "模块耗时占比(%)", "shape", "mfu", "mbu",
+    "算子耗时占比(%)", "并发占比(%)", "模块耗时(us)", "模块耗时占比(%)", "shape", "mfu", "mbu",
     "python_function", "功能介绍",
 ]
 AUX_COLUMNS = [
     "序号", "region", "单元位置", "单元ID", "单元类型", "功能模块", "算子名称",
-    "算子耗时(us)", "算子耗时占比(%)", "模块耗时(us)", "模块耗时占比(%)",
+    "算子耗时(us)", "算子耗时占比(%)", "并发占比(%)", "模块耗时(us)", "模块耗时占比(%)",
     "python_function", "功能介绍",
 ]
 CLASS_COLUMNS = ["序号", "region", "算子类型", "算子数量", "总耗时(us)", "耗时占比(%)"]
@@ -830,6 +830,53 @@ def compute_mbu(
     return f"{utilization:.2f}%", None
 
 
+def concurrency_ratios(rows: list[dict[str, Any]]) -> dict[int, float]:
+    """Per kernel row (keyed by id()), the fraction of its [start,end] busy time
+    that runs concurrently with kernels on a DIFFERENT CUDA stream.
+
+    0.0 means the op ran alone -- it is on the critical path and fully counts
+    toward the wall-clock. 1.0 means it ran entirely hidden behind other streams,
+    so its busy time is double-counted against the wall-clock. This is exactly why
+    per-operator busy times sum past 100% under multi-stream overlap, and the
+    column lets a reader see which operators cause it.
+    """
+    parsed: list[tuple[int, int, str, dict[str, Any]]] = []
+    for row in rows:
+        s, e = str(row.get("start_ns", "")).strip(), str(row.get("end_ns", "")).strip()
+        if s.lstrip("-").isdigit() and e.lstrip("-").isdigit() and int(e) > int(s):
+            parsed.append((int(s), int(e), str(row.get("stream", "")), row))
+    by_stream: dict[str, list[tuple[int, int]]] = defaultdict(list)
+    for s, e, stream, _ in parsed:
+        by_stream[stream].append((s, e))
+    for stream in by_stream:
+        by_stream[stream].sort()
+    out: dict[int, float] = {}
+    for s, e, stream, row in parsed:
+        segments: list[tuple[int, int]] = []
+        for other, intervals in by_stream.items():
+            if other == stream:
+                continue
+            for a, b in intervals:
+                if b <= s:
+                    continue
+                if a >= e:
+                    break  # intervals are start-sorted, so nothing later overlaps
+                segments.append((max(a, s), min(b, e)))
+        covered = 0
+        if segments:
+            segments.sort()
+            cur_s, cur_e = segments[0]
+            for a, b in segments[1:]:
+                if a > cur_e:
+                    covered += cur_e - cur_s
+                    cur_s, cur_e = a, b
+                else:
+                    cur_e = max(cur_e, b)
+            covered += cur_e - cur_s
+        out[id(row)] = covered / (e - s)
+    return out
+
+
 def analyze_one_region(
     source_rows: list[dict[str, str]],
     taxonomy: dict[str, Any],
@@ -881,6 +928,9 @@ def analyze_one_region(
     })
     ordered_source_rows = [*kernel_rows, total_source]
 
+    # Per-operator concurrency: how much of each kernel's busy time runs hidden
+    # behind kernels on other CUDA streams. Computed once over the region's kernels.
+    ratios = concurrency_ratios(kernel_rows)
     enriched: list[dict[str, Any]] = []
     origin_rows: list[dict[str, Any]] = []
     mfu_evidence: list[dict[str, Any]] = []
@@ -953,6 +1003,7 @@ def analyze_one_region(
             ),
             "算子耗时(us)": duration,
             "算子耗时占比(%)": duration / total_duration * 100.0,
+            "并发占比(%)": ratios.get(id(row), 0.0) * 100.0,
             "shape": shape_text(shape),
             "mfu": mfu,
             "mbu": mbu,
@@ -995,6 +1046,7 @@ def analyze_one_region(
             **row,
             "算子耗时(us)": fmt(row["算子耗时(us)"]),
             "算子耗时占比(%)": fmt(row["算子耗时占比(%)"]),
+            "并发占比(%)": fmt(row.get("并发占比(%)") or 0.0),
             "模块耗时(us)": fmt(module_total),
             "模块耗时占比(%)": fmt(module_total / total_duration * 100.0),
         })
@@ -1029,6 +1081,7 @@ def analyze_one_region(
         "序号": index, **row,
         "算子耗时(us)": fmt(row["算子耗时(us)"]),
         "算子耗时占比(%)": fmt(row["算子耗时占比(%)"]),
+        "并发占比(%)": fmt(row.get("并发占比(%)") or 0.0),
         "模块耗时(us)": fmt(pattern_module_duration[row["功能模块"]]),
         "模块耗时占比(%)": fmt(pattern_module_duration[row["功能模块"]] / total_duration * 100.0),
     } for index, row in enumerate(core_source, 1)]
@@ -1053,6 +1106,7 @@ def analyze_one_region(
         "序号": index, **row,
         "算子耗时(us)": fmt(row["算子耗时(us)"]),
         "算子耗时占比(%)": fmt(row["算子耗时占比(%)"]),
+        "并发占比(%)": fmt(row.get("并发占比(%)") or 0.0),
         "模块耗时(us)": fmt(pattern_module_duration[row["功能模块"]]),
         "模块耗时占比(%)": fmt(pattern_module_duration[row["功能模块"]] / total_duration * 100.0),
     } for index, row in enumerate(aux_source, 1)]

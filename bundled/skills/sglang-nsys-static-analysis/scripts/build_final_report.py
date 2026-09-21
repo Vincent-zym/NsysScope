@@ -158,7 +158,7 @@ def pct(value: str | float, digits: int = 2) -> str:
         return "—"
 
 
-def forward_tables(rows: list[dict[str, str]]) -> list[str | None]:
+def forward_tables(rows: list[dict[str, str]], spec_declared: bool = False) -> list[str | None]:
     """Tables for 2.1/2.2.1/2.3.1: the forward step's split, target's own
     children, then draft's own children when the capture has a draft phase.
 
@@ -196,11 +196,21 @@ def forward_tables(rows: list[dict[str, str]]) -> list[str | None]:
     ]
 
     step_us = float(total.get("总耗时(us)") or 0) or 1.0
-    draft_time = ms(draft.get("总耗时(us)")) if draft else "—（未启用投机）"
-    draft_pct = pct(draft.get("占forward步(%)")) if draft else "—"
+    if draft:
+        draft_time = ms(draft.get("总耗时(us)"))
+        draft_pct = pct(draft.get("占forward步(%)"))
+    elif spec_declared:
+        # Speculative decoding IS declared (MTP/EAGLE/DSPARK), but the draft forward
+        # could not be separated from this trace, so its layers are still inside
+        # Target. Never claim "未启用投机" here -- that is simply false.
+        draft_time = "投机已启用，未定位到 draft（已并入 Target，见告警）"
+        draft_pct = "—"
+    else:
+        draft_time = "—（未启用投机）"
+        draft_pct = "—"
     first = table(
         None,
-        ["阶段", "Forward step", "Target 主模型", "Draft 模型", "Token间间隙"],
+        ["阶段", "Forward step", "Target 主模型", "Draft 模型", "步内空隙(GPU idle)"],
         [
             ("耗时(ms)", [
                 ms(total.get("总耗时(us)")), ms(target.get("总耗时(us)")),
@@ -587,6 +597,7 @@ def kernel_table(operator_rows: list[dict[str, str]], pattern_us: float,
     totals: dict[str, float] = {}
     counts: dict[str, int] = {}
     per_module: dict[str, dict[str, float]] = {}
+    overlap_wsum: dict[str, float] = {}
     for row in operator_rows:
         if not (row.get("序号") or "").strip().isdigit():
             continue
@@ -595,6 +606,7 @@ def kernel_table(operator_rows: list[dict[str, str]], pattern_us: float,
         duration = float(row.get("算子耗时(us)") or 0)
         totals[name] = totals.get(name, 0.0) + duration
         counts[name] = counts.get(name, 0) + 1
+        overlap_wsum[name] = overlap_wsum.get(name, 0.0) + duration * float(row.get("并发占比(%)") or 0)
         per_module.setdefault(name, {})
         per_module[name][module] = per_module[name].get(module, 0.0) + duration
     if not totals:
@@ -604,26 +616,30 @@ def kernel_table(operator_rows: list[dict[str, str]], pattern_us: float,
     for name, duration in ranked:
         modules = sorted(per_module[name].items(), key=lambda item: -item[1])
         module_names = "、".join(module for module, _ in modules if module)
+        overlap = overlap_wsum.get(name, 0.0) / duration if duration else 0.0
         rows.append([abbreviate_kernel_name((labels or {}).get(name, name)),
                      module_names, ms(duration),
-                     pct(duration / pattern_us * 100), str(counts[name])])
+                     pct(duration / pattern_us * 100), pct(overlap), str(counts[name])])
     lines = [
         '<p style="margin:0">按算子合计耗时从高到低排列，Top '
         f'{top_n}；同一 kernel 跨多个模块出现时，耗时/次数为跨模块合计，'
-        "所属模块列出全部（按各自贡献从高到低排序）。</p>",
+        "所属模块列出全部（按各自贡献从高到低排序）。"
+        "并发占比＝该算子与其它 CUDA 流并行（重叠）的时间比例；"
+        "高不代表可忽略——并行的可能是等长的共关键工作，也可能是被更长的核掩盖。</p>",
         TABLE_OPEN,
         "<tr>",
         *(th(cell, HEAD_BG) for cell in (
-            "序号", "算子名称", "所属模块", "耗时(ms)", "占pattern耗时", "启动次数")),
+            "序号", "算子名称", "所属模块", "耗时(ms)", "占pattern耗时", "并发占比", "启动次数")),
         "</tr>",
     ]
-    for order, (name, module_names, duration_ms, share, count) in enumerate(rows, start=1):
+    for order, (name, module_names, duration_ms, share, overlap, count) in enumerate(rows, start=1):
         lines.append("<tr>")
         lines.append(td(str(order)))
         lines.append(td(f"<code>{name}</code>"))
         lines.append(td(module_names))
         lines.append(td(duration_ms))
         lines.append(td(share))
+        lines.append(td(overlap))
         lines.append(td(count))
         lines.append("</tr>")
     # Two footer rows so the Top N can be read against the whole unit: what the
@@ -641,6 +657,7 @@ def kernel_table(operator_rows: list[dict[str, str]], pattern_us: float,
         lines.append(td("—"))
         lines.append(td(value_ms))
         lines.append(td(value_pct))
+        lines.append(td("—"))
         lines.append(td(value_count))
         lines.append("</tr>")
     lines.append("</table>")
@@ -714,9 +731,10 @@ def core_compute_table(core_rows: list[dict[str, str]],
         entry = aggregate.setdefault(key, {
             "us": 0.0, "count": 0, "mfu": [], "mbu": [], "order": (True, 0, index),
             "module": row.get("功能模块") or "", "name": row.get("算子名称") or "",
-            "shape": shape,
+            "shape": shape, "ov_wsum": 0.0,
         })
         entry["us"] += float(row.get("算子耗时(us)") or 0)
+        entry["ov_wsum"] += float(row.get("算子耗时(us)") or 0) * float(row.get("并发占比(%)") or 0)
         entry["count"] += 1
         queue = queues.get((
             row.get("单元位置") or "",
@@ -735,12 +753,14 @@ def core_compute_table(core_rows: list[dict[str, str]],
                     pass
     lines = [
         '<p style="margin:0">仅统计核心计算类算子，按执行顺序排列；'
-        "MFU/MBU 为该算子各次出现的均值，缺 shape 证据时留空。</p>",
+        "MFU/MBU 为该算子各次出现的均值，缺 shape 证据时留空。"
+        "并发占比＝该算子与其它 CUDA 流并行（重叠）的时间比例；"
+        "高不代表可忽略——可能与等长的关键工作共跑(co-critical)，也可能被更长的核掩盖。</p>",
         TABLE_OPEN,
         "<tr>",
         *(th(cell, HEAD_BG) for cell in (
             "序号", "算子名称", "所属模块", "shape", "耗时(ms)", "占pattern耗时",
-            "MFU", "MBU", "启动次数")),
+            "并发占比", "MFU", "MBU", "启动次数")),
         "</tr>",
     ]
     total_us = 0.0
@@ -758,6 +778,7 @@ def core_compute_table(core_rows: list[dict[str, str]],
         lines.append(td(f"<code>{shape}</code>"))
         lines.append(td(ms(entry["us"])))
         lines.append(td(pct(entry["us"] / pattern_us * 100)))
+        lines.append(td(pct(entry["ov_wsum"] / entry["us"] if entry["us"] else 0.0)))
         for column in ("mfu", "mbu"):
             values = entry[column]
             lines.append(td(pct(sum(values) / len(values)) if values else "—"))
@@ -770,7 +791,7 @@ def core_compute_table(core_rows: list[dict[str, str]],
         lines.append("<tr>")
         lines.append(th(label, LABEL_BG))
         lines.extend([td("—"), td("—"), td("—"), td(value_ms), td(value_pct), td("—"),
-                      td("—"), td(value_count)])
+                      td("—"), td("—"), td(value_count)])
         lines.append("</tr>")
     lines.append("</table>")
     return "\n".join(lines)
@@ -977,10 +998,21 @@ def build(package: Path, prefix: str) -> str:
 
     body = [h1("2. 分析结果")]
 
-    forward = forward_tables(read_csv(csv_dir / f"{prefix}_forward_pipeline_table.csv"))
+    spec_declared = bool((pipeline.get("declared_topology") or {}).get("speculative"))
+    forward = forward_tables(
+        read_csv(csv_dir / f"{prefix}_forward_pipeline_table.csv"), spec_declared,
+    )
     if forward[0]:
         body.append(h2("2.1 整体耗时统计"))
         body.append(forward[0])
+        # Surface segmentation conflicts right where the suspect numbers are read,
+        # not only in the tail: on a speculative / mis-segmented capture the Draft,
+        # 层数 and variant rows are unreliable even though the step total and 空隙 hold.
+        if pipeline.get("declaration_conflicts"):
+            body.append(p(
+                "⚠ 本表与 config/启动命令声明不一致：Draft、层数、variant 行存疑"
+                "（step 总时长与步内空隙不受影响，详见文末告警）。"
+            ))
 
     classification_rows = read_csv(csv_dir / f"{prefix}_op_classification_table.csv")
     core_rows = read_csv(csv_dir / f"{prefix}_core_compute_table.csv")
@@ -1005,6 +1037,13 @@ def build(package: Path, prefix: str) -> str:
         "<b>分析思路</b>：<!-- TODO 一句话写出重复 pattern 的选取依据与 pattern 耗时，"
         "100 字以内，参照 references/final_report.example.md 的同一句；"
         "不要写采样 min/max、不要重复 2.2.1 已有的单层耗时、不要下结论 -->"
+    ))
+    body.append(p(
+        "<b>口径说明</b>：下列各表按算子在各自 CUDA 流上的<b>忙碌时间</b>统计。"
+        "通信、MoE、双流等在独立流上与主流并发执行时，各自忙碌时间被分别计入、"
+        "而时间轴只推进一次，所以按算子求和会超过 100%——这是多流并发的正常结果，不做归一化。"
+        "小类(2.2.4)/核心(2.2.5) 表新增<b>并发占比</b>列＝该算子与其它流并行(重叠)的时间比例；"
+        "高不代表可忽略（可能与等长的关键工作共跑）；pattern 墙钟才是真实经过时间。"
     ))
     if forward[1]:
         body.append(h3("2.2.1 整体耗时统计"))

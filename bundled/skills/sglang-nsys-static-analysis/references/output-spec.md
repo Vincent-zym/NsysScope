@@ -50,6 +50,12 @@ manifest maps each region name to its wall-span. The column contracts below show
 the single-region form; multi-region tables are identical plus the populated
 `region` column and the repeated per-region footer rows.
 
+The operator/core/auxiliary tables also carry a `并发占比(%)` column: the fraction
+of each operator's busy time that overlaps kernels on **other** CUDA streams. It is
+a raw overlap ratio, not a critical-path verdict -- a high value can mean the op is
+hidden behind a longer kernel, or that it runs alongside an equally-long co-critical
+kernel, so it must not be read as "safe to ignore".
+
 Origin:
 
 ```text
@@ -493,12 +499,14 @@ properties broke earlier versions of this table:
   ranked by how closely their variant mix matches the declared unit and tried in that
   order; `forward_pipeline.device_candidates` and `device_rejected` record the walk.
 
-### Inter-token gap
+### Intra-step GPU idle (步内空隙)
 
-`步间间隙` counts GPU idle across the **whole step**, and only holes longer than the
-gap threshold (default `50us`, exposed as `--gap-threshold-us`). Three regions
-contribute: before the first layer (scheduler and input prep), between layers, and
-in the prep windows around the forwards.
+`步内空隙(GPU idle)` counts GPU idle **within a single forward step** (one token's
+forward), and only holes longer than the gap threshold (default `50us`, exposed as
+`--gap-threshold-us`). Three regions contribute: before the first layer (scheduler
+and input prep), between layers, and in the prep windows around the forwards. It is
+**not** the gap between tokens (steps) -- the forward-pipeline table models one step,
+so `forward step = target [+ draft] + 步内空隙`.
 
 One region is deliberately excluded: a hole **inside a layer's own wall span** stays
 in that layer, because that is the layer's stall and the layer row already reports

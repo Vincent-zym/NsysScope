@@ -939,13 +939,19 @@ def main() -> None:
         if position_wall_avg:
             break
     units = []
-    for (position, unit_id, variant), rows in sorted(
+    for ordinal, ((position, unit_id, variant), rows) in enumerate(sorted(
         unit_groups.items(), key=lambda item: (item[0][0] is None, item[0][0] or 0),
-    ):
+    ), 1):
         starts = [row["startNs"] for row in rows]
         ends = [row["endNs"] for row in rows]
         units.append({
-            "position": position,
+            # Global ordinal across the whole composite. For a single-region unit
+            # the raw per-region position is already 1..N contiguous, so this equals
+            # it; for a multi-region (schema 1.1) package where each region restarts
+            # its positions at 1, the ordinal is what keeps the frontend units index
+            # contiguous while operators/stages keep their per-region unitPosition.
+            "position": ordinal,
+            "regionPosition": position,
             "id": unit_id,
             "variant": variant,
             "layerId": next((row["layerId"] for row in rows if row.get("layerId") is not None), None),
