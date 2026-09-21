@@ -723,6 +723,59 @@ def detect_eager_draft(
     )
 
 
+def locate_draft_from_layer_tail(
+    cur: sqlite3.Cursor, device: int, info: Dict[str, Any],
+    draft_layers: Optional[int], layer_boundary: str,
+) -> None:
+    """Fallback draft location for MTP/NextN/DSPARK speculative decoding.
+
+    The marker method (``detect_eager_draft``) looks for a full second forward that
+    fires the per-forward prep kernels twice. MTP/NextN/DSPARK do not run a second
+    forward -- they append ``num_nextn_predict_layers`` extra layers to the end of
+    the same step. So when the marker cannot find the draft but the launch command
+    declares ``draft_layers`` of them, take the **last ``draft_layers`` layer blocks**
+    of each step as the draft phase, read straight from the layer-boundary marker.
+    Sets ``draft_starts`` so segment_steps' existing speculative+layers path breaks
+    them out of the target instead of hiding them. Leaves ``info`` untouched (draft
+    stays folded into target) when the tail cannot be split cleanly.
+    """
+    if not (isinstance(draft_layers, int) and draft_layers > 0):
+        return
+    starts = info.get("target_starts") or []
+    if len(starts) < 2:
+        return
+    needles = [n for n in layer_boundary.split(",") if n]
+    if not needles:
+        return
+    like = " or ".join(["s.value like ?"] * len(needles))
+    draft_starts: List[int] = []
+    for a, a2 in zip(starts, starts[1:]):
+        bounds = sorted(
+            int(row[0]) for row in cur.execute(
+                "select k.start from CUPTI_ACTIVITY_KIND_KERNEL k "
+                "join StringIds s on s.id = k.shortName "
+                f"where k.deviceId = ? and k.start >= ? and k.start < ? and ({like}) "
+                "order by k.start",
+                (device, a, a2, *[f"%{n}%" for n in needles]),
+            ).fetchall()
+        )
+        # Need strictly more than draft_layers boundaries so at least one target
+        # layer remains; otherwise this is not the expected target+draft shape.
+        if len(bounds) <= draft_layers:
+            return
+        draft_starts.append(bounds[len(bounds) - draft_layers])
+    info.update(
+        speculative=True,
+        draft_starts=draft_starts,
+        draft_children_style="layers",
+        draft_recovered_from=(
+            "layer tail: the marker could not locate a second forward, so the last "
+            f"{draft_layers} layer block(s) of each step are taken as the draft phase "
+            "(MTP/NextN/DSPARK append draft layers to the step end)"
+        ),
+    )
+
+
 def last_layer_end(
     rows: Sequence[Tuple[Any, ...]], window_start: int, window_end: int,
     layer_boundary: str, variant_cores: Dict[str, List[str]],
@@ -1189,12 +1242,22 @@ def build_rows(
             anchor_note = "、".join(anchors[:3]) + (
                 f" 等 {len(anchors)} 个" if len(anchors) > 3 else ""
             )
+            if info.get("draft_recovered_from"):
+                draft_note = (
+                    "投机的 draft forward：marker 未定位到第二次 forward，"
+                    "按声明的 draft 层数从每步末尾切出"
+                    "（MTP/NextN/DSPARK 把 draft 层追加到步尾），忙碌时间，运行到步边界"
+                )
+            else:
+                draft_note = (
+                    "投机的 draft forward：由每步恰好出现两次的 per-forward anchor 切出"
+                    f"（{anchor_note}），忙碌时间，运行到步边界"
+                )
             draft_avg = add(
                 "draft 模型", "phase", draft_series,
                 layers=sum(draft_counts.values()) or "",
                 substeps=info["speculative_tokens"] or "",
-                note="投机的 draft forward：由每步恰好出现两次的 per-forward anchor 切出"
-                     f"（{anchor_note}），忙碌时间，运行到步边界",
+                note=draft_note,
             )
             for name in draft_counts:
                 add(f"{name} 层（draft）", "variant",
@@ -1780,15 +1843,39 @@ def analyse_device(
             )
     decl = declared or {}
     policy = getattr(args, "on_declaration_conflict", "degrade")
+    declared_draft = decl.get("draft_layers")
+    declared_forwards = decl.get("draft_forwards")
+    draft_cap = (
+        declared_draft * declared_forwards
+        if isinstance(declared_draft, int) and isinstance(declared_forwards, int)
+        else None
+    )
     if info["target_graph"] is None and decl.get("speculative") is not False:
         # The launch command decides whether a draft forward exists; the trace only
         # says where it starts. With no declaration at all, fall back to requiring the
-        # trace-shape evidence to speak for itself.
+        # trace-shape evidence to speak for itself. Try the marker method first, but do
+        # not let it record the "could not locate" conflict yet -- the layer-tail
+        # fallback below covers the MTP/NextN/DSPARK shape it cannot see.
         detect_eager_draft(
             cur, device, info,
             forwards_per_step=1 + (decl.get("draft_forwards") or 1),
-            required=bool(decl.get("speculative")), policy=policy,
+            required=False, policy=policy,
         )
+        if not info["speculative"] and decl.get("speculative"):
+            # MTP/NextN/DSPARK do not run a second forward -- they append the draft
+            # model's layers to the end of the same step -- so the marker method above
+            # finds nothing. Peel the declared draft layers off each step's tail.
+            locate_draft_from_layer_tail(cur, device, info, draft_cap, layer_boundary)
+        if not info["speculative"] and decl.get("speculative"):
+            record_conflict(
+                info,
+                "the launch command declares speculative decoding, but neither the "
+                "step marker (no second forward's per-forward prep kernels) nor the "
+                "layer tail (the step's layer count does not exceed the declared draft "
+                "layers) could locate the draft phase, so this table reports it inside "
+                "the target phase -- the step total and the gap are unaffected.",
+                policy,
+            )
     if decl.get("speculative_tokens") and not info.get("speculative_tokens"):
         info["speculative_tokens"] = decl["speculative_tokens"]
     # Before segmenting: does this boundary kernel fire once per declared layer? A
@@ -1802,13 +1889,6 @@ def analyse_device(
     verify_variant_markers(
         cur, device, variant_cores, info.get("target_starts") or [], decl, info,
         policy,
-    )
-    declared_draft = decl.get("draft_layers")
-    declared_forwards = decl.get("draft_forwards")
-    draft_cap = (
-        declared_draft * declared_forwards
-        if isinstance(declared_draft, int) and isinstance(declared_forwards, int)
-        else None
     )
     steps, gap_holes = segment_steps(
         cur, device, info, args.max_steps, layer_boundary, variant_cores,
@@ -2180,6 +2260,8 @@ def main() -> None:
             "draft_boundary_source": (
                 None if not info["speculative"]
                 else "CUPTI graphId" if info["target_graph"] is not None
+                else info["draft_recovered_from"]
+                if info.get("draft_recovered_from")
                 else "per-forward anchors firing twice per step; draft phase runs to "
                      "the step boundary (its lm_head/sampling end the step)"
                 if info.get("draft_children_style") == "layers"
@@ -2187,6 +2269,7 @@ def main() -> None:
                      "(draft lm_head/sampling land in prep verify)"
             ),
             "eager_draft_evidence": info.get("eager_draft_evidence"),
+            "draft_recovered_from": info.get("draft_recovered_from"),
             "speculative": info["speculative"],
             "speculative_tokens": info["speculative_tokens"],
             "batch_size": info.get("batch_size"),

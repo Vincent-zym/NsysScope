@@ -702,3 +702,135 @@ def test_unsegmentable_trace_degrades_instead_of_failing(tmp_path: Path):
 
     manifest = json.loads(manifest_path.read_text())
     assert manifest["forward_pipeline"]["segmentation_failed"] is True
+
+
+# --- MTP/NextN/DSPARK draft-layer recovery --------------------------------------
+# The marker method (detect_eager_draft) looks for a second *forward* whose
+# per-forward prep kernels fire twice per step. MTP/NextN/DSPARK never run a
+# second forward -- they append num_nextn_predict_layers draft layers to the end
+# of the same step -- so the marker finds nothing even though the launch command
+# declares speculative decoding. That reported "投机已启用，未定位到 draft" on the
+# DSPARK / DS-V4.1 decode capture. The fallback peels the declared draft layers
+# off each step's tail; declaring nothing must leave a normal trace untouched.
+
+SPEC_STEPS = 6
+SPEC_TARGET_LAYERS = 4
+SPEC_DRAFT_LAYERS = 1        # num_nextn_predict_layers, one draft forward
+
+
+def fabricate_mtp_trace(path: Path) -> None:
+    con = sqlite3.connect(path)
+    con.executescript(
+        "create table StringIds (id integer primary key, value text);"
+        "create table CUPTI_ACTIVITY_KIND_KERNEL ("
+        "  start integer, end integer, deviceId integer, shortName integer,"
+        "  gridX integer, graphId integer, streamId integer);"
+    )
+    names: dict[str, int] = {}
+
+    def name_id(value: str) -> int:
+        if value not in names:
+            names[value] = len(names) + 1
+            con.execute("insert into StringIds values (?, ?)", (names[value], value))
+        return names[value]
+
+    rows: list[tuple[int, int, int, int, int, None, int]] = []
+    cursor = 10 * US
+
+    def emit(value: str, duration_us: int) -> None:
+        nonlocal cursor
+        rows.append((cursor, cursor + duration_us * US, 0, name_id(value), 1, None, 7))
+        cursor += duration_us * US
+
+    for _ in range(SPEC_STEPS):
+        emit("spec_step_marker", 5)                  # once per forward step
+        for _ in range(SPEC_TARGET_LAYERS):
+            emit("layer_boundary_kernel", 2)
+            emit("target_core", 40)
+        for _ in range(SPEC_DRAFT_LAYERS):            # draft layers appended to the tail
+            emit("layer_boundary_kernel", 2)
+            emit("mtp_core", 30)
+        emit("lm_head_kernel", 12)                    # draft lm_head / sampling
+        cursor += 80 * US                             # inter-step bookkeeping hole
+
+    con.executemany(
+        "insert into CUPTI_ACTIVITY_KIND_KERNEL values (?, ?, ?, ?, ?, ?, ?)", rows,
+    )
+    con.commit()
+    con.close()
+
+
+def build_mtp(tmp_path: Path, *, declare: bool) -> tuple[Path, dict]:
+    trace = tmp_path / "trace.sqlite"
+    if not trace.exists():
+        fabricate_mtp_trace(trace)
+    manifest = tmp_path / "manifest.json"
+    command = [
+        sys.executable, str(BUILDER),
+        "--sqlite", str(trace),
+        "--output-dir", str(tmp_path),
+        "--prefix", "mtp",
+        "--device", "0",
+        "--step-marker", "spec_step_marker",
+        "--layer-boundary", "layer_boundary_kernel",
+        "--variant-marker", "TARGET=target_core",
+        "--variant-marker", "MTP=mtp_core",
+        "--manifest-out", str(manifest),
+    ]
+    if declare:
+        config = tmp_path / "config.json"
+        config.write_text(json.dumps({
+            "num_hidden_layers": SPEC_TARGET_LAYERS,
+            "num_nextn_predict_layers": SPEC_DRAFT_LAYERS,
+        }))
+        launch = tmp_path / "launch.sh"
+        launch.write_text(
+            "python -m sglang.launch_server --speculative-algorithm EAGLE "
+            "--speculative-num-steps 1 --speculative-num-draft-tokens 2\n"
+        )
+        command += [
+            "--model-config", str(config),
+            "--launch", str(launch),
+            "--stage", "decode",
+        ]
+    completed = subprocess.run(command, capture_output=True, text=True)
+    assert completed.returncode == 0, completed.stderr
+    payload = json.loads(manifest.read_text())["forward_pipeline"]
+    return tmp_path / "mtp_forward_pipeline_table.csv", payload
+
+
+def test_declared_mtp_draft_recovered_from_layer_tail(tmp_path: Path):
+    # The marker cannot see a second forward, but the declaration + the layer tail
+    # locate the draft, so it must be broken out rather than folded into target.
+    table, manifest = build_mtp(tmp_path, declare=True)
+    assert manifest["speculative"] is True
+    assert "layer tail" in (manifest["draft_recovered_from"] or "")
+    assert manifest["draft_boundary_source"] == manifest["draft_recovered_from"]
+    assert manifest["draft_layers_per_step"] == SPEC_DRAFT_LAYERS
+    assert manifest["target_layers_per_step"] == SPEC_TARGET_LAYERS
+    # The declaration is satisfied: no unresolved "could not locate the draft" conflict.
+    assert not any(
+        "could not locate" in c for c in manifest["declaration_conflicts"]
+    ), manifest["declaration_conflicts"]
+
+    with table.open(newline="", encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle))
+    draft = [row for row in rows if row["环节"] == "draft 模型"]
+    assert draft and float(draft[0]["总耗时(us)"]) > 0
+    assert int(draft[0]["层数"]) == SPEC_DRAFT_LAYERS
+
+    errors: list[str] = []
+    load_validator().validate_forward_pipeline(table, errors)
+    assert errors == [], errors
+
+
+def test_undeclared_trace_is_not_split_into_a_draft_phase(tmp_path: Path):
+    # The same trace without a speculative declaration must stay single-forward:
+    # the layer-tail fallback only fires when the launch command declares a draft,
+    # so an ordinary (non-speculative) capture is never mislabelled as speculative.
+    table, manifest = build_mtp(tmp_path, declare=False)
+    assert manifest["speculative"] is False
+    assert manifest["draft_recovered_from"] is None
+    with table.open(newline="", encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle))
+    assert not [row for row in rows if row["环节"] == "draft 模型"]
