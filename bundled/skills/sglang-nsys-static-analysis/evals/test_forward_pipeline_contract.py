@@ -834,3 +834,100 @@ def test_undeclared_trace_is_not_split_into_a_draft_phase(tmp_path: Path):
     with table.open(newline="", encoding="utf-8") as handle:
         rows = list(csv.DictReader(handle))
     assert not [row for row in rows if row["环节"] == "draft 模型"]
+
+
+# --- inter-step idle must not be absorbed into the last layer --------------------
+# dsv41flash_..._0921: each ~80ms decode step ends with the layers, then a ~5ms GPU
+# idle, then a couple of next-step prep kernels before the next step marker. Because
+# the last layer's block ran boundary->step-end, its wall span jumped across the idle
+# to that trailing prep kernel, so the idle counted as "inside the last layer": the
+# step gap under-reported (0.74ms vs a real 4.6ms) and the draft phase absorbed the
+# swing (6-16ms). The layer span must stop at the first hole wider than the gap
+# threshold so the inter-step idle lands in the gap row instead.
+
+TAIL_IDLE_US = 300
+
+
+def fabricate_tail_idle_trace(path: Path) -> None:
+    con = sqlite3.connect(path)
+    con.executescript(
+        "create table StringIds (id integer primary key, value text);"
+        "create table CUPTI_ACTIVITY_KIND_KERNEL ("
+        "  start integer, end integer, deviceId integer, shortName integer,"
+        "  gridX integer, graphId integer, streamId integer);"
+    )
+    names: dict[str, int] = {}
+
+    def name_id(value: str) -> int:
+        if value not in names:
+            names[value] = len(names) + 1
+            con.execute("insert into StringIds values (?, ?)", (names[value], value))
+        return names[value]
+
+    rows: list[tuple[int, int, int, int, int, None, int]] = []
+    cursor = 10 * US
+
+    def emit(value: str, duration_us: int) -> None:
+        nonlocal cursor
+        rows.append((cursor, cursor + duration_us * US, 0, name_id(value), 1, None, 7))
+        cursor += duration_us * US
+
+    for _ in range(SPEC_STEPS):
+        emit("spec_step_marker", 5)
+        for _ in range(SPEC_TARGET_LAYERS):
+            emit("layer_boundary_kernel", 2)
+            emit("target_core", 40)
+        for _ in range(SPEC_DRAFT_LAYERS):
+            emit("layer_boundary_kernel", 2)
+            emit("mtp_core", 30)
+        emit("lm_head_kernel", 12)
+        cursor += TAIL_IDLE_US * US          # the inter-step GPU idle
+        emit("next_step_prep_kernel", 3)     # prep fires AFTER the idle, before marker
+
+    con.executemany(
+        "insert into CUPTI_ACTIVITY_KIND_KERNEL values (?, ?, ?, ?, ?, ?, ?)", rows,
+    )
+    con.commit()
+    con.close()
+
+
+def test_inter_step_idle_is_gap_not_absorbed_into_the_last_layer(tmp_path: Path):
+    fabricate_tail_idle_trace(tmp_path / "trace.sqlite")
+    config = tmp_path / "config.json"
+    config.write_text(json.dumps({
+        "num_hidden_layers": SPEC_TARGET_LAYERS,
+        "num_nextn_predict_layers": SPEC_DRAFT_LAYERS,
+    }))
+    launch = tmp_path / "launch.sh"
+    launch.write_text(
+        "python -m sglang.launch_server --speculative-algorithm EAGLE "
+        "--speculative-num-steps 1\n"
+    )
+    manifest = tmp_path / "manifest.json"
+    completed = subprocess.run([
+        sys.executable, str(BUILDER),
+        "--sqlite", str(tmp_path / "trace.sqlite"),
+        "--output-dir", str(tmp_path), "--prefix", "mtp", "--device", "0",
+        "--step-marker", "spec_step_marker",
+        "--layer-boundary", "layer_boundary_kernel",
+        "--variant-marker", "TARGET=target_core", "--variant-marker", "MTP=mtp_core",
+        "--model-config", str(config), "--launch", str(launch), "--stage", "decode",
+        "--manifest-out", str(manifest),
+    ], capture_output=True, text=True)
+    assert completed.returncode == 0, completed.stderr
+
+    table = tmp_path / "mtp_forward_pipeline_table.csv"
+    with table.open(newline="", encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle))
+    by_stage = {row["环节"]: row for row in rows}
+    gap = float(by_stage["步内空隙(GPU idle)"]["总耗时(us)"])
+    draft = float(by_stage["draft 模型"]["总耗时(us)"])
+    # The whole ~300us idle must land in the step gap, not vanish into the draft's
+    # last layer (which is ~32us of real kernels + a 12us lm_head tail).
+    assert gap > TAIL_IDLE_US * 0.9, f"gap {gap} lost the inter-step idle"
+    assert draft < TAIL_IDLE_US * 0.5, f"draft {draft} absorbed the inter-step idle"
+
+    errors: list[str] = []
+    load_validator().validate_forward_pipeline(table, errors)
+    assert errors == [], errors
+

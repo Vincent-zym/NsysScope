@@ -940,6 +940,7 @@ def segment_steps(
                 step["draft_children"] = target_children(
                     rows, draft_start, draft_end, layer_boundary, variant_cores,
                     max_layers=declared_draft_layers,
+                    gap_threshold_ns=gap_threshold_us * 1e3,
                 )
             else:
                 step["draft_children"] = draft_children(
@@ -955,6 +956,7 @@ def segment_steps(
 
         step["target_children"] = target_children(
             rows, a, target_end, layer_boundary, variant_cores,
+            gap_threshold_ns=gap_threshold_us * 1e3,
         )
 
         # Idle accounting. A hole inside a layer's wall span is that layer's own
@@ -1006,7 +1008,7 @@ def segment_steps(
 def target_children(
     rows: Sequence[Tuple[Any, ...]], phase_start: int, phase_end: int,
     layer_boundary: str, variant_cores: Dict[str, str],
-    max_layers: Optional[int] = None,
+    max_layers: Optional[int] = None, gap_threshold_ns: float = 0.0,
 ) -> Dict[str, float]:
     """Wall time per layer variant inside the target forward, plus the remainder.
 
@@ -1044,7 +1046,20 @@ def target_children(
                 if any(n in r[2] for r in block for n in needles):
                     label = name
                     break
-            blocks.append((lo, max(int(r[1]) for r in block), label))
+            # A layer's wall ends where its kernels stop being contiguous. A hole
+            # wider than the gap threshold is step idle (the inter-step scheduling
+            # bubble, the forward tail before the next step's marker), not this
+            # layer's own stall, so the span must not stretch across it. Without this
+            # the last block runs boundary->phase_end and swallows a multi-ms idle
+            # plus the next step's prep kernels into the final layer -- which both
+            # inflates that layer and hides the idle from the step gap.
+            span = sorted((int(r[0]), int(r[1])) for r in block)
+            busy_end = span[0][1]
+            for ks, ke in span:
+                if gap_threshold_ns and ks - busy_end > gap_threshold_ns:
+                    break
+                busy_end = max(busy_end, ke)
+            blocks.append((lo, busy_end, label))
 
         # The boundary kernel can fire more than once per layer (for example once
         # before attention and once before the MLP), so a block without an attention
