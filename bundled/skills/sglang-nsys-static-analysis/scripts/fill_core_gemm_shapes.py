@@ -20,6 +20,11 @@ def _dims(cfg: dict) -> dict:
     return cfg.get("text_config", cfg)
 
 
+# Per-operand storage widths (A activation, B weight, C output) by compute group.
+# fp8 blockscaled proj: fp8 activation x fp8 weight -> bf16 output; hc mixing is tf32.
+OPERAND_BYTES = {"fp8": (1, 1, 2), "tf32": (4, 4, 4)}
+
+
 def dsv41_catalog(cfg: dict) -> dict:
     """functional_module -> {dtype: [(K, N), ...]} of dense sub-GEMMs, per token.
 
@@ -75,6 +80,7 @@ def main() -> None:
     p.add_argument("--chunk-size", type=int)
     p.add_argument("--peak-fp8-tflops", type=float, default=4500.0)
     p.add_argument("--peak-tf32-tflops", type=float, default=1125.0)
+    p.add_argument("--hbm-gb-per-s", type=float, default=8000.0)
     p.add_argument("--units", type=int, default=0, help="forwards represented; 0=auto")
     args = p.parse_args()
 
@@ -100,21 +106,33 @@ def main() -> None:
         dur_us = sum(float(r.get("算子耗时(us)") or 0) for r in mrows)
         if not mrows or dur_us <= 0:
             continue
-        flops = weighted_peak = sum_nk = 0.0
+        flops = weighted_peak = sum_nk = accessed_bytes = 0.0
         for dtype, gemms in dtypes.items():
             peak = args.peak_fp8_tflops if dtype == "fp8" else args.peak_tf32_tflops
+            wa, wb, wc = OPERAND_BYTES.get(dtype, (2, 2, 2))
             for K, N in gemms:
                 sum_nk += K * N
                 flops += 2.0 * M * K * N * units
                 weighted_peak += 2.0 * M * K * N * units * peak * 1e12
+                # MBU byte model only for the fp8 projection GEMMs, whose operand
+                # widths are certain (fp8 act x fp8 weight -> bf16 out). The tiny tf32
+                # hc mixing op has an unmodeled storage width, so it is left out of the
+                # byte count (its kernel time still sits in the module denominator, so
+                # MBU stays a lower bound). Every element counted once: no tiling re-read.
+                if dtype == "fp8":
+                    accessed_bytes += (M * K * wa + K * N * wb + M * N * wc) * units
         eff_peak = weighted_peak / flops if flops else args.peak_fp8_tflops * 1e12
         mfu = flops / (dur_us * 1e-6 * eff_peak) * 100.0
+        mbu = accessed_bytes / (dur_us * 1e-6) / (args.hbm_gb_per_s * 1e9) * 100.0
+        mbu_txt = f"{mbu:.2f}%" if 0 < mbu <= 100.0 else ""
         shape_txt = f"(M={M},N={round(sum_nk / H)},K={H})"
         for r in mrows:
             r["shape"] = shape_txt
             r["mfu"] = f"{mfu:.2f}%"
+            r["mbu"] = mbu_txt
             filled += 1
-        print(f"[core-shapes] {module}: {shape_txt} MFU={mfu:.2f}% ({dur_us / units:.1f}us/步)")
+        print(f"[core-shapes] {module}: {shape_txt} MFU={mfu:.2f}% MBU={mbu:.2f}% "
+              f"({dur_us / units:.1f}us/步)")
 
     with args.core_table.open("w", newline="", encoding="utf-8") as fh:
         w = csv.DictWriter(fh, fieldnames=fields)

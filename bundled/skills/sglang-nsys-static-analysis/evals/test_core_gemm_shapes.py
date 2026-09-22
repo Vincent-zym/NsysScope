@@ -67,12 +67,12 @@ def test_tokens_from_dspark_block():
 
 
 def _write_core_csv(path: Path, rows: list[dict]) -> None:
-    fields = ["序号", "功能模块", "module", "算子名称", "算子耗时(us)", "shape", "mfu"]
+    fields = ["序号", "功能模块", "module", "算子名称", "算子耗时(us)", "shape", "mfu", "mbu"]
     with path.open("w", newline="", encoding="utf-8") as fh:
         w = csv.DictWriter(fh, fieldnames=fields)
         w.writeheader()
         for i, r in enumerate(rows, 1):
-            w.writerow({"序号": i, "shape": "", "mfu": "", **r})
+            w.writerow({"序号": i, "shape": "", "mfu": "", "mbu": "", **r})
 
 
 def test_fill_writes_module_shape_and_leaves_sparse_blank(tmp_path, monkeypatch):
@@ -107,8 +107,12 @@ def test_fill_writes_module_shape_and_leaves_sparse_blank(tmp_path, monkeypatch)
     assert qkv[0]["mfu"] == qkv[1]["mfu"] and qkv[0]["mfu"].endswith("%")
     mfu = float(qkv[0]["mfu"].rstrip("%"))
     assert 0 < mfu < 100
+    # MBU filled from the fp8 projection byte model (act fp8 x weight fp8 -> bf16 out)
+    assert qkv[0]["mbu"] == qkv[1]["mbu"] and qkv[0]["mbu"].endswith("%")
+    mbu = float(qkv[0]["mbu"].rstrip("%"))
+    assert 0 < mbu < 100
     sparse = [r for r in rows if r["功能模块"] == "MLA 稀疏核心计算"]
-    assert sparse[0]["shape"] == "" and sparse[0]["mfu"] == ""
+    assert sparse[0]["shape"] == "" and sparse[0]["mfu"] == "" and sparse[0]["mbu"] == ""
 
 
 def test_unknown_model_is_left_untouched(tmp_path, monkeypatch):
