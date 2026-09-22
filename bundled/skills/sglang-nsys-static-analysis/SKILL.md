@@ -446,6 +446,18 @@ must not be inflated by changing shapes or peaks. Attention core kernels that
 are not GEMMs should leave shape/MFU blank. Reject MFU above 100%. Leave
 shape/MFU blank when evidence is insufficient.
 
+Projection GEMMs (q/kv/o, shared expert) often run in persistent cutlass/nvjet
+kernels whose names carry no logical (M,N,K), and one functional module is split
+across a variant-dependent number of kernels, so a per-kernel shape is not
+recoverable from the trace. But N and K are fixed by the config and M is the
+token count, so the *module's* total GEMM FLOPs is known. For architectures with
+a catalog, run `scripts/fill_core_gemm_shapes.py --core-table <csv> --model-config
+<json> --stage <decode|prefill> --batch-size N` (or `--chunk-size`) after the six
+tables exist: it writes a projection-level FLOP-equivalent (M,N,K) and MFU (module
+FLOPs / measured module GPU time) onto that module's core rows, in the same
+`(M=..,N=..,K=..)` form, and leaves sparse/non-GEMM modules and unknown models
+untouched. It never guesses a per-kernel shape.
+
 ### 10. Validate
 
 Run:
